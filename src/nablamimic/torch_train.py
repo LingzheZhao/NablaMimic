@@ -226,6 +226,12 @@ class TorchTrainer:
 
         start, reset, action_noise, proprio, goal, delta, probe = self.window_inputs()
         setup_started = time.monotonic()
+        def progress(stage):
+            write_json(Path(args.out)/'setup-progress.json', dict(
+                stage=stage, elapsed_s=time.monotonic()-setup_started,
+                execution=args.execution, graphs={key: value.record for key, value in self.graphs.items()}))
+            print('Torch setup: '+stage, flush=True)
+        progress('window')
         if args.execution == 'compile-graph':
             self.graphs['window'] = CudaGraphCall(self.window, (start, reset, action_noise, proprio, goal, delta, probe),
                                                  restore=self.reset_setup_state, compile_function=False)
@@ -234,6 +240,7 @@ class TorchTrainer:
             result = self.window(start, reset, action_noise, proprio, goal, delta, probe)
         self.window_outputs = result
         self.training_data = result[3]
+        progress('action and critic targets')
         targets = self.target_fn(self.training_data['a_pi'], result[1])
         self.target_data = clone_tree(targets)
         self.critic_targets = self.td(self.training_data['r'], self.training_data['term'], self.training_data['done'], self.training_data['v2']).detach()
@@ -252,6 +259,7 @@ class TorchTrainer:
             ('critic', self.critic_update, (critic_indices,)),
             ('collector', self.collect, self.collector_inputs()),
             ('statistics', self.statistics, ())):
+            progress(name)
             if args.execution == 'compile-graph':
                 self.graphs[name] = CudaGraphCall(fn, inputs, restore=self.reset_setup_state, compile_function=False)
             else:
@@ -260,9 +268,10 @@ class TorchTrainer:
         torch.cuda.synchronize()
         self.setup_record = dict(seconds=time.monotonic()-setup_started, execution=args.execution,
                                  compilation_scope='per-control differentiable body, encoder, targets, TD, optimizers, collector, statistics',
-                                 graph_scope='complete 64-step forward/backward and separate reusable update/collector/statistics graphs',
+                                 graph_scope=f'complete {self.h}-step forward/backward and separate reusable update/collector/statistics graphs',
                                  graphs={name: graph.record for name, graph in self.graphs.items()},
                                  peak_allocated_bytes=torch.cuda.max_memory_allocated())
+        progress('ready')
 
     def reset_setup_state(self):
         """Undo all warmup/capture mutations; no simulated setup enters training."""
@@ -513,7 +522,12 @@ def main(argv=None):
         actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
         critic=nets.tree_from_jax(jax_nets.mlp_init(kc,[env.critic_dim,*jax_nets.CRITIC_HIDDEN,1]),env.device)
     started=time.monotonic()
-    trainer=TorchTrainer(env,actor,critic,args)
+    try:
+        trainer=TorchTrainer(env,actor,critic,args)
+    except BaseException as error:
+        write_json(output/'FAILED.json',dict(stage='setup',error=repr(error),
+            setup_s=time.monotonic()-started,completed_updates=0))
+        raise
     write_json(output/'execution.json',trainer.setup_record)
     torch_ffi.read_diagnostics(reset=True)
     training_started=time.monotonic();trainer.save(output,0.)

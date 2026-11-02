@@ -126,6 +126,13 @@ class CudaGraphCall:
                     result = self._function(*self._inputs)
                     del result
             restore_state()
+            self.record['memory_after_warmup'] = dict(
+                allocated=torch.cuda.memory_allocated(device), reserved=torch.cuda.memory_reserved(device))
+            # The capture owns a private allocator pool. Release unused eager
+            # warmup blocks before allocating it; live tensors remain intact.
+            torch.cuda.empty_cache()
+            self.record['memory_before_capture'] = dict(
+                allocated=torch.cuda.memory_allocated(device), reserved=torch.cuda.memory_reserved(device))
             with torch.cuda.graph(self.graph, stream=warmup_stream):
                 captured_outputs = self._function(*self._inputs)
             self.outputs = _detach_tree(captured_outputs)
@@ -134,6 +141,8 @@ class CudaGraphCall:
         finally:
             restore_state()
         self.record['compile_counters_after'] = _compile_counters()
+        self.record['memory_after_capture'] = dict(
+            allocated=torch.cuda.memory_allocated(device), reserved=torch.cuda.memory_reserved(device))
 
     def __call__(self, *inputs):
         if torch.cuda.current_stream(self._device).cuda_stream != self._stream.cuda_stream:

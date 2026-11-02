@@ -271,6 +271,33 @@ class TorchNumericsTest(unittest.TestCase):
             self.assertEqual(int(tn_count), int(jn))
         self.assertEqual(int(tn_count), 4)
 
+    def test_inductor_policy_ema_matches_jax_at_changed_counts(self):
+        initial = small_actor()
+        initial['obs_norm'] = (jnp.zeros(18), jnp.ones(18))
+        compiled = torch.compile(tn.update_policy_ema, backend='inductor', fullgraph=True,
+                                 dynamic=False, options={'triton.cudagraphs': False})
+        for count in (0, 1, 1000):
+            with self.subTest(count=count):
+                actor = jax.tree.map(lambda value: value + .1 + count*.001, initial)
+                expected = jax_ema.update_policy_ema(initial, actor, jnp.int32(count))
+                live = tn.tree_from_jax(actor)
+                actual = compiled(tn.tree_from_jax(initial), live, torch.tensor(count, dtype=torch.int32))
+                assert_tree_close(actual, expected)
+                assert_tree_close(actual[0]['anchor_dec'], live['anchor_dec'], rtol=0, atol=0)
+                assert_tree_close(actual[0]['obs_norm'], live['obs_norm'], rtol=0, atol=0)
+                self.assertEqual(actual[1].dtype, torch.int32)
+                self.assertEqual(int(actual[1]), count + 1)
+
+    def test_ema_schema_rejects_missing_extra_empty_and_nonfloating_parameters(self):
+        actor = tn.tree_from_jax(small_actor())
+        invalid = (None, {'dec': actor['dec']}, {'enc': actor['enc']},
+                   {**actor, 'unrecognized': torch.zeros(1)}, {**actor, 'enc': []},
+                   {**actor, 'dec': [(torch.ones((2, 2), dtype=torch.int32), torch.zeros(2))]})
+        for malformed in invalid:
+            with self.subTest(actor_type=type(malformed).__name__):
+                with self.assertRaises(ValueError):
+                    tn.init_policy_ema(malformed)
+
     def test_functional_regression_and_optimizer_trace_without_graph_breaks(self):
         actor = tn.tree_from_jax(small_actor())
         trainable = tn.actor_trainable(actor)

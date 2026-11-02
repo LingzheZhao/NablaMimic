@@ -329,9 +329,11 @@ def update_policy_ema(average, actor, updates):
 
 
 def _validate_ema_actor(actor):
-    if not isinstance(actor, dict) or not {'enc', 'dec'} <= actor.keys() or actor.keys() - {
-        'enc', 'dec', 'anchor_dec', 'obs_norm'
-    }:
+    # Plain membership keeps this static schema check traceable by Dynamo;
+    # set subset/difference operations are unsupported in the pinned compiler.
+    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm')
+    if (not isinstance(actor, dict) or 'enc' not in actor or 'dec' not in actor or
+            any(name not in allowed for name in actor)):
         raise ValueError('Policy EMA requires enc/dec and only optional anchor_dec/obs_norm')
     for name in ('enc', 'dec'):
         leaves = tree_leaves(actor[name])
