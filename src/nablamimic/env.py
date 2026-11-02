@@ -64,6 +64,7 @@ SCALE = dict(joint_vel=1 / 5.0, ang_vel=1 / 2.0)
 
 @dataclass(frozen=True)
 class EnvConfig:
+    decoder_position_feedback: bool = False
     solver_iterations: int = 10
     dr: bool = True                # domain randomization (training); off for evaluation
     obs_noise: bool = True
@@ -172,9 +173,11 @@ class TrackingEnv:
 
         self.set_library(lib)
         self.goal_dim = FUTURE * GOAL_FRAME_DIM + (GOAL_ANCHOR.stop - GOAL_ANCHOR.start)
+        critic_goal_dim = self.goal_dim
+        self.goal_dim += 3 if cfg.decoder_position_feedback else 0
         self.hist_dim = HIST * PROPRIO_DIM
         self.xi_dim = 1 + m.nu + 3
-        self.critic_dim = PROPRIO_DIM + ANCHOR_DIM + self.goal_dim + 1 + 3 + self.xi_dim
+        self.critic_dim = PROPRIO_DIM + ANCHOR_DIM + critic_goal_dim + 1 + 3 + self.xi_dim
 
     TABLES = ("ref_qpos", "ref_qvel", "ref_body_pos", "ref_body_quat", "ref_body_lin", "ref_body_ang",
               "ref_last", "goal_feat")
@@ -271,6 +274,12 @@ class TrackingEnv:
         if key is not None and self.cfg.obs_noise:
             lim = jnp.concatenate([jnp.full(3, 0.25), jnp.full(6, 0.05)])[sl]
             a = a + jax.random.uniform(key, a.shape, minval=-1.0, maxval=1.0) * lim
+        if self.cfg.decoder_position_feedback:
+            pos = self._anchor_rel(state.dx, state.frame)[:3]
+            if key is not None and self.cfg.obs_noise:
+                pos = pos + 0.25 * jax.random.uniform(
+                    jax.random.fold_in(key, 7143), (3,), minval=-1.0, maxval=1.0)
+            a = jnp.concatenate([pos, a])
         return jnp.concatenate([g, a])
 
     def policy_obs(self, state, key):

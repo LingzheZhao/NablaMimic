@@ -119,6 +119,20 @@ def summarize(res, env, names):
     return out
 
 
+def validate_feedback(checkpoint, cfg):
+    enabled = bool(cfg.get("decoder_position_feedback", False))
+    if bool(checkpoint.get("decoder_position_feedback", False)) != enabled:
+        raise ValueError("Checkpoint position feedback condition differs from run configuration")
+    for name in ("actor", "actor_ema"):
+        if name in checkpoint:
+            actor = checkpoint[name]
+            expected = 9 if enabled else 6
+            if "anchor_dec" in actor and actor["anchor_dec"].shape[-1] != expected:
+                raise ValueError("Checkpoint decoder feedback dimension differs from run configuration")
+            if enabled and "anchor_dec" not in actor:
+                raise ValueError("Position feedback requires a decoder feedback checkpoint")
+
+
 class EvaluationSession:
     """Reuse one nominal model and compiled rollout with explicit condition resets.
 
@@ -141,6 +155,7 @@ class EvaluationSession:
         self.env = TrackingEnv(lib, EnvConfig(solver_iterations=self.solver_iterations,
                                              dr=False, obs_noise=False, reset_noise=False,
                                              residual_action=bool(self.cfg.get("residual_action", False)),
+                                             decoder_position_feedback=bool(self.cfg.get("decoder_position_feedback", False)),
                                              action_rate_space="setpoint"))
         self.env.warp = sim.make_warp(self.env, [len(self.env.starts)], train=False,
                                       forward_only=self.forward_only)
@@ -163,6 +178,7 @@ class EvaluationSession:
         policy = policy or ("ema" if self.cfg.get("policy_ema", False) else "live")
         with (self.run / "ckpt" / f"it_{iteration:06d}.pkl").open("rb") as handle:
             checkpoint = pickle.load(handle)
+        validate_feedback(checkpoint, self.cfg)
         if int(checkpoint["iter"]) != int(iteration):
             raise ValueError("Checkpoint label does not match the requested iteration")
         actor = jax.tree_util.tree_map(jnp.asarray, evaluation_actor(checkpoint, policy))
@@ -279,6 +295,7 @@ def main(argv=None):
     lib = load_library(names, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False,
                                      reset_noise=False, residual_action=bool(cfg.get("residual_action", False)),
+                                     decoder_position_feedback=bool(cfg.get("decoder_position_feedback", False)),
                                      action_rate_space="setpoint"))
     nclip = len(env.starts)
     env.warp = sim.make_warp(env, [nclip], train=False, forward_only=args.forward_only)
@@ -301,6 +318,7 @@ def main(argv=None):
             continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as f:
             ck = pickle.load(f)
+        validate_feedback(ck, cfg)
         actor = jax.tree_util.tree_map(jnp.asarray, evaluation_actor(ck, policy))
         t0 = time.time()
         res = jax.device_get(fn(actor, jnp.asarray(starts), jax.random.PRNGKey(1), env.tables()))
