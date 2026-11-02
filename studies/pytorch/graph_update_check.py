@@ -49,6 +49,9 @@ def main():
     parser.add_argument('--reference-execution', choices=('eager', 'compile'), default='eager',
                         help='Reference path: eager tests compilation plus capture; compile isolates capture/storage '
                              'and does not test compiler-versus-eager equivalence (default: eager)')
+    parser.add_argument('--matmul-precision', choices=('fp32', 'tf32'), default='fp32',
+                        help='Precision for both paths: fp32 disables TF32; tf32 uses production CUDA matmul '
+                             'TF32 permission with cuDNN TF32 disabled (default: fp32)')
     args = parser.parse_args()
     reference_mode = args.reference_execution
     modes = (reference_mode, 'compile-graph')
@@ -68,7 +71,9 @@ def main():
             reference_execution=reference_mode,
             rtol=RTOL, atol=ATOL, finite_required=True, integer_boolean_exact=True,
             initial_persistent_state_bitwise=True, cpu_cuda_rng_bitwise=True,
-            precision='FP32 highest, CUDA matmul/cudnn TF32 disabled',
+            matmul_precision=args.matmul_precision,
+            precision=('FP32 highest, CUDA matmul/cudnn TF32 disabled' if args.matmul_precision == 'fp32' else
+                       'FP32 tensors, production CUDA matmul TF32 permission enabled, cuDNN TF32 disabled'),
             engine_options=OPTIONS, randomized_resets=True, observation_noise=True, domain_randomization=True,
             termination_rule='Matched term/done/frame support arrays exactly; falls and partial episodes retained',
             exact_support_fields=['training_data.term', 'training_data.done', 'training_data.frame',
@@ -83,7 +88,9 @@ def main():
                       'frame probabilities', 'collector', 'complete small replay', 'training data', 'action targets',
                       'critic targets', 'actual window inputs and explicit noise',
                       'window loss/action gradients/clipping statistics', 'CPU/CUDA RNG', 'counters'],
-            untested=['full-size memory/performance', 'TF32 training transform', 'long-training fidelity']+
+            untested=['full-size memory/performance']+
+                     (['TF32 training transform'] if args.matmul_precision == 'fp32' else [])+
+                     ['long-training fidelity']+
                      (['compiler-versus-eager equivalence'] if reference_mode == 'compile' else [])))
     started = time.monotonic()
     private_tmp = None
@@ -144,9 +151,16 @@ def main():
         require('single_visible_gpu', torch.cuda.is_available() and torch.cuda.device_count() == 1)
         torch.cuda.set_device(0)
         torch.set_num_threads(8)
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
         torch.set_float32_matmul_precision('highest')
+        torch.backends.cuda.matmul.allow_tf32 = args.matmul_precision == 'tf32'
+        torch.backends.cudnn.allow_tf32 = False
+        record['observed_precision'] = dict(
+            float32_matmul_precision=torch.get_float32_matmul_precision(),
+            cuda_matmul_allow_tf32=bool(torch.backends.cuda.matmul.allow_tf32),
+            cudnn_allow_tf32=bool(torch.backends.cudnn.allow_tf32))
+        require('matmul_precision_configuration',
+                record['observed_precision']['cuda_matmul_allow_tf32'] == (args.matmul_precision == 'tf32') and
+                not record['observed_precision']['cudnn_allow_tf32'], observed=record['observed_precision'])
         torch._dynamo.config.suppress_errors = False
         require('expected_gpu', torch.cuda.get_device_name(0) == args.expected_gpu_model,
                 actual=torch.cuda.get_device_name(0))
