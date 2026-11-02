@@ -10,7 +10,8 @@ centre-of-mass offset, written into the model arrays of each world before every 
 
 Both FFI callbacks are captured as CUDA graphs (JaxCallableGraphMode.WARP_STAGED). Construct
 WarpPhysics before tracing anything that calls it: that loads every Warp module and runs the
-callbacks once outside any capture. One instance per batch size; one process per GPU.
+callbacks once outside any capture. Each instance owns its mutable buffers for a fixed batch size;
+concurrent evaluation workers use separate processes.
 
 The patched MuJoCo Warp of scripts/setup_mujoco_warp.sh is required (the base adjoint plus patches/mujoco_warp); its
 backward switches are read when mujoco_warp is imported, so import this module only after mjw_options.configure().
@@ -298,6 +299,9 @@ class WarpPhysics:
         """Restore in place after compilation and before an independent condition."""
         if self._evaluation_state is None:
             raise RuntimeError("Capture initialized evaluation state before the first rollout")
+        roots = self._evaluation_state.roots
+        if roots["model"] is not self.sim.m or roots["data"] is not self.sim.df:
+            raise RuntimeError("Native evaluation model or data root was replaced")
         return self._evaluation_state.restore()
 
     def _warmup(self, warm_recompute=False):

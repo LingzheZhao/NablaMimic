@@ -10,7 +10,7 @@ from unittest.mock import patch
 import jax.numpy as jnp
 import numpy as np
 
-from nablamimic import evaluate, evaluation_state
+from nablamimic import evaluate, evaluation_state, warp_physics
 
 
 class FakeArray:
@@ -94,6 +94,23 @@ class PersistentStateTest(unittest.TestCase):
         model.iterations = 20
         with self.assertRaisesRegex(RuntimeError, "static values"):
             saved.restore()
+
+    def test_top_level_native_replacement_is_rejected_before_copy(self):
+        for replaced in ("model", "data"):
+            with self.subTest(replaced=replaced):
+                model, data, saved = self.fixture()
+                physics = object.__new__(warp_physics.WarpPhysics)
+                physics._evaluation_state = saved
+                physics.sim = SimpleNamespace(m=model, df=data)
+                # Equal fields/array addresses do not make a replacement object
+                # the original root retained by captured callback closures.
+                if replaced == "model":
+                    physics.sim.m = NativeModel(model.iterations, model.friction, model.branches)
+                else:
+                    physics.sim.df = NativeData(data.overflow, data.warm, data.contact)
+                with self.assertRaisesRegex(RuntimeError, "root was replaced"):
+                    physics.reset_evaluation_state()
+                self.assertEqual(saved.reset_count, 0)
 
 
 class PersistentSessionTest(unittest.TestCase):
