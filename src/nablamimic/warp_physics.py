@@ -10,7 +10,8 @@ centre-of-mass offset, written into the model arrays of each world before every 
 
 Both FFI callbacks are captured as CUDA graphs (JaxCallableGraphMode.WARP_STAGED). Construct
 WarpPhysics before tracing anything that calls it: that loads every Warp module and runs the
-callbacks once outside any capture. One instance per batch size; one process per GPU.
+callbacks once outside any capture. Each instance owns its mutable buffers for a fixed batch size;
+concurrent evaluation workers use separate processes.
 
 The patched MuJoCo Warp of scripts/setup_mujoco_warp.sh is required (the base adjoint plus patches/mujoco_warp); its
 backward switches are read when mujoco_warp is imported, so import this module only after mjw_options.configure().
@@ -67,24 +68,26 @@ def _accum(a: wp.array2d(dtype=float), out: wp.array2d(dtype=float)):
 class _Sim:
     """MJWarp model and forward/backward buffers for one device and batch size."""
 
-    def __init__(self, mjm, nworld, foot_pairs, torso_id, nconmax, njmax):
+    def __init__(self, mjm, nworld, foot_pairs, torso_id, nconmax, njmax, forward_only=False):
         mjd = mujoco.MjData(mjm)
         mujoco.mj_forward(mjm, mjd)
         self.m = mjw.put_model(mjm, batch_sizes={"pair_friction": nworld, "body_ipos": nworld})
         self.m.opt.warn_overflow = 0
         kw = dict(nworld=nworld, nconmax=nconmax, njmax=njmax)
         self.df = mjw.put_data(mjm, mjd, **kw)
-        self.D = [mjw.put_data(mjm, mjd, **kw) for _ in range(SUBSTEPS + 1)]
-        for a in (self.D[0].qpos, self.D[0].qvel, self.D[0].ctrl):
-            a.requires_grad = True
-        self.bc = mjw.create_backward_context(self.m, self.D[0])
+        if not forward_only:
+            self.D = [mjw.put_data(mjm, mjd, **kw) for _ in range(SUBSTEPS + 1)]
+            for a in (self.D[0].qpos, self.D[0].qvel, self.D[0].ctrl):
+                a.requires_grad = True
+            self.bc = mjw.create_backward_context(self.m, self.D[0])
         self.foot_pairs = wp.array(np.asarray(foot_pairs, np.int32), dtype=int)
         self.torso = int(torso_id)
         self.base_ipos = wp.vec3(*mjm.body_ipos[torso_id].astype(np.float32))
         self.nworld = nworld
         self.nv = int(mjm.nv)
         # the warm-started recompute runs one solver iteration (same arrays, so DR applies to both views)
-        self.m_ws = dataclasses.replace(self.m, opt=dataclasses.replace(self.m.opt, iterations=1))
+        if not forward_only:
+            self.m_ws = dataclasses.replace(self.m, opt=dataclasses.replace(self.m.opt, iterations=1))
 
     def _dr(self, friction, com):
         wp.launch(_set_dr, dim=self.nworld,
@@ -177,14 +180,21 @@ def mjx_capacity(mjm):
 
 class WarpPhysics:
     def __init__(self, mjm, nworld, foot_pairs, torso_id, capacity_factor=2.0, nconmax=None, njmax=None,
-                 rne_vjp=False, warm_recompute=False):
+                 rne_vjp=False, warm_recompute=False, forward_only=False, evaluation=False):
         """nconmax / njmax: contacts and constraint rows per world (default: capacity_factor x MJX's padding);
         rne_vjp: install g1_fast.adjoint_patch (reverse-mode RNE VJP in the adjoint, same gradients);
         warm_recompute: the forward keeps each substep's converged acceleration as a residual and the backward's
-        recompute starts its solver there with one iteration (_Sim.backward_ws)."""
+        recompute starts its solver there with one iteration (_Sim.backward_ws).
+        forward_only: preserve the same forward operation but omit adjoint buffers and warmup;
+        requesting derivatives then raises instead of silently returning zero gradients."""
         import jax
         import jax.numpy as jnp
 
+        if forward_only and (rne_vjp or warm_recompute):
+            raise ValueError("forward_only cannot enable adjoint options")
+        self.forward_only = bool(forward_only)
+        self.evaluation = bool(evaluation)
+        self._evaluation_state = None
         ncon, nefc = mjx_capacity(mjm)
         self.nconmax, self.njmax = int(np.ceil(capacity_factor * ncon)), int(np.ceil(capacity_factor * nefc))
         self.nconmax, self.njmax = int(nconmax or self.nconmax), int(njmax or self.njmax)
@@ -192,10 +202,13 @@ class WarpPhysics:
             from .g1_fast import adjoint_patch
             adjoint_patch.install(mjm)  # before the warm-up, so its buffers are allocated outside any capture
         wp.config.quiet = True
+        # Keep the patched SDK's global kernel/dispatch registration unchanged.
+        # forward_only removes unused per-instance adjoint resources, not this setup.
         mjw.enable_grad()
         dev = wp.get_device("cuda:0")
         with wp.ScopedDevice(dev):
-            self.sim = _Sim(mjm, nworld, foot_pairs, torso_id, self.nconmax, self.njmax)
+            self.sim = _Sim(mjm, nworld, foot_pairs, torso_id, self.nconmax, self.njmax,
+                            forward_only=self.forward_only)
             self._warmup(warm_recompute)
             wp.synchronize_device(dev)
         sim = self.sim
@@ -206,6 +219,21 @@ class WarpPhysics:
                    warm_out: wp.array2d(dtype=float)):
             sim.forward(qpos, qvel, warm, ctrl, friction, com, qpos_out, qvel_out, warm_out)
 
+        gm = wp.JaxCallableGraphMode.WARP_STAGED
+        fwd_call = wp.jax_callable(fwd_cb, num_outputs=3, graph_mode=gm)
+        if self.forward_only:
+            @jax.custom_jvp
+            def forward_step(qpos, qvel, warm, ctrl, friction, com):
+                dims = {"qpos_out": qpos.shape, "qvel_out": qvel.shape, "warm_out": warm.shape}
+                return tuple(fwd_call(qpos, qvel, warm, ctrl, friction, com, output_dims=dims))
+
+            @forward_step.defjvp
+            def reject_derivative(primals, tangents):
+                raise RuntimeError("forward_only WarpPhysics cannot be differentiated")
+
+            self.step = forward_step
+            return
+
         def bwd_cb(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float), warm: wp.array2d(dtype=float),
                    ctrl: wp.array2d(dtype=float), friction: wp.array(dtype=float), com: wp.array2d(dtype=float),
                    g_qpos: wp.array2d(dtype=float), g_qvel: wp.array2d(dtype=float),
@@ -213,8 +241,6 @@ class WarpPhysics:
                    gu_out: wp.array2d(dtype=float)):
             sim.backward(qpos, qvel, warm, ctrl, friction, com, g_qpos, g_qvel, gq_out, gv_out, gu_out)
 
-        gm = wp.JaxCallableGraphMode.WARP_STAGED
-        fwd_call = wp.jax_callable(fwd_cb, num_outputs=3, graph_mode=gm)
         bwd_call = wp.jax_callable(bwd_cb, num_outputs=3, graph_mode=gm)
 
         def fwd_res_cb(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float), warm: wp.array2d(dtype=float),
@@ -260,6 +286,24 @@ class WarpPhysics:
         step.defvjp(step_fwd, step_bwd)
         self.step = step
 
+    def capture_evaluation_state(self):
+        """Keep initialized native arrays for an explicit persistent nominal session."""
+        if not self.evaluation:
+            raise ValueError("Only nominal evaluation physics may capture condition reset state")
+        if self._evaluation_state is not None:
+            raise RuntimeError("The initial evaluation state has already been captured")
+        from .evaluation_state import WarpEvaluationState
+        self._evaluation_state = WarpEvaluationState(self.sim.m, self.sim.df, wp.get_device("cuda:0"))
+
+    def reset_evaluation_state(self):
+        """Restore in place after compilation and before an independent condition."""
+        if self._evaluation_state is None:
+            raise RuntimeError("Capture initialized evaluation state before the first rollout")
+        roots = self._evaluation_state.roots
+        if roots["model"] is not self.sim.m or roots["data"] is not self.sim.df:
+            raise RuntimeError("Native evaluation model or data root was replaced")
+        return self._evaluation_state.restore()
+
     def _warmup(self, warm_recompute=False):
         s, nw = self.sim, self.sim.nworld
         z = lambda a: wp.zeros_like(a, requires_grad=False)  # noqa: E731
@@ -267,6 +311,8 @@ class WarpPhysics:
         com = wp.zeros((nw, 3), dtype=float)
         s.forward(s.df.qpos, s.df.qvel, s.df.qacc_warmstart, s.df.ctrl, fr, com,
                   z(s.df.qpos), z(s.df.qvel), z(s.df.qvel))
+        if self.forward_only:
+            return
         s.backward(s.df.qpos, s.df.qvel, s.df.qacc_warmstart, s.df.ctrl, fr, com,
                    z(s.df.qpos), z(s.df.qvel), z(s.df.qpos), z(s.df.qvel), z(s.df.ctrl))
         if warm_recompute:

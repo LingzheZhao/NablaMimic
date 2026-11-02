@@ -75,10 +75,13 @@ def engine_info(phys):
     return {k: i.get(k) for k in ("version", "commit", "dirty", "key", "arch", "built", "consts_sha256")}
 
 
-def make_warp(env, sizes, train=True, adj_normal=0, adj_parallel=0, ift_solve=0):
+def make_warp(env, sizes, train=True, adj_normal=0, adj_parallel=0, ift_solve=0, forward_only=False):
     """{batch size: warp_physics.WarpPhysics}. train: the training setting (64 contacts and 192 constraint rows per
     world, reverse-mode RNE VJP in the adjoint, warm-started recompute, sensors disabled) with the backward switches of
-    patches/mujoco_warp (mjw_options); otherwise the forward-only evaluation setting (capacity from MJX's padding)."""
+    patches/mujoco_warp (mjw_options); otherwise the evaluation setting (capacity from MJX's padding).
+    forward_only explicitly omits unused evaluation adjoint initialization and rejects differentiation."""
+    if train and forward_only:
+        raise ValueError("Training requires differentiable Warp physics")
     from . import mjw_options
     mjw_options.configure(False, adj_normal, 1e-3, adj_parallel, 0.0, ift_solve)
     from .warp_physics import WarpPhysics
@@ -87,4 +90,5 @@ def make_warp(env, sizes, train=True, adj_normal=0, adj_parallel=0, ift_solve=0)
         print(f"MuJoCo Warp backward options: {mjw_options.active()}", flush=True)
         fast = dict(nconmax=64, njmax=192, rne_vjp=True, warm_recompute=True)
         env.m.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_SENSOR)  # sensors are never read
-    return {b: WarpPhysics(env.m, b, np.asarray(env.foot_pairs), env.torso_id, **fast) for b in sizes}
+    return {b: WarpPhysics(env.m, b, np.asarray(env.foot_pairs), env.torso_id,
+                           forward_only=forward_only, evaluation=not train, **fast) for b in sizes}
