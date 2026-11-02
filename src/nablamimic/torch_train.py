@@ -267,7 +267,7 @@ class TorchTrainer:
         self.reset_setup_state()
         torch.cuda.synchronize()
         self.setup_record = dict(seconds=time.monotonic()-setup_started, execution=args.execution,
-                                 compilation_scope='per-control differentiable body, encoder, targets, TD, optimizers, collector, statistics',
+                                 compilation_scope='per-control differentiable body, encoder, targets, TD, optimizers, collector transition, statistics; collector commits are separate captured kernels',
                                  graph_scope=f'complete {self.h}-step forward/backward and separate reusable update/collector/statistics graphs',
                                  graphs={name: graph.record for name, graph in self.graphs.items()},
                                  peak_allocated_bytes=torch.cuda.max_memory_allocated())
@@ -340,21 +340,34 @@ class TorchTrainer:
                                                     b2=.999, element_clip=None)
             nets.copy_tree_(self.critic, params); nets.copy_tree_(self.critic_opt, optimizer)
             return value, norm, lr
-        def collect(reset, action_noise, proprio_noise, goal_noise):
+        def collector_transition(collector, reset, action_noise, proprio_noise, goal_noise):
             with torch.no_grad():
-                history, goal = env.policy_obs(self.collector, goal_noise)
+                history, goal = env.policy_obs(collector, goal_noise)
                 action = nets.actor_apply(self.actor, history, goal)+action_noise
-                stepped = env.step(self.collector, action, proprio_noise)
+                stepped = env.step(collector, action, proprio_noise)
                 term = env.terminated(stepped)
                 done = term | env.clip_ended(stepped) | (stepped['ep'] >= args.max_episode_steps)
-                state = state_where(done, reset, stepped)
+                return state_where(done, reset, stepped), term.to(torch.float32).mean()
+
+        self.collector_transition = (compile_fullgraph(collector_transition)
+                                     if args.execution != 'eager' else collector_transition)
+
+        def collect(reset, action_noise, proprio_noise, goal_noise):
+            # Materialize the complete next state before mutating collector or
+            # replay storage. Compiling transition and copy-back together lets
+            # Inductor fuse the shifted history read with its overlapping write,
+            # producing a cross-block race. This boundary preserves the copy
+            # contract; CUDA capture still records all commit kernels below.
+            with torch.no_grad():
+                state, termination_rate = self.collector_transition(
+                    self.collector, reset, action_noise, proprio_noise, goal_noise)
                 position = (self.replay_ptr[0] + torch.arange(self.nc, device=self.device)) % self.replay_size
                 for key, value in env.compact(state).items():
                     self.replay[key].index_copy_(0, position, value)
                 nets.copy_tree_(self.collector, state)
                 self.replay_ptr.copy_(torch.stack(((self.replay_ptr[0]+self.nc) % self.replay_size,
                                                     torch.clamp_max(self.replay_ptr[1]+self.nc, self.replay_size))))
-                return term.to(torch.float32).mean()
+                return termination_rate
         def statistics():
             with torch.no_grad():
                 self.sampler.update(self.training_data, self.critic_targets, self.cnorm)
@@ -362,7 +375,8 @@ class TorchTrainer:
                 nets.copy_tree_(self.ema, average); self.ema_count.copy_(count)
                 self.outer_step.add_(1)
                 return self.ema_count.clone()
-        for name, function in dict(regression=regression, critic_update=critic_update, collect=collect,
+        self.collect = collect
+        for name, function in dict(regression=regression, critic_update=critic_update,
                                    statistics=statistics).items():
             setattr(self, name, compile_fullgraph(function) if args.execution != 'eager' else function)
 

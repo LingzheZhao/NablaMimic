@@ -73,6 +73,8 @@ def main():
             termination_rule='Matched term/done/frame support arrays exactly; falls and partial episodes retained',
             exact_support_fields=['training_data.term', 'training_data.done', 'training_data.frame',
                                   'collector.frame', 'collector.ep', 'replay.frame', 'replay.ep'],
+            independent_history_rule='For every saved collector transition, continuing histories shift exactly '
+                                    'one row; a reset repeats its first row ten times. Compare bits in each mode.',
             automatic_fallback=False,
             bfloat16_storage='Saved as exact FP32 values in NPZ; runtime regression storage remains BF16',
             optimizer_schedule='Current recipe including warmup; no schedule acceleration for this check',
@@ -252,6 +254,57 @@ def main():
                       graph_record['replays'] == count,
                       captured=graph_record['captured'], replays=graph_record['replays'], expected_replays=count)
 
+        def replay_history_checks(mode, phase, values, previous):
+            """Check copies within each trajectory, independently of backend parity.
+
+            The previous collector snapshot supplies the predecessor even when
+            the ring wraps. Refuse to inspect overwritten intermediate states.
+            """
+            total = int(values['counters.total_collector_steps'])
+            history, episode = values['collector.hist'], values['collector.ep']
+            pointer = int(values['replay_ptr'][0])
+            current = dict(total=total, history=history.copy(), episode=episode.copy(), pointer=pointer)
+            if previous is None:
+                require(mode+'.history.initial_collector_steps', total == 0, actual=total)
+                return current  # Constructor warmup/capture is not a training transition.
+            prefix = f'{mode}.update{phase}.history'
+            pool, ages = values['replay.hist'], values['replay.ep']
+            count, batch = total-previous['total'], len(episode)
+            require(prefix+'.retained_transitions', batch > 0 and len(pool) % batch == 0 and
+                    0 <= count <= len(pool)//batch and history.shape[1:] == (10, 93) and
+                    pool.shape[1:] == history.shape[1:] and pool.dtype == history.dtype == np.float32,
+                    new_collector_steps=count, replay_rows=len(pool), collector_batch=batch)
+            expected_pointer = (previous['pointer']+count*batch) % len(pool)
+            require(prefix+'.write_pointer', pointer == expected_pointer,
+                    actual=pointer, expected=expected_pointer)
+            old_history, old_episode = previous['history'], previous['episode']
+            for offset in range(count):
+                step = previous['total']+offset+1
+                positions = (previous['pointer']+offset*batch+np.arange(batch)) % len(pool)
+                new_history, new_episode = pool[positions], ages[positions]
+                continuing = new_episode == old_episode+1
+                reset = new_episode == 0
+                step_name = prefix+f'.step{step}'
+                check(step_name+'.episode_boundary', (continuing | reset).all(),
+                      continuing_count=int(continuing.sum()), reset_count=int(reset.sum()),
+                      replay_rows=positions.tolist())
+                # uint32 compares the original FP32 storage, including signed zero.
+                # Every copied history value has an exact predecessor; no float
+                # tolerance is appropriate for this structural copy contract.
+                shifted = (new_history[:, :-1].view(np.uint32) != old_history[:, 1:].view(np.uint32))
+                shifted &= continuing[:, None, None]
+                repeated = (new_history.view(np.uint32) != new_history[:, :1].view(np.uint32))
+                repeated &= reset[:, None, None]
+                for name, mismatch in (('continuation_shift', shifted), ('reset_repeat', repeated)):
+                    check(step_name+'.'+name, not mismatch.any(), exact=True,
+                          differing_elements=int(mismatch.sum()),
+                          affected_environments=np.flatnonzero(mismatch.any(axis=(1, 2))).tolist(),
+                          continuing_count=int(continuing.sum()), reset_count=int(reset.sum()))
+                old_history, old_episode = new_history, new_episode
+            check(prefix+'.collector_matches_last_replay',
+                  history.tobytes() == old_history.tobytes() and np.array_equal(episode, old_episode), exact=True)
+            return current
+
         class ObserveReferenceWindow:
             """Record the actual return without changing inputs, outputs or math."""
             def __init__(self, function):
@@ -297,6 +350,7 @@ def main():
             observer = ObserveReferenceWindow(trainer.window) if mode == reference_mode else None
             if observer is not None:
                 trainer.window = observer
+            previous_history = None
             for phase in range(UPDATES+1):
                 metrics = None
                 if phase:
@@ -317,6 +371,7 @@ def main():
                 for name, value in values.items():
                     check(f'{mode}.update{phase}.finite.{name}', np.isfinite(value).all())
                 np.savez(mode_root/f'update_{phase:02d}.npz', **values)
+                previous_history = replay_history_checks(mode, phase, values, previous_history)
                 if mode == 'compile-graph':
                     compare_snapshots(phase, values)
                 write(mode_root/f'execution_{phase:02d}.json', dict(
@@ -325,7 +380,7 @@ def main():
                                      *np.random.get_state()[2:]], python_rng_state=random.getstate()))
                 save()
                 del values
-            del trainer, actor, critic, observer, window_result, window_inputs
+            del trainer, actor, critic, observer, window_result, window_inputs, previous_history
             gc.collect()
             torch.cuda.synchronize()
             torch.cuda.empty_cache()

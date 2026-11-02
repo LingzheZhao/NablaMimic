@@ -35,6 +35,9 @@ eager and compiled graph modes at N=8/H=4 with the full networks. Initial state
 and RNG/noise are exact; finite float comparisons use rtol 1e-4 and atol 1e-5.
 Termination, reset and frame support must match exactly; a matching termination
 remains visible and is not itself a transformation failure.
+Each mode also independently checks every retained collector transition: a
+continuing history shifts exactly one row, while a reset repeats its first row.
+These are exact copy checks, so shared history corruption cannot pass by agreement.
 Its optional `--reference-execution compile` instead compares uncaptured compiled
 updates with compiled CUDA Graph updates, isolating capture and storage reuse.
 That separate condition keeps the same state, RNG, support and numerical rules;
