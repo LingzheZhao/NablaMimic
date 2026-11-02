@@ -56,6 +56,7 @@ from .env import BM_BODIES, GOAL_ANCHOR, EnvConfig, TrackingEnv
 from .motion import all_clip_names, load_library
 from .nets import actor_apply, actor_decode, actor_encode, actor_init, clip_rows_to_median, critic_apply, normalize
 from .params import git_state, latest_checkpoint, resolve_params
+from .policy_ema import init_policy_ema, update_policy_ema
 from .sim import BIN, select_reset, vmapped
 
 # Fixed settings of this release (recorded in config.json; the evaluators of the same names read them).
@@ -265,6 +266,10 @@ def build_parser():
                     help="learning rate of the regression steps' Adam (same clipping, betas and schedule as the actor's)")
     ap.add_argument("--action-target-delta-floor", type=float, default=1.0,
                     help="<1 with --lr-decay-steps: the step DELTA follows the same cosine, down to this fraction")
+    ap.add_argument("--policy-ema", action="store_true",
+                    help="average encoder and decoder once after each outer action-target update; use EMA weights "
+                         "for evaluation, live weights for training. Fresh runs only: exact training-state resume "
+                         "is not implemented. First decay uses n=0, with n the preceding EMA update count")
     ap.add_argument("--critic-pre-state", action="store_true",
                     help="fit the critic on the state each transition starts from (whose lambda-return the target is); "
                          "default: the state after the transition")
@@ -315,6 +320,18 @@ def main(argv=None):
     argv, params_info = resolve_params(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)
     out = Path(args.out)
+    if args.policy_ema:
+        if args.shac_strict:
+            ap.error("--policy-ema does not support --shac-strict")
+        if args.resume:
+            ap.error("--policy-ema requires a fresh run: RNG, collector/replay and continuation-state resume "
+                     "is not implemented; restoring weights and optimizers alone is not exact continuation")
+        if not args.action_target:
+            ap.error("--policy-ema requires --action-target")
+        if args.action_target[0] < 1 or not args.action_target[0].is_integer():
+            ap.error("--policy-ema requires a positive integer regression minibatch count")
+        if out.exists() and any(out.iterdir()):
+            ap.error("--policy-ema requires an empty output directory")
     if args.resume == "latest":
         args.resume = latest_checkpoint(out)
     use_at = bool(args.action_target)
@@ -757,6 +774,11 @@ def main(argv=None):
               f"({sum(x[0].nbytes for x in jax.tree_util.tree_leaves(buf)) / 2**30:.1f} GiB)", flush=True)
     else:
         buf = rep(dict(count=jnp.int32(0)))  # unused placeholder
+    if args.policy_ema:
+        actor_ema, ema_updates = init_policy_ema(actor)
+        # Compile separately before the training clock, and leave the live actor
+        # as the sole policy used by collector, BPTT and target regression.
+        p_ema = jax.jit(update_policy_ema).lower(actor_ema, actor, ema_updates).compile()
     p_actor = jax.pmap(actor_step, axis_name="d", in_axes=(0,) * 9 + (None, 0), donate_argnums=(10,))
     p_critic = jax.pmap(critic_step, axis_name="d")
     p_stats = jax.pmap(stats_step, axis_name="d", in_axes=(0, 0, 0, None, 0))
@@ -772,12 +794,21 @@ def main(argv=None):
     col_acc, col_terms = 0.0, []
 
     def save(path, it, wall_s, env_steps):
+        completed_updates = env_steps // (n * nd * args.horizon)
+        ema_fields = dict(ema_updates=0)
+        if args.policy_ema:
+            count = int(ema_updates)
+            if count != completed_updates:
+                raise RuntimeError(f"EMA count {count} != completed outer updates {completed_updates}")
+            ema_fields = dict(actor_ema=jax.device_get(first(actor_ema)), ema_updates=count)
         tmp = path.with_suffix(".tmp")
         with open(tmp, "wb") as f:
             pickle.dump(dict(actor=jax.device_get(first(actor)), critic=jax.device_get(first(critic)),
                              cnorm=jax.device_get(first(cnorm)), st_a=jax.device_get(first(st_a)),
                              st_c=jax.device_get(first(st_c)), bin_q=jax.device_get(first(bin_q)),
                              **({"st_r": jax.device_get(first(buf["opt"]))} if "opt" in buf else {}),
+                             **ema_fields, evaluation_policy="ema" if args.policy_ema else "live",
+                             completed_updates=completed_updates,
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file
 
@@ -822,6 +853,10 @@ def main(argv=None):
         else:
             actor, st_a, state, pool, ptr, outs, loss, gnorm, buf = p_actor(actor, st_a, critic, cnorm, state, pool,
                                                                             ptr, probs, keys_now, tables, buf)
+        if args.policy_ema:
+            # p_actor has completed the entire M-minibatch regression scan.
+            # Never feed these averaged weights back into the training path.
+            actor_ema, ema_updates = p_ema(actor_ema, actor, ema_updates)
         gn = float(gnorm[0])
         if args.shac_strict and not (math.isfinite(gn) and gn <= SHAC_GUARD):  # SHAC raises here; not applied
             save(out / "ckpt" / f"it_{it:06d}.pkl", it, time.time() - t_start, env_steps)
@@ -843,6 +878,7 @@ def main(argv=None):
             o = first(outs)
             rec = {"iter": it, "wall_s": time.time() - t_start, "iter_s": time.time() - t1,
                    "env_steps": env_steps, "actor_loss": float(loss[0]), "grad_norm": float(gnorm[0]),
+                   **({"ema_updates": int(ema_updates)} if args.policy_ema else {}),
                    "grad_norms": [round(x, 4) for x in gnorms],
                    "dq_rms": [round(x, 5) for x in dqs],
                    "dq_env_q": dq_qs,

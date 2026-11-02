@@ -6,7 +6,8 @@ training) and fp32 matmuls, in the run's action space with the action-rate term 
 reward for absolute and residual actions). Per checkpoint: full_norm_return (the reward summed over each whole clip, a
 fall forfeiting the rest, divided by its maximum, averaged over clips), alive_frac, failed_frac, return_per_alive_step,
 fall causes (height / tilt test of TrackingEnv.terminated), every reward term per alive step and per 10 s of clip time,
-joint errors and per-clip values. Results are merged into the --out JSON under it<N>/nominal; existing keys are skipped.
+joint errors and per-clip values. Results are merged under it<N>/nominal/<policy>; existing keys are skipped.
+EMA runs use EMA weights by default. --policy live explicitly measures the training actor separately.
 
   python -m nablamimic.eval_plan RUN                       # the checkpoints of the protocol
   python -m nablamimic.evaluate --run RUN --iters 250 500 ... --out RUN/eval_nominal.json
@@ -26,6 +27,7 @@ from . import jax_cache, sim
 from .env import BM_BODIES, W, EnvConfig, TrackingEnv, _gravity_b
 from .motion import all_clip_names, load_library
 from .nets import actor_apply
+from .params import evaluation_actor
 from .sim import vmapped
 
 BIN = 500  # steps per time bin (10 s)
@@ -123,6 +125,8 @@ def build_parser():
     ap.add_argument("--iters", type=int, nargs="+", required=True, help="checkpoint iterations")
     ap.add_argument("--solver-iterations", type=int, default=10, help="Newton iterations of the evaluation physics")
     ap.add_argument("--out", required=True, help="JSON file the results are merged into")
+    ap.add_argument("--policy", choices=("live", "ema"),
+                    help="weights to execute; default is EMA for --policy-ema training, otherwise live")
     return ap
 
 
@@ -132,6 +136,7 @@ def main(argv=None):
     jax.config.update("jax_default_matmul_precision", "highest")
     run = Path(args.run)
     cfg = json.loads((run / "config.json").read_text())
+    policy = args.policy or ("ema" if cfg.get("policy_ema", False) else "live")
     names = all_clip_names() if cfg["clips"] == ["all"] else cfg["clips"]
     lib = load_library(names, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False,
@@ -144,22 +149,26 @@ def main(argv=None):
     fn = make_rollout(env, steps)
     out_path = Path(args.out)
     out = json.loads(out_path.read_text()) if out_path.exists() else {}
+    if out and (out.get("run") != str(run) or out.get("solver_iterations") != args.solver_iterations):
+        raise ValueError("Existing evaluation output belongs to a different run or solver configuration")
     out.setdefault("clips", names)
     out.setdefault("terms", list(TERMS))
     out.setdefault("run", str(run))
+    out.setdefault("solver_iterations", args.solver_iterations)
     for it in sorted(set(args.iters)):
-        key = f"it{it}/nominal"
+        key = f"it{it}/nominal/{policy}"
         if key in out:
             continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as f:
             ck = pickle.load(f)
-        actor = jax.tree_util.tree_map(jnp.asarray, ck["actor"])
+        actor = jax.tree_util.tree_map(jnp.asarray, evaluation_actor(ck, policy))
         t0 = time.time()
         res = jax.device_get(fn(actor, jnp.asarray(starts), jax.random.PRNGKey(1), env.tables()))
         rec = summarize(res, env, names)
         rec.update(iter=int(ck["iter"]), wall_s=float(ck["wall_s"]), seconds=round(time.time() - t0, 1),
                    gpu=jax.devices()[0].device_kind, solver_iterations=args.solver_iterations,
-                   action_rate_space="setpoint")
+                   action_rate_space="setpoint", policy=policy,
+                   completed_updates=ck["completed_updates"], ema_updates=ck["ema_updates"])
         out[key] = rec
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(out))

@@ -1,0 +1,8 @@
+# Current paper recipe on NablaEngine, with the same residual actions and full workload.
+# A reset starts a new contribution within the window, with its own discount and
+# detached reset state. EMA updates once after all eight regression minibatches;
+# its first beta uses n=0. Training always uses the live actor. Fresh runs only.
+@base/action_target.args
+--policy-ema --lr-warmup-steps 100
+--physics engine --residual-action
+--hours 3

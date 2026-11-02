@@ -9,6 +9,20 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 
+def evaluation_actor(checkpoint, policy):
+    """Select a declared set of weights; an absent EMA is an error, never a live fallback."""
+    if policy not in ("live", "ema"):
+        raise ValueError(f"Unknown evaluation policy: {policy}")
+    if policy == "ema":
+        if checkpoint["evaluation_policy"] != "ema":
+            raise ValueError("Checkpoint does not declare EMA evaluation")
+        count = checkpoint["ema_updates"]
+        if type(count) is not int or count < 0 or count != checkpoint["completed_updates"]:
+            raise ValueError("EMA count must equal completed outer updates")
+        return checkpoint["actor_ema"]
+    return checkpoint["actor"]
+
+
 def read_params(path, seen=()):
     """Arguments from a configuration file: whitespace-separated as on a command line, '#' starts a comment, a line
     '@FILE' includes another file (relative to this one's directory); the last value of an option wins."""
