@@ -36,7 +36,8 @@ data = ["huggingface_hub"]  # scripts/download_lafan1.sh, scripts/download_bones
 test = ["pytest"]
 
 [project.urls]
-Repository = "https://github.com/OamIcs/NablaMimic"
+Repository = "https://github.com/LingzheZhao/NablaMimic"
+Upstream = "https://github.com/OamIcs/NablaMimic"
 
 [tool.setuptools.packages.find]
 where = ["src"]

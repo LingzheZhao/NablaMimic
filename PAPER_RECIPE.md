@@ -57,7 +57,7 @@ from its first frame, no randomization or observation/reset noise, and each
 clip's missing post-termination tail contributes zero to its full normalized
 return. Keep every clip and its executed support visible.
 
-For the comparison to the running released-recipe baseline, retain the same
+For comparison with the released-recipe baseline, retain the same
 externally pinned dependency image, reference cache, robot assets, and
 capacity-corrected NablaEngine condition: 288 solver rows and the same tape
 representation. Keep that engine correction separate from these three recipe
@@ -88,7 +88,7 @@ optimization does not assume it is independent of forward kernel dispatch.
 Differentiating the forward-only instance fails explicitly.
 
 Evaluation outputs declare `forward_only` at both the root and checkpoint record,
-and reject merging distinct initialization modes. Each process still creates
+and reject merging distinct initialization modes. Without `--persistent`, each process creates
 fresh physics and retains sticky capacity flags. Validate fixed-checkpoint
 scalar, per-clip, and observed-trajectory agreement before adopting the option;
 removing unused initialization is not proof of numerical equivalence. Measure
