@@ -180,6 +180,11 @@ class _ActionCotangentClip(torch.autograd.Function):
         return clipped, None, statistics
 
 
+# Keep the custom VJP intact through Dynamo's torch.func tracing. Without this
+# boundary, Torch 2.9 can inline only forward and silently lose backward
+# (pytorch/pytorch#193279). AOTAutograd/Inductor still trace the whole operation;
+# every tensor is an explicit argument, with no captured tensors or mutation.
+@torch.compiler.allow_in_graph
 def clip_rows_to_median(action, kappa, probe=None):
     """Identity in the forward; clip the action cotangent only during backward."""
     if probe is None:

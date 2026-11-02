@@ -196,6 +196,13 @@ class TorchTrainer:
                              cnorm=clone_tree(self.cnorm), bin_q=self.sampler.bin_q.clone(),
                              rng=torch.cuda.get_rng_state(), cpu_rng=torch.get_rng_state())
         self.reset_setup_state()
+        # The pinned Engine lazily constructs its autograd class on the first
+        # differentiable step. Register it through the public API before Dynamo
+        # traces the control body; one forward needs no backward or RNG draw.
+        with torch.enable_grad():
+            env.step({key: value[:1] for key, value in self.collector.items()},
+                     torch.zeros((1, env.nu), device=self.device, requires_grad=True),
+                     torch.zeros((1, 93), device=self.device))
 
         def encode(actor_, frames, reset_frames):
             offsets = torch.arange(self.h, device=self.device)[:, None]

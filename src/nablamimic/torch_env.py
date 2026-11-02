@@ -36,18 +36,25 @@ def quat_inv(q):
 
 
 def quat_rotate(v, q):
-    """Rotate by a unit wxyz quaternion, preserving batch broadcasting."""
+    """MJX's quaternion polynomial, including its ambient quaternion derivative.
+
+    Replacing w²-u·u by 1-2u·u preserves unit-quaternion values but changes the
+    derivative with respect to the four quaternion components.
+    """
     vector, qvector = torch.broadcast_tensors(v, q[..., 1:])
-    t = 2.0 * torch.linalg.cross(qvector, vector, dim=-1)
-    return vector + q[..., :1] * t + torch.linalg.cross(qvector, t, dim=-1)
+    scalar = q[..., :1]
+    uv = (qvector*vector).sum(-1, keepdim=True)
+    uu = (qvector*qvector).sum(-1, keepdim=True)
+    rotated = 2*(uv*qvector)+(scalar*scalar-uu)*vector
+    return rotated+2*scalar*torch.linalg.cross(qvector, vector, dim=-1)
 
 
 def quat_to_matrix(q):
     w, x, y, z = q.unbind(-1)
     return torch.stack((
-        1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y),
-        2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x),
-        2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)), -1).reshape(q.shape[:-1] + (3, 3))
+        w*w+x*x-y*y-z*z, 2*(x*y-w*z), 2*(x*z+w*y),
+        2*(x*y+w*z), w*w-x*x+y*y-z*z, 2*(y*z-w*x),
+        2*(x*z-w*y), 2*(y*z+w*x), w*w-x*x-y*y+z*z), -1).reshape(q.shape[:-1] + (3, 3))
 
 
 def yaw_quat(q):

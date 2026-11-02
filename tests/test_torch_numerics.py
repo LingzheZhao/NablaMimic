@@ -320,6 +320,39 @@ class TorchNumericsTest(unittest.TestCase):
         action, probe = x[0], torch.zeros(2)
         assert_tree_close(compiled_derivative(action, probe), derivative(action, probe), rtol=0, atol=0)
 
+    def test_inductor_preserves_custom_vjp_and_closed_loop_gradient(self):
+        def objective(state, probe):
+            for _ in range(3):
+                action = torch.tanh(.3 * state)
+                state = state + tn.clip_rows_to_median(action, .7, probe)
+            return (state ** 2).sum()
+
+        def reference(state, probe):
+            for _ in range(3):
+                action = jnp.tanh(.3 * state)
+                state = state + jax_nets.clip_rows_to_median(action, .7, probe)
+            return (state ** 2).sum()
+
+        compiled_forward = torch.compile(objective, backend='inductor', fullgraph=True,
+                                         dynamic=False, options={'triton.cudagraphs': False})
+        compiled_derivative = torch.compile(torch.func.grad(objective, argnums=(0, 1)),
+                                            backend='inductor', fullgraph=True, dynamic=False,
+                                            options={'triton.cudagraphs': False})
+        for offset in (0., -.2):
+            values = np.arange(10, dtype=np.float32).reshape(5, 2) / 10 + offset
+            state = torch.tensor(values, requires_grad=True)
+            probe = torch.zeros(2, requires_grad=True)
+            loss = compiled_forward(state, probe)
+            gradients = torch.autograd.grad(loss, (state, probe))
+            expected_loss, expected_gradients = jax.value_and_grad(reference, argnums=(0, 1))(
+                jnp.asarray(values), jnp.zeros(2))
+            assert_tree_close(loss, expected_loss)
+            assert_tree_close(gradients, expected_gradients)
+            # torch.func transforms used to silently discard this custom VJP
+            # under Dynamo even while normal autograd kept it. Check both paths.
+            actual = compiled_derivative(torch.tensor(values), torch.zeros(2))
+            assert_tree_close(actual, expected_gradients)
+
 
 if __name__ == '__main__':
     unittest.main()

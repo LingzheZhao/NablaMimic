@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from nablamimic.torch_env import (COMPACT_KEYS, STATE_KEYS, TorchTrackingEnv, abs_real, gravity_b,
-                                 quat_angle_sq, quat_mul, quat_rotate, select_reset)
+                                 quat_angle_sq, quat_mul, quat_rotate, quat_to_matrix, select_reset)
 
 
 def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
@@ -224,6 +224,32 @@ class TorchEnvironmentTest(unittest.TestCase):
 
 class DonorMathParityTest(unittest.TestCase):
     """Compare current JAX task formulas on fresh state tensors, without a simulator."""
+
+    def test_quaternion_rotation_and_matrix_values_and_full_jacobians(self):
+        import jax
+        import jax.numpy as jnp
+        from mujoco.mjx._src import math as mjm
+
+        generic = np.array([.8, -.3, .2, .4], np.float32)
+        generic /= np.linalg.norm(generic)
+        quaternions = (np.array([1., 0., 0., 0.], np.float32),
+                       np.array([0., 1., 0., 0.], np.float32), generic, 1.1*generic)
+        vector = torch.tensor([.3, -.7, 1.2])
+        jvector = jnp.asarray(vector.numpy())
+        for value in quaternions:
+            with self.subTest(quaternion=value.tolist()):
+                quaternion = torch.tensor(value, requires_grad=True)
+                jquaternion = jnp.asarray(value)
+                for torch_fn, jax_fn in ((lambda q: quat_rotate(vector, q), lambda q: mjm.rotate(jvector, q)),
+                                         (quat_to_matrix, mjm.quat_to_mat)):
+                    np.testing.assert_allclose(torch_fn(quaternion).detach().numpy(), np.asarray(jax_fn(jquaternion)),
+                                               rtol=1e-6, atol=1e-6)
+                    actual = torch.autograd.functional.jacobian(torch_fn, quaternion)
+                    expected = jax.jacrev(jax_fn)(jquaternion)
+                    np.testing.assert_allclose(actual.numpy(), np.asarray(expected), rtol=1e-6, atol=1e-6)
+                actual = torch.autograd.functional.jacobian(lambda v: quat_rotate(v, quaternion), vector)
+                expected = jax.jacrev(lambda v: mjm.rotate(v, jquaternion))(jvector)
+                np.testing.assert_allclose(actual.numpy(), np.asarray(expected), rtol=1e-6, atol=1e-6)
 
     def test_absolute_value_forward_bits_and_boundary_gradient(self):
         import jax
