@@ -1,5 +1,9 @@
 """CPU storage/layout contracts; real CUDA capture is tested separately."""
 import unittest
+import importlib.util
+
+if importlib.util.find_spec("torch") is None:
+    raise unittest.SkipTest("Optional PyTorch backend is not installed")
 
 import torch
 

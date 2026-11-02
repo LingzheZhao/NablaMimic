@@ -6,6 +6,10 @@ functional mathematics, not CUDA-graph support or simulator equivalence.
 import pickle
 from types import SimpleNamespace
 import unittest
+import importlib.util
+
+if importlib.util.find_spec("torch") is None:
+    raise unittest.SkipTest("Optional PyTorch backend is not installed")
 
 import jax
 import jax.numpy as jnp

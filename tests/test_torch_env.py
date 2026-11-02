@@ -2,6 +2,10 @@
 
 from types import SimpleNamespace
 import unittest
+import importlib.util
+
+if importlib.util.find_spec("torch") is None:
+    raise unittest.SkipTest("Optional PyTorch backend is not installed")
 
 import numpy as np
 import torch
