@@ -5,7 +5,7 @@ native forward dynamics and adjoint. It is an experimental reproduction path;
 validation results and convergence must be established before claiming equivalence
 or a speed improvement. BM integration is outside this study.
 
-`python -m nablamimic.torch_train @ours_torch.args --out FRESH_OUTPUT` selects
+`python -m nablamimic.torch_train --config configs/ours_torch.args --out FRESH_OUTPUT` selects
 fullgraph Inductor compilation and explicit CUDA Graphs. Compilation covers the
 control body, reference encoder, action targets, TD targets, collector, optimizers
 and statistics. Explicit graphs capture the entire differentiable window and
