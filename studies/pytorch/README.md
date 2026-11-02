@@ -79,3 +79,9 @@ keep all forty clips, failures and time supports visible. Report reward, complet
 and physical tracking fidelity separately. A terminal Torch state also records
 optimizers, counters, RNG, replay and collector state; resumed execution is
 explicitly refused until its restoration path is validated.
+
+The [contact-capacity protocol](CAPACITY_PROTOCOL.md) checks the separate
+96-contact/416-row Engine condition against the prior valid 64-contact condition,
+real collision discovery above 64 contacts, overflow protection, and independent
+Jacobian/Hessian references. These capacity checks supplement the execution and
+training checks above; they do not establish convergence or motion fidelity.
