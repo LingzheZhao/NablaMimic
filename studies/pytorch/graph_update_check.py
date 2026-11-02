@@ -1,9 +1,12 @@
-"""Compare actual eager and compiled CUDA-graph TorchTrainer updates.
+"""Compare actual eager or compiled TorchTrainer updates with CUDA-graph updates.
 
 One native model and all forty reference clips are shared. Each trainer starts
 from the same initial weights and seed, with the real randomized collector,
 replay, differentiable window, actor/critic Adam updates and policy EMA. This is
 a bounded transformation check, not a long-training or motion-fidelity result.
+The default eager reference tests compilation plus graph capture. A compile
+reference isolates capture/storage and does not establish compiler-versus-eager
+equivalence; it is a separate condition with the same strict numerical rules.
 """
 import argparse
 from dataclasses import asdict
@@ -27,7 +30,6 @@ from training_check import write
 RTOL, ATOL = 1e-4, 1e-5
 SEED, BATCH, HORIZON, UPDATES = 0, 8, 4, 2
 REPLAY_STEPS, REGRESSION_BATCH = 8, 64
-MODES = ('eager', 'compile-graph')
 GRAPH_NAMES = ('window', 'regression', 'critic', 'collector', 'statistics')
 
 
@@ -44,18 +46,26 @@ def main():
     parser.add_argument('--engine-capacity-revision', required=True)
     parser.add_argument('--jax-cache-seed', type=Path, default=os.environ.get('NABLA_ENGINE_CACHE_SEED'))
     parser.add_argument('--expected-gpu-model', default='NVIDIA CMP 170HX')
+    parser.add_argument('--reference-execution', choices=('eager', 'compile'), default='eager',
+                        help='Reference path: eager tests compilation plus capture; compile isolates capture/storage '
+                             'and does not test compiler-versus-eager equivalence (default: eager)')
     args = parser.parse_args()
+    reference_mode = args.reference_execution
+    modes = (reference_mode, 'compile-graph')
     if os.environ.get('DK_ALLOW_UNSUPPORTED'):
         parser.error('Unsupported-physics bypass is forbidden')
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    record = dict(status='running', started_utc=datetime.now(timezone.utc).isoformat(),
+    record = dict(compiler_environment=dict(TRITON_DEFAULT_FP_FUSION=os.environ.get('TRITON_DEFAULT_FP_FUSION', 'unset; Triton default true')), status='running', started_utc=datetime.now(timezone.utc).isoformat(),
         argv=sys.argv, python=sys.executable, checks=[], failures=[], modes={},
         source_revision=args.source_revision, engine_base_revision=args.engine_base_revision,
         engine_capacity_revision=args.engine_capacity_revision,
         initial_checkpoint=str(args.initial_checkpoint.resolve()), reference_cache=str(args.reference_cache.resolve()),
-        scope=__doc__, protocol=dict(seed=SEED, batch=BATCH, horizon=HORIZON, updates=UPDATES,
-            replay_steps=REPLAY_STEPS, regression_batch=REGRESSION_BATCH, modes=list(MODES),
+        scope=('Compilation and CUDA Graph capture versus eager execution.' if reference_mode == 'eager' else
+               'CUDA Graph capture/storage versus uncaptured compiled execution; excludes compiler-versus-eager equivalence.'),
+        protocol=dict(seed=SEED, batch=BATCH, horizon=HORIZON, updates=UPDATES,
+            replay_steps=REPLAY_STEPS, regression_batch=REGRESSION_BATCH, modes=list(modes),
+            reference_execution=reference_mode,
             rtol=RTOL, atol=ATOL, finite_required=True, integer_boolean_exact=True,
             initial_persistent_state_bitwise=True, cpu_cuda_rng_bitwise=True,
             precision='FP32 highest, CUDA matmul/cudnn TF32 disabled',
@@ -66,12 +76,13 @@ def main():
             automatic_fallback=False,
             bfloat16_storage='Saved as exact FP32 values in NPZ; runtime regression storage remains BF16',
             optimizer_schedule='Current recipe including warmup; no schedule acceleration for this check',
-            window_observation='Actual eager call return, or graph.outputs immediately after update; never stale setup output',
+            window_observation='Actual uncaptured reference call return, or graph.outputs immediately after update; never stale setup output',
             compared=['actor', 'critic', 'Adam moments/counts', 'EMA/count', 'normalizer', 'reset-bin statistics',
                       'frame probabilities', 'collector', 'complete small replay', 'training data', 'action targets',
                       'critic targets', 'actual window inputs and explicit noise',
                       'window loss/action gradients/clipping statistics', 'CPU/CUDA RNG', 'counters'],
-            untested=['full-size memory/performance', 'TF32 training transform', 'long-training fidelity']))
+            untested=['full-size memory/performance', 'TF32 training transform', 'long-training fidelity']+
+                     (['compiler-versus-eager equivalence'] if reference_mode == 'compile' else [])))
     started = time.monotonic()
     private_tmp = None
 
@@ -199,24 +210,24 @@ def main():
             failures = {}
             exact_initial = ('actor.', 'critic.', 'ema.', 'actor_opt.', 'critic_opt.', 'ema_count', 'cnorm.',
                              'bin_q', 'probabilities', 'collector.', 'replay.', 'replay_ptr', 'counters.')
-            with np.load(root/'eager'/f'update_{phase:02d}.npz', allow_pickle=False) as expected:
+            with np.load(root/reference_mode/f'update_{phase:02d}.npz', allow_pickle=False) as expected:
                 require(f'update{phase}.snapshot_keys', set(expected.files) == set(actual),
-                        eager=sorted(expected.files), graph=sorted(actual))
+                        **{reference_mode: sorted(expected.files), 'graph': sorted(actual)})
                 for name, graph_value in actual.items():
-                    eager_value = expected[name]
-                    same = eager_value.shape == graph_value.shape and eager_value.dtype == graph_value.dtype
-                    finite = bool(np.isfinite(eager_value).all() and np.isfinite(graph_value).all())
-                    exact = eager_value.dtype.kind in 'biu' or name.startswith(('rng.',
+                    reference_value = expected[name]
+                    same = reference_value.shape == graph_value.shape and reference_value.dtype == graph_value.dtype
+                    finite = bool(np.isfinite(reference_value).all() and np.isfinite(graph_value).all())
+                    exact = reference_value.dtype.kind in 'biu' or name.startswith(('rng.',
                         'window_inputs.action_noise', 'window_inputs.proprio_noise', 'window_inputs.goal_noise',
                         'window_inputs.delta', 'window_inputs.probe')) or (
                         phase == 0 and name.startswith(exact_initial))
                     if same and finite:
-                        difference = graph_value.astype(np.float64)-eager_value.astype(np.float64)
-                        mismatch = (graph_value != eager_value) if exact else (
-                            np.abs(difference) > ATOL+RTOL*np.abs(eager_value))
-                        equal = eager_value.tobytes() == graph_value.tobytes() if exact else not mismatch.any()
+                        difference = graph_value.astype(np.float64)-reference_value.astype(np.float64)
+                        mismatch = (graph_value != reference_value) if exact else (
+                            np.abs(difference) > ATOL+RTOL*np.abs(reference_value))
+                        equal = reference_value.tobytes() == graph_value.tobytes() if exact else not mismatch.any()
                         max_abs = float(np.abs(difference).max()) if difference.size else 0.
-                        ratio = float((np.abs(difference)/(ATOL+RTOL*np.abs(eager_value))).max()) if difference.size and not exact else None
+                        ratio = float((np.abs(difference)/(ATOL+RTOL*np.abs(reference_value))).max()) if difference.size and not exact else None
                     else:
                         equal, max_abs, ratio, mismatch = False, None, None, None
                     if not check(f'update{phase}.{name}', equal, shape=list(graph_value.shape),
@@ -224,12 +235,12 @@ def main():
                                  max_abs_difference=max_abs, max_tolerance_ratio=ratio,
                                  differing_elements=int(mismatch.sum()) if mismatch is not None else None):
                         if same:
-                            failures[name] = graph_value.astype(np.float64)-eager_value.astype(np.float64)
+                            failures[name] = graph_value.astype(np.float64)-reference_value.astype(np.float64)
             if failures:
                 np.savez(root/f'failed_differences_update_{phase:02d}.npz', **failures)
 
         def graph_counts(trainer, mode, phase):
-            if mode == 'eager':
+            if mode == reference_mode:
                 require(f'{mode}.update{phase}.no_graphs', not trainer.graphs)
                 return
             expected = dict(window=phase+1, collector=int(phase/0.4), regression=phase*8,
@@ -241,7 +252,7 @@ def main():
                       graph_record['replays'] == count,
                       captured=graph_record['captured'], replays=graph_record['replays'], expected_replays=count)
 
-        class ObserveEagerWindow:
+        class ObserveReferenceWindow:
             """Record the actual return without changing inputs, outputs or math."""
             def __init__(self, function):
                 self.function, self.result, self.inputs = function, None, None
@@ -250,7 +261,7 @@ def main():
                 self.result = self.function(*inputs)
                 return self.result
 
-        for mode in MODES:
+        for mode in modes:
             mode_root = root/mode
             mode_root.mkdir()
             overrides = ['--config', str(args.config.resolve()), '--out', str(mode_root),
@@ -283,7 +294,7 @@ def main():
                     diagnostics=diagnostics)
             record['modes'][mode] = dict(setup=json.loads(json.dumps(trainer.setup_record)), updates=[])
             write(mode_root/'setup.json', trainer.setup_record)
-            observer = ObserveEagerWindow(trainer.window) if mode == 'eager' else None
+            observer = ObserveReferenceWindow(trainer.window) if mode == reference_mode else None
             if observer is not None:
                 trainer.window = observer
             for phase in range(UPDATES+1):
@@ -297,11 +308,11 @@ def main():
                         collector_steps=collector_steps,
                         collector_terminations=round(metrics['collector_termination_rate']*collector_steps*BATCH))
                     record['modes'][mode]['updates'].append(metrics)
-                window_result = (trainer.window_outputs if phase == 0 else observer.result) if mode == 'eager' else trainer.graphs['window'].outputs
+                window_result = (trainer.window_outputs if phase == 0 else observer.result) if mode == reference_mode else trainer.graphs['window'].outputs
                 require(f'{mode}.update{phase}.window_observed', window_result is not None)
                 graph_counts(trainer, mode, phase)
                 window_inputs = None if phase == 0 else (
-                    observer.inputs if mode == 'eager' else trainer.graphs['window']._inputs)
+                    observer.inputs if mode == reference_mode else trainer.graphs['window']._inputs)
                 values = snapshot(trainer, window_result, metrics, window_inputs)
                 for name, value in values.items():
                     check(f'{mode}.update{phase}.finite.{name}', np.isfinite(value).all())
@@ -329,7 +340,7 @@ def main():
         if private_tmp:
             shutil.rmtree(private_tmp, ignore_errors=True)
     if record['failures']:
-        raise SystemExit('Eager/graph update comparison failed; inspect result.json and retained arrays')
+        raise SystemExit(reference_mode+'/graph update comparison failed; inspect result.json and retained arrays')
 
 
 if __name__ == '__main__':

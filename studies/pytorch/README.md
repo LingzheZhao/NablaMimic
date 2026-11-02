@@ -35,6 +35,12 @@ eager and compiled graph modes at N=8/H=4 with the full networks. Initial state
 and RNG/noise are exact; finite float comparisons use rtol 1e-4 and atol 1e-5.
 Termination, reset and frame support must match exactly; a matching termination
 remains visible and is not itself a transformation failure.
+Its optional `--reference-execution compile` instead compares uncaptured compiled
+updates with compiled CUDA Graph updates, isolating capture and storage reuse.
+That separate condition keeps the same state, RNG, support and numerical rules;
+it does not establish compiler-versus-eager equivalence or replace an eager
+comparison. The default remains `--reference-execution eager`. Every condition
+uses a fresh output root, retaining earlier failures.
 
 The planned full comparison uses one CMP 170HX, seed 0, all forty 50 Hz LAFAN1
 clips, 4,096 training and collector worlds, a 64-control window, 1,000 replay
