@@ -75,3 +75,22 @@ collector, and EMA compilation, but includes lazy critic/statistics compilation
 and checkpoint work; retain that accounting when comparing with the existing
 baseline and disclose its difference from the paper's compilation-excluded
 training time. Training rewards alone do not replace the executed evaluation.
+
+## Optional evaluation initialization
+
+`nablamimic.evaluate --forward-only` omits the unused adjoint data buffers,
+backward context, backward callbacks, and backward warmup for nominal evaluation.
+The flag is opt-in for controlled comparison; the default and all training paths
+retain their differentiable initialization. Both modes use the same forward
+model, capacity sizing, four physical substeps, and forward warmup. Patched
+MuJoCo Warp's global gradient registration remains unchanged, because this
+optimization does not assume it is independent of forward kernel dispatch.
+Differentiating the forward-only instance fails explicitly.
+
+Evaluation outputs declare `forward_only` at both the root and checkpoint record,
+and reject merging distinct initialization modes. Each process still creates
+fresh physics and retains sticky capacity flags. Validate fixed-checkpoint
+scalar, per-clip, and observed-trajectory agreement before adopting the option;
+removing unused initialization is not proof of numerical equivalence. Measure
+process wall time for this comparison: the existing `seconds` reading starts
+after environment initialization and therefore omits the intended saving.

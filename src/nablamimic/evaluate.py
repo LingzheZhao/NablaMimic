@@ -127,6 +127,8 @@ def build_parser():
     ap.add_argument("--out", required=True, help="JSON file the results are merged into")
     ap.add_argument("--policy", choices=("live", "ema"),
                     help="weights to execute; default is EMA for --policy-ema training, otherwise live")
+    ap.add_argument("--forward-only", action="store_true",
+                    help="omit unused Warp adjoint allocation and warmup; forward physics is unchanged")
     return ap
 
 
@@ -143,18 +145,20 @@ def main(argv=None):
                                      reset_noise=False, residual_action=bool(cfg.get("residual_action", False)),
                                      action_rate_space="setpoint"))
     nclip = len(env.starts)
-    env.warp = sim.make_warp(env, [nclip], train=False)
+    env.warp = sim.make_warp(env, [nclip], train=False, forward_only=args.forward_only)
     steps = int(env.lengths.max() - 1)
     starts = env.starts.astype(np.int32)
     fn = make_rollout(env, steps)
     out_path = Path(args.out)
     out = json.loads(out_path.read_text()) if out_path.exists() else {}
-    if out and (out.get("run") != str(run) or out.get("solver_iterations") != args.solver_iterations):
-        raise ValueError("Existing evaluation output belongs to a different run or solver configuration")
+    if out and (out.get("run") != str(run) or out.get("solver_iterations") != args.solver_iterations
+                or out.get("forward_only") != args.forward_only):
+        raise ValueError("Existing evaluation output belongs to a different run, solver or initialization mode")
     out.setdefault("clips", names)
     out.setdefault("terms", list(TERMS))
     out.setdefault("run", str(run))
     out.setdefault("solver_iterations", args.solver_iterations)
+    out.setdefault("forward_only", args.forward_only)
     for it in sorted(set(args.iters)):
         key = f"it{it}/nominal/{policy}"
         if key in out:
@@ -167,7 +171,7 @@ def main(argv=None):
         rec = summarize(res, env, names)
         rec.update(iter=int(ck["iter"]), wall_s=float(ck["wall_s"]), seconds=round(time.time() - t0, 1),
                    gpu=jax.devices()[0].device_kind, solver_iterations=args.solver_iterations,
-                   action_rate_space="setpoint", policy=policy,
+                   action_rate_space="setpoint", policy=policy, forward_only=args.forward_only,
                    completed_updates=ck["completed_updates"], ema_updates=ck["ema_updates"])
         out[key] = rec
         out_path.parent.mkdir(parents=True, exist_ok=True)
