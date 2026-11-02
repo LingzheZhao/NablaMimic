@@ -74,5 +74,35 @@ the fresh-process repeat. Two original executions also
 terminated one clip early. These timings are one fixed-order batch observation;
 **numerical equivalence is not established**, and the optimizations remain opt-in.
 
+The PyTorch reproduction uses the same native NablaEngine with fullgraph Inductor
+and explicit CUDA Graphs. Its first three-hour attempt stopped after **26.623 native
+minutes** when update 1,878 exceeded the 64-contact capacity. The last valid saved
+policy is update 1,750; there is no completed three-hour Torch result for this build.
+The [published Engine row-capacity fix](https://github.com/LingzheZhao/NablaEngine/pull/1)
+retains that 64-contact limit. A contact-capacity extension is a separate Engine condition.
+
+At 8.0055 and 20.0058 native minutes, Torch EMA's original nominal returns were
+**0.756694 and 0.836650**, with 37/40 and 40/40 completed clips. At update 1,500,
+return was **0.839496** after 21.2962 minutes, compared with current-paper JAX's
+0.837293 after 22.2628 minutes. The 4.34% shorter native clock is a bounded observation:
+Torch excludes all setup/compilation/capture, JAX includes some lazy compilation,
+and per-update checkpoint contents differ. The same zero-update actor/critic weights
+were used, but the frameworks have different RNG streams. This single-seed partial
+run does not establish a causal framework speed advantage or the eight-minute claim.
+
+At the latest valid saved checkpoint, EMA/live original returns were **0.812234 /
+0.800892**, completing 38/40 and 35/40 clips. Their independent observed executions
+returned 0.811798 / 0.807769 and completed 38/40 and 36/40. Across all five evaluated
+Torch checkpoint/policy conditions, observed physical-invalid and capacity-loss counts
+were zero, but the separate body-fidelity gate remained 0/40. All partial trajectories
+remain included. These checkpoint scores do not imply monotonic learning.
+
+The production compiled-versus-compiled-graph check passed all 1,924 checks, with all
+612 compared arrays bitwise identical and independent collector-history copy checks
+passing. The full-size twelve-update smoke passed the native validity and graph-count
+gates. The separate eager-versus-compiled-graph FP32 check failed 17/1,924 checks,
+including a reset-frame support difference; strict eager/compiled numerical equivalence
+is not established. [The Torch study](studies/pytorch/README.md) defines the protocol.
+
 This work covers simulation-based NablaMimic reference tracking. It does not establish
 generated skills or command composition, and does not integrate NablaMimic into BM.
