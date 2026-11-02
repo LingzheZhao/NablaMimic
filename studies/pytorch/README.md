@@ -30,6 +30,11 @@ comparison freezes rtol 1e-4 and atol 1e-5; the synthetic update comparison free
 rtol 1e-4 and atol 1e-6. Finite values and exact integer counters are required.
 A full-size compiled/captured smoke run must additionally demonstrate graph
 replays, finite updates, correct optimizer/EMA counts and valid native counters.
+`graph_update_check.py` compares two actual randomized TorchTrainer updates in
+eager and compiled graph modes at N=8/H=4 with the full networks. Initial state
+and RNG/noise are exact; finite float comparisons use rtol 1e-4 and atol 1e-5.
+Termination, reset and frame support must match exactly; a matching termination
+remains visible and is not itself a transformation failure.
 
 The planned full comparison uses one CMP 170HX, seed 0, all forty 50 Hz LAFAN1
 clips, 4,096 training and collector worlds, a 64-control window, 1,000 replay
