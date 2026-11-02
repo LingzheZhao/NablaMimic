@@ -179,7 +179,7 @@ def mjx_capacity(mjm):
 
 class WarpPhysics:
     def __init__(self, mjm, nworld, foot_pairs, torso_id, capacity_factor=2.0, nconmax=None, njmax=None,
-                 rne_vjp=False, warm_recompute=False, forward_only=False):
+                 rne_vjp=False, warm_recompute=False, forward_only=False, evaluation=False):
         """nconmax / njmax: contacts and constraint rows per world (default: capacity_factor x MJX's padding);
         rne_vjp: install g1_fast.adjoint_patch (reverse-mode RNE VJP in the adjoint, same gradients);
         warm_recompute: the forward keeps each substep's converged acceleration as a residual and the backward's
@@ -192,6 +192,8 @@ class WarpPhysics:
         if forward_only and (rne_vjp or warm_recompute):
             raise ValueError("forward_only cannot enable adjoint options")
         self.forward_only = bool(forward_only)
+        self.evaluation = bool(evaluation)
+        self._evaluation_state = None
         ncon, nefc = mjx_capacity(mjm)
         self.nconmax, self.njmax = int(np.ceil(capacity_factor * ncon)), int(np.ceil(capacity_factor * nefc))
         self.nconmax, self.njmax = int(nconmax or self.nconmax), int(njmax or self.njmax)
@@ -282,6 +284,21 @@ class WarpPhysics:
 
         step.defvjp(step_fwd, step_bwd)
         self.step = step
+
+    def capture_evaluation_state(self):
+        """Keep initialized native arrays for an explicit persistent nominal session."""
+        if not self.evaluation:
+            raise ValueError("Only nominal evaluation physics may capture condition reset state")
+        if self._evaluation_state is not None:
+            raise RuntimeError("The initial evaluation state has already been captured")
+        from .evaluation_state import WarpEvaluationState
+        self._evaluation_state = WarpEvaluationState(self.sim.m, self.sim.df, wp.get_device("cuda:0"))
+
+    def reset_evaluation_state(self):
+        """Restore in place after compilation and before an independent condition."""
+        if self._evaluation_state is None:
+            raise RuntimeError("Capture initialized evaluation state before the first rollout")
+        return self._evaluation_state.restore()
 
     def _warmup(self, warm_recompute=False):
         s, nw = self.sim, self.sim.nworld

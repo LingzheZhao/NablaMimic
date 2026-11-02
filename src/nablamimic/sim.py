@@ -91,4 +91,4 @@ def make_warp(env, sizes, train=True, adj_normal=0, adj_parallel=0, ift_solve=0,
         fast = dict(nconmax=64, njmax=192, rne_vjp=True, warm_recompute=True)
         env.m.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_SENSOR)  # sensors are never read
     return {b: WarpPhysics(env.m, b, np.asarray(env.foot_pairs), env.torso_id,
-                           forward_only=forward_only, **fast) for b in sizes}
+                           forward_only=forward_only, evaluation=not train, **fast) for b in sizes}

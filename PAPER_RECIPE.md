@@ -94,3 +94,34 @@ scalar, per-clip, and observed-trajectory agreement before adopting the option;
 removing unused initialization is not proof of numerical equivalence. Measure
 process wall time for this comparison: the existing `seconds` reading starts
 after environment initialization and therefore omits the intended saving.
+
+`--persistent` is a separate opt-in evaluation mode. It loads the reference
+library, model and physics once and compiles one rollout for all compatible
+checkpoints in that session. `EvaluationSession` exposes the same lifetime to
+external observed-rollout workers. Each condition starts from the same seed,
+first reference frames and reset history. After compilation and before each
+condition, it restores the complete initialized native Model and Data array
+snapshot in place, synchronizes the device, and then invokes the observer reset
+hook. Array addresses remain fixed for captured CUDA graphs. The snapshot is
+taken after constructor warmup; the exact initial overflow values are retained
+and reported at every boundary. Sticky flags are never cleared during a clip.
+
+The pinned MuJoCo Warp `reset_data` resets only selected fields. Persistent
+evaluation instead includes nested contact/constraint arrays, histories,
+warm-start and solver buffers, mutable model arrays, and the native overflow
+array. It rejects structural or static-setting changes. Per-step temporary SDK
+solver and sparse-NNZ workspaces remain owned and initialized by their recorded
+step kernels; they are not claimed to be part of the snapshot. The unused
+adjoint buffers of the default initialization mode are not used by forward
+evaluation. Persistence supports both initialization modes, so its effect can be
+measured separately from `--forward-only`.
+
+Outputs mark persistence and keep initialization, compilation, condition reset,
+execution and readback timings separate. Persistent workers must preserve
+condition order/identity, checkpoint and policy metadata, observer traces and
+failed conditions. A-B-A execution tests and fresh-instance controls are required
+to measure isolation and repeatability; neither code inspection nor restoring
+arrays proves strict numerical parity in this simulator.
+The synchronized execution phase can include lazy native CUDA-graph capture on
+the first call; it is not reported as pure physics-kernel time. No unrecorded
+warmup trajectory is added to remove that cost from the measurement.
