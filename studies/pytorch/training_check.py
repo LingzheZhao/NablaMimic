@@ -117,6 +117,7 @@ def main():
         import numpy as np
         import torch
         from nablaengine import torch_ffi as tf
+        from nablaengine.g1_engine import step as engine_step, tape as engine_tape
         from nablamimic.env import BM_BODIES, EnvConfig, State, TrackingEnv, Xi, build_model
         from nablamimic.motion import all_clip_names, load_library
         from nablamimic.torch_env import TorchTrackingEnv
@@ -146,8 +147,12 @@ def main():
         record['reference_rows'] = validated_rows
         info = tf.init(model=tenv.m, foot_pairs=tenv.foot_pairs)
         tf.set_diagnostics(True)
-        require('corrected_engine_capacity', info['nefc'] == 288 and info['maxcon'] == 64 and
-                info['rec_words'] == 1472 and info['kinematics_error'] is None)
+        # Torch artifact metadata omits nefc; the corrected native source owns it.
+        require('corrected_engine_capacity', engine_step.NEFC == 288 and info['maxcon'] == 64 and
+                info['rec_words'] == engine_tape.rec_words(tenv.m) == 1472 and
+                engine_tape.layout(tenv.m)['zone'][1] == 9 and info['kinematics_error'] is None,
+                rows=int(engine_step.NEFC), contacts=int(info['maxcon']),
+                record_words=int(info['rec_words']), zone_words=int(engine_tape.layout(tenv.m)['zone'][1]))
 
         import jax
         import jax.numpy as jnp
@@ -167,7 +172,8 @@ def main():
                 tf._STATE['consts'].tobytes() == jf._STATE['consts'].tobytes())
         record['versions'] = dict(torch=torch.__version__, torch_cuda=torch.version.cuda, jax=jax.__version__)
         record['engine'] = {key: info.get(key) for key in
-                            ('version', 'arch', 'nq', 'nv', 'nu', 'nbody', 'nefc', 'maxcon', 'rec_words')}
+                            ('version', 'arch', 'nq', 'nv', 'nu', 'nbody', 'maxcon', 'rec_words')}
+        record['engine']['nefc'] = int(engine_step.NEFC)
 
         def cpu(value):
             if isinstance(value, torch.Tensor):
