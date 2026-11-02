@@ -21,6 +21,19 @@ an additive environment. Source and inputs are selected explicitly through
 `PYTHONPATH`, `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and `MENAGERIE_DIR`. Computational
 checks run in a provisioned environment, with fresh output directories.
 
+The native, physical-window and graph-update studies require explicit
+`--expected-max-contacts`, `--expected-constraint-rows`, `--expected-tape-words`
+and `--expected-zone-words` arguments. The selected capacity build uses
+`96`, `416`, `1504` and `13`, respectively, with the same 7/9/8/8-bit count
+header. They check these declarations against the chosen Engine source and
+runtime metadata; they do not change its capacity. Select the frozen Engine
+source ahead of the installed package on `PYTHONPATH`. A capacity change starts
+with a fresh native cache, without copying libraries from the earlier build.
+The capacity validator runs as
+`--cpu --out FRESH_ROOT --engine-capacity-revision REV` with CUDA hidden.
+Its structural checks and this study's same-build Torch/JAX comparisons do not
+replace the independent old/new, high-contact and Hessian/Jacobian qualification.
+
 Validation consists of the CPU numerical tests, `update_check.py` (one complete
 mathematical outer update using shared sampling indices), `engine_check.py` (the
 native interface, compiler and changed-input CUDA Graph probe), and

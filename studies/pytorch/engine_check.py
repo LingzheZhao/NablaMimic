@@ -18,6 +18,9 @@ import sys
 import tempfile
 import time
 
+from engine_contract import (add_engine_capacity_arguments, expected_engine_capacity,
+                             capacity_validator_command, capacity_validator_environment)
+
 INPUTS = ('qpos','qvel','warm','ctrl','friction','com')
 STATE_OUTPUTS = ('qpos1','qvel1','warm1','qpos_n','xpos','xquat','cvel','subtree_com')
 KIN_OUTPUTS = STATE_OUTPUTS[3:]
@@ -82,7 +85,9 @@ def main():
     parser.add_argument('--expected-gpu-model',default='NVIDIA CMP 170HX')
     parser.add_argument('--torch-memory-fraction',type=float,default=.45)
     parser.add_argument('--jax-memory-fraction',type=float,default=.45)
+    add_engine_capacity_arguments(parser)
     args=parser.parse_args()
+    capacity = expected_engine_capacity(args)
     if (not 0<args.torch_memory_fraction<=1 or not 0<args.jax_memory_fraction<=1
             or args.torch_memory_fraction+args.jax_memory_fraction>1):
         parser.error('Positive framework memory fractions must sum to at most one')
@@ -91,7 +96,7 @@ def main():
     if os.environ.get('JAX_PLATFORMS') in ('cpu','interpreter'):
         parser.error('This probe requires explicitly provisioned CUDA execution')
     root=args.out.resolve();root.mkdir(parents=True,exist_ok=False)
-    record=dict(status='running',started_utc=datetime.now(timezone.utc).isoformat(),
+    record=dict(expected_engine_capacity=capacity,status='running',started_utc=datetime.now(timezone.utc).isoformat(),
                 argv=sys.argv,python=sys.executable,options=OPTIONS,checks=[],failures=[],
                 engine_base_revision=args.engine_base_revision,engine_capacity_revision=args.engine_capacity_revision,
                 reference_cache=str(args.reference_cache),expected_gpu_model=args.expected_gpu_model,
@@ -125,7 +130,8 @@ def main():
             record['jax_cache_seed']=dict(path=str(seed),copied_libraries=[p.name for p in libraries])
         # The prepared reference cache must be used without rebuilding it in the source tree.
         os.environ['MOTION_CACHE_DIR']=str(args.reference_cache.resolve())
-        validation=subprocess.run([sys.executable,str(args.capacity_validator)],capture_output=True,text=True,timeout=60)
+        validation=subprocess.run(capacity_validator_command(args, root), capture_output=True, text=True,
+                                  env=capacity_validator_environment(), timeout=180)
         (root/'capacity-validator.log').write_text(validation.stdout+validation.stderr)
         check('corrected_source_capacity_validator',validation.returncode==0,returncode=validation.returncode)
 
@@ -147,9 +153,9 @@ def main():
                                and model.pair(i).name.endswith('_floor')],np.int64)
         capability.require(model,foot_pairs,capability.COM_BODY,'engine','torch-jax native check')
         check('model_contract',model.nq==36 and model.nv==35 and model.nu==29 and
-              model.opt.timestep==.005 and model.opt.iterations==10 and engine_step.NEFC==288 and
-              engine_step.maxcon(model)==64 and engine_tape.layout(model)['zone'][1]==9 and
-              engine_tape.rec_words(model)==1472 and np.count_nonzero(model.dof_frictionloss)==0 and
+              model.opt.timestep==.005 and model.opt.iterations==10 and engine_step.NEFC==capacity['constraint_rows'] and
+              engine_step.maxcon(model)==capacity['max_contacts'] and engine_tape.layout(model)['zone'][1]==capacity['zone_words'] and
+              engine_tape.rec_words(model)==capacity['record_words'] and np.count_nonzero(model.dof_frictionloss)==0 and
               np.count_nonzero(model.jnt_limited)==29,
               nq=model.nq,nv=model.nv,nu=model.nu,nbody=model.nbody,rows=engine_step.NEFC,
               contacts=engine_step.maxcon(model),record_words=engine_tape.rec_words(model),
@@ -194,7 +200,7 @@ def main():
         decoded=engine_tape.decode(cpu(initial[4]).reshape(-1,info['rec_words']),model)
         for key in ('qpos','qvel','qacc','qacc_adv','L_H','L_Q'):
             check('tape_finite_'+key,np.isfinite(decoded[key]).all())
-        check('tape_capacity',np.all(decoded['ncon']<=64) and np.all(decoded['nefc']<=288)
+        check('tape_capacity',np.all(decoded['ncon']<=capacity['max_contacts']) and np.all(decoded['nefc']<=capacity['constraint_rows'])
               and np.all(decoded['nlim']<=29) and not np.any(decoded['unsupported']),
               max_contacts=int(decoded['ncon'].max()),max_rows=int(decoded['nefc'].max()),
               max_limits=int(decoded['nlim'].max()),header_bits=[7,9,8,8])
@@ -298,7 +304,7 @@ def main():
         record['native_compile_plan']=dict(arch=info['arch'],defines=plan['defines'],
             unit_arch=plan['unit_arch'],arch_flags=plan['arch_flags'],forward_defines=plan['forward_defines'],
             generated_constants=defines,common_flags=jf.common_flags(info['arch']))
-        check('generated_capacity_constants',all('#define NEFC 288' in source and '#define MAXCON 64' in source
+        check('generated_capacity_constants',all(f"#define NEFC {capacity['constraint_rows']}\n" in source and f"#define MAXCON {capacity['max_contacts']}\n" in source
               for name,source in plan['units'].items() if name!='dk_ffi.cu'))
         jax_info=jf.init(model=model,foot_pairs=foot_pairs)
         record['jax_library']={key:jax_info[key] for key in allowed if key in jax_info}

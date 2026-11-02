@@ -23,6 +23,9 @@ import sys
 import tempfile
 import time
 
+from engine_contract import (add_engine_capacity_arguments, expected_engine_capacity,
+                             capacity_validator_command, capacity_validator_environment)
+
 from engine_check import BAD_DIAGNOSTICS, OPTIONS, host_inputs
 from training_check import write
 
@@ -52,14 +55,16 @@ def main():
     parser.add_argument('--matmul-precision', choices=('fp32', 'tf32'), default='fp32',
                         help='Precision for both paths: fp32 disables TF32; tf32 uses production CUDA matmul '
                              'TF32 permission with cuDNN TF32 disabled (default: fp32)')
+    add_engine_capacity_arguments(parser)
     args = parser.parse_args()
+    capacity = expected_engine_capacity(args)
     reference_mode = args.reference_execution
     modes = (reference_mode, 'compile-graph')
     if os.environ.get('DK_ALLOW_UNSUPPORTED'):
         parser.error('Unsupported-physics bypass is forbidden')
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    record = dict(compiler_environment=dict(TRITON_DEFAULT_FP_FUSION=os.environ.get('TRITON_DEFAULT_FP_FUSION', 'unset; Triton default true')), status='running', started_utc=datetime.now(timezone.utc).isoformat(),
+    record = dict(expected_engine_capacity=capacity,compiler_environment=dict(TRITON_DEFAULT_FP_FUSION=os.environ.get('TRITON_DEFAULT_FP_FUSION', 'unset; Triton default true')), status='running', started_utc=datetime.now(timezone.utc).isoformat(),
         argv=sys.argv, python=sys.executable, checks=[], failures=[], modes={},
         source_revision=args.source_revision, engine_base_revision=args.engine_base_revision,
         engine_capacity_revision=args.engine_capacity_revision,
@@ -130,8 +135,8 @@ def main():
             for path in libraries:
                 shutil.copyfile(path, root/'cache'/'native'/path.name)
             record['cache_seed'] = dict(path=str(args.jax_cache_seed), libraries=[p.name for p in libraries])
-        validator = subprocess.run([sys.executable, str(args.capacity_validator)], capture_output=True,
-                                   text=True, timeout=60)
+        validator = subprocess.run(capacity_validator_command(args, root), capture_output=True,
+                                   text=True, env=capacity_validator_environment(), timeout=180)
         (root/'capacity-validator.log').write_text(validator.stdout+validator.stderr)
         require('corrected_source_capacity_validator', validator.returncode == 0)
 
@@ -173,9 +178,9 @@ def main():
         env = TorchTrackingEnv(load_library(names, bodies=BM_BODIES), cfg)
         info = tf.init(model=env.m, foot_pairs=env.foot_pairs)
         tf.set_diagnostics(True)
-        require('corrected_engine_capacity', engine_step.NEFC == 288 and info['maxcon'] == 64 and
-                info['rec_words'] == engine_tape.rec_words(env.m) == 1472 and
-                engine_tape.layout(env.m)['zone'][1] == 9 and info['kinematics_error'] is None)
+        require('corrected_engine_capacity', engine_step.NEFC == capacity['constraint_rows'] and info['maxcon'] == capacity['max_contacts'] and
+                info['rec_words'] == engine_tape.rec_words(env.m) == capacity['record_words'] and
+                engine_tape.layout(env.m)['zone'][1] == capacity['zone_words'] and info['kinematics_error'] is None)
         record['engine'] = {key: info[key] for key in
                             ('version', 'arch', 'nq', 'nv', 'nu', 'nbody', 'maxcon', 'rec_words')}
         record['engine']['nefc'] = int(engine_step.NEFC)
