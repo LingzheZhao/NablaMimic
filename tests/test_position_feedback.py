@@ -4,7 +4,8 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from nablamimic.env import TrackingEnv, EnvConfig, FUTURE, GOAL_FRAME_DIM, validate_feedback
+from nablamimic.env import (TrackingEnv, EnvConfig, FUTURE, GOAL_FRAME_DIM,
+                           position_feedback_enabled, validate_feedback)
 from nablamimic import nets
 
 
@@ -49,24 +50,42 @@ class PositionFeedbackTest(unittest.TestCase):
             np.testing.assert_allclose(jax.jacrev(direct)(goal), jax.jacrev(hoisted)(goal), atol=1e-7)
             self.assertGreater(float(jnp.linalg.norm(jax.jacrev(direct)(goal)[:, -k:])), 0.)
 
-    def test_checkpoint_feedback_flag_and_both_actor_dimensions(self):
+    def test_native_actor_payloads_use_explicit_modes_without_checkpoint_flags(self):
         for enabled in (False, True):
             k = 9 if enabled else 6
-            cfg = dict(decoder_position_feedback=enabled)
-            checkpoint = dict(decoder_position_feedback=enabled, actor={'anchor_dec': jnp.zeros(k)}, actor_ema={'anchor_dec': jnp.zeros(k)})
+            cfg = dict(obs_mode="anchor_pos_ori" if enabled else "anchor_ori", actor_latent=3)
+            env = SimpleNamespace(goal_dim=FUTURE*GOAL_FRAME_DIM+k, hist_dim=930, nu=2)
+            actor = nets.actor_init(jax.random.PRNGKey(3), env, hidden=(8,), latent=3, anchor_to_decoder=k)
+            checkpoint = dict(actor=actor, actor_ema=actor)
+            self.assertEqual(position_feedback_enabled(cfg), enabled)
             validate_feedback(checkpoint, cfg)
+            validate_feedback(checkpoint, dict(cfg, decoder_position_feedback=enabled))
             with self.assertRaises(ValueError):
-                validate_feedback(checkpoint, dict(decoder_position_feedback=not enabled))
+                validate_feedback(checkpoint, dict(cfg, decoder_position_feedback=not enabled))
+            with self.assertRaises(ValueError):
+                validate_feedback(checkpoint, dict(cfg, obs_mode="anchor_ori" if enabled else "anchor_pos_ori"))
             for name in ('actor', 'actor_ema'):
-                bad = dict(checkpoint, **{name: {'anchor_dec': jnp.zeros(15-k)}})
+                bad = dict(checkpoint, **{name: dict(actor, anchor_dec=jnp.zeros(15-k))})
                 with self.assertRaises(ValueError):
                     validate_feedback(bad, cfg)
-        validate_feedback({'decoder_position_feedback': False, 'actor': {}},
-                          {'decoder_position_feedback': False})
+                first, bias = actor["dec"][0]
+                wrong_decoder = [(jnp.zeros((first.shape[0]+3, first.shape[1])), bias), *actor["dec"][1:]]
+                bad = dict(checkpoint, **{name: dict(actor, dec=wrong_decoder)})
+                with self.assertRaises(ValueError):
+                    validate_feedback(bad, cfg)
+                bad_actor = dict(actor)
+                del bad_actor["anchor_dec"]
+                with self.assertRaises(ValueError):
+                    validate_feedback(dict(checkpoint, **{name: bad_actor}), cfg)
+
+    def test_unknown_or_inconsistent_observation_modes_are_rejected(self):
         with self.assertRaises(KeyError):
-            validate_feedback({'actor': {}}, {'decoder_position_feedback': False})
-        with self.assertRaises(ValueError):
-            validate_feedback({'decoder_position_feedback': True, 'actor': {}}, {'decoder_position_feedback': True})
+            position_feedback_enabled({})
+        for cfg in (dict(obs_mode="unknown"), dict(obs_mode="anchor_ori", decoder_position_feedback=True),
+                    dict(obs_mode="anchor_pos_ori", decoder_position_feedback=False),
+                    dict(obs_mode="anchor_ori", decoder_position_feedback=0)):
+            with self.assertRaises(ValueError):
+                position_feedback_enabled(cfg)
 
     def test_real_critic_reward_and_termination_are_flag_invariant(self):
         baseline, state = self.fixture(False)

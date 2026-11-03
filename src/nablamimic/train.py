@@ -686,7 +686,8 @@ def main(argv=None):
     if args.resume:
         with open(args.resume, "rb") as f:
             ck = pickle.load(f)
-        validate_feedback(ck, vars(args))
+        validate_feedback(ck, dict(FIXED, decoder_position_feedback=args.decoder_position_feedback,
+                                  obs_mode="anchor_pos_ori" if args.decoder_position_feedback else "anchor_ori"))
         as_j = lambda t: jax.tree_util.tree_map(jnp.asarray, t)  # noqa: E731
         actor, critic, cnorm = as_j(ck["actor"]), as_j(ck["critic"]), as_j(tuple(ck["cnorm"]))
         st_a, st_c, bin_q = as_j(ck["st_a"]), as_j(ck["st_c"]), as_j(ck["bin_q"])
@@ -800,7 +801,6 @@ def main(argv=None):
                              st_c=jax.device_get(first(st_c)), bin_q=jax.device_get(first(bin_q)),
                              **({"st_r": jax.device_get(first(buf["opt"]))} if "opt" in buf else {}),
                              **({"actor_ema": jax.device_get(first(actor_ema))} if actor_ema is not None else {}),
-                             decoder_position_feedback=args.decoder_position_feedback,
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file
 

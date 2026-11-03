@@ -93,21 +93,38 @@ class State(NamedTuple):
     key: jnp.ndarray
 
 
+def position_feedback_enabled(cfg):
+    """Resolve the explicit current observation mode, with optional CLI-record consistency."""
+    mode = cfg["obs_mode"]
+    if mode not in ("anchor_ori", "anchor_pos_ori"):
+        raise ValueError(f"Unsupported observation mode: {mode}")
+    enabled = mode == "anchor_pos_ori"
+    if "decoder_position_feedback" in cfg:
+        declared = cfg["decoder_position_feedback"]
+        if type(declared) is not bool or declared != enabled:
+            raise ValueError("Position feedback CLI record differs from obs_mode")
+    return enabled
+
+
 def validate_feedback(checkpoint, cfg):
-    """Check the current declared decoder input before evaluation or resume."""
-    enabled = cfg["decoder_position_feedback"]
-    if type(enabled) is not bool or checkpoint["decoder_position_feedback"] is not enabled:
-        raise ValueError("Checkpoint position feedback condition differs from run configuration")
+    """Check the current native actor layout without extending checkpoint metadata."""
+    enabled = position_feedback_enabled(cfg)
+    width = 9 if enabled else 6
+    latent = cfg["actor_latent"]
+    if type(latent) is not int or latent <= 0:
+        raise ValueError("actor_latent must be a positive integer")
+    expected_input = latent + HIST * PROPRIO_DIM + width
+    if "actor" not in checkpoint:
+        raise ValueError("Checkpoint must contain its live actor")
     for name in ("actor", "actor_ema"):
         if name not in checkpoint:
             continue
         actor = checkpoint[name]
-        if "anchor_dec" in actor:
-            expected = 9 if enabled else 6
-            if np.shape(actor["anchor_dec"]) != (expected,):
-                raise ValueError(f"{name} feedback width differs from the declared condition")
-        elif enabled:
-            raise ValueError("Position feedback requires an anchor-to-decoder actor")
+        if "anchor_dec" not in actor or np.shape(actor["anchor_dec"]) != (width,):
+            raise ValueError(f"{name} feedback width differs from obs_mode")
+        first = np.shape(actor["dec"][0][0])
+        if len(first) != 2 or first[0] != expected_input:
+            raise ValueError(f"{name} decoder input width differs from the current observation layout")
 
 
 def _yaw_quat(q):

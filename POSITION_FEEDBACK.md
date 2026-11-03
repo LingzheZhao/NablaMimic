@@ -19,11 +19,15 @@ The configuration includes `ours.args`, adding only
 (`--actor-ema 0.999 --actor-ema-warmup`), the unmasked objective and 100-update
 learning-rate warmup. The option requires `--anchor-to-decoder`.
 
-Both config and checkpoints explicitly record the feedback flag, including
-false for the baseline. Evaluation and resume validate that flag and the live
-and averaged actors' six- or nine-value decoder markers. Missing or inconsistent
-metadata is rejected. The checkpoint's native iteration and EMA representation
-are otherwise unchanged.
+Checkpoints retain the official schema without an added feedback field.
+Configuration `obs_mode` explicitly names `anchor_ori` or `anchor_pos_ori`;
+evaluation rejects missing or unknown modes and checks the live and averaged
+actors' six- or nine-value decoder markers and first-layer input widths.
+The optional CLI record `decoder_position_feedback`, when present, must agree
+with `obs_mode`. A current official baseline therefore uses its existing
+configuration and native actor layout directly. Resume checks the loaded actor
+layout against the current CLI condition. Native iteration and EMA representation
+are unchanged.
 
 The upstream evaluator selects averaged weights by default when they exist.
 Use separate output files when explicitly comparing weight selections:

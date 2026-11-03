@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import jax_cache, sim
-from .env import BM_BODIES, W, EnvConfig, TrackingEnv, _gravity_b, validate_feedback
+from .env import BM_BODIES, W, EnvConfig, TrackingEnv, _gravity_b, position_feedback_enabled, validate_feedback
 from .motion import all_clip_names, load_library
 from .nets import actor_apply
 from .sim import vmapped
@@ -138,7 +138,7 @@ def main(argv=None):
     lib = load_library(names, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False,
                                      reset_noise=False, residual_action=bool(cfg.get("residual_action", False)),
-                                     decoder_position_feedback=cfg["decoder_position_feedback"],
+                                     decoder_position_feedback=position_feedback_enabled(cfg),
                                      action_rate_space="setpoint"))
     nclip = len(env.starts)
     env.warp = sim.make_warp(env, [nclip], train=False)
