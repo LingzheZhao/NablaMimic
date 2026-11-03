@@ -143,3 +143,39 @@ other than `mjlab` or contacts other than `all` (the action values come from
 configuration field, a checkpoint outside the run directory's `ckpt/`, a run
 directory holding `DIVERGED`, and a manifest whose bodies, frame rate or clips
 differ from the run's.
+
+## Critic file
+
+```bash
+python -m nablamimic.export_bm_policy ... --out POLICY.npz \
+    --critic-out CRITIC.npz --source-revision FORK_COMMIT
+```
+
+`--critic-out` writes, beside the policy file and from the same checkpoint, the
+critic and its input normaliser as an `.npz` in the format
+`bm-nabla-critic-v1`, readable with `np.load(path, allow_pickle=False)`:
+
+| Key | Shape | Content |
+| --- | --- | --- |
+| `critic.0.weight`, `critic.0.bias` | [256, 825], [256] | first Linear layer, torch layout [out, in] |
+| `critic.2.weight`, `critic.2.bias` | [128, 256], [128] | second Linear layer |
+| `critic.4.weight`, `critic.4.bias` | [1, 128], [1] | output layer |
+| `normalizer.mean`, `normalizer.variance` | [825] | the checkpoint's `cnorm`, as stored |
+| `format` | 0-d unicode | `bm-nabla-critic-v1` |
+| `declaration` | 0-d unicode | one JSON document |
+
+ELU follows the first two layers. The input is normalised first,
+`clip((x - mean) / sqrt(variance + 1e-5), -10, 10)`. The trainer updates the
+normaliser once per outer update from the window's post-step critic inputs as an
+exponential average (0.99) of the batch mean and variance (floored at 1e-6) and
+keeps no update count, so there is no `normalizer.count`; the declaration states
+`normalizer_count` `absent`. A checkpoint at zero updates holds the initial
+mean 0 and variance 1. The declaration names the checkpoint file, the run
+directory, the completed updates, the declared source revision (refused when
+`config.json` records another `git_commit`), the input layout of
+`env.TrackingEnv.critic_obs` as `[name, width]` pairs (proprioception 93, goal
+680, anchor orientation 6, root error 4, anchor relative pose 9, domain
+randomisation draws 33) with each term's content, the hidden widths from
+`critic_hidden`, and whether the critic was fitted on pre-step inputs
+(`--critic-pre-state`). Shapes other than the configured widths, non-finite or
+non-float32 values and a non-positive variance are refused.

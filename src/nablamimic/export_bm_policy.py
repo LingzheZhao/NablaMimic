@@ -12,8 +12,12 @@ anchor_to_decoder=6); mlp_apply computes x @ w + b with ELU between layers, w of
 becomes encoder.{2i}.weight = w.T and encoder.{2i}.bias = b, i = 0..4, so the indices 0, 2, 4, 6, 8 are the Linear
 layers of a flat torch Sequential(Linear, ELU, Linear, ELU, ..., Linear); "dec" maps to decoder.* the same way. The
 encoder output is squashed by tanh; the decoder input is [tanh(encoder output), history, anchor orientation]
-(nets.actor_apply). "anchor_dec" is a shape marker that never enters the computation and is not exported; nor are the
-critic, its normaliser, optimiser states or reset-bin statistics.
+(nets.actor_apply). "anchor_dec" is a shape marker that never enters the computation and is not exported; nor are
+optimiser states or reset-bin statistics. --critic-out writes the critic and its input normaliser to a second npz
+(format "bm-nabla-critic-v1"): critic.{0,2,4}.weight/bias in the same torch layout, normalizer.mean and
+normalizer.variance as the checkpoint's cnorm holds them (it holds no update count: the declaration states
+normalizer_count "absent"), a 0-d "format" entry and a declaration naming the checkpoint, the run, the completed updates,
+the declared source revision and the input layout of env.TrackingEnv.critic_obs.
 
 The declaration states the architecture, the input layout, the action map, the timing and the training domain. Every
 value comes from the checkpoint, the run's config.json, the model build_model compiles for that configuration (joint
@@ -47,13 +51,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .env import (ACTION_EFFORT_FRACTION, ANCHOR, BM_BODIES, DT, FUTURE, GOAL_ANCHOR, GOAL_FRAME_DIM, HIST, PROPRIO_DIM,
-                  SCALE, SUBSTEPS, TIMESTEP, ActionParameters)
+from .env import (ACTION_EFFORT_FRACTION, ANCHOR, ANCHOR_DIM, BM_BODIES, DT, FUTURE, GOAL_ANCHOR, GOAL_FRAME_DIM, HIST,
+                  PROPRIO_DIM, SCALE, SUBSTEPS, TIMESTEP, ActionParameters)
 from .export_reference_manifest import read_manifest
 from .motion import REFERENCE_FPS
 from .params import evaluation_actor
 
 FORMAT = "bm-nabla-tracking-policy-v1"
+CRITIC_FORMAT = "bm-nabla-critic-v1"
 ANCHOR_WIDTH = GOAL_ANCHOR.stop - GOAL_ANCHOR.start
 # The model compiled_action_parameters builds: env.build_model compiles the fixed scene (train.FIXED).
 TRAINING_MODEL = dict(robot="mjlab", contacts="all")
@@ -261,6 +266,88 @@ def actor_arrays(actor, cfg, nu):
     return arrays, architecture
 
 
+def critic_input_terms(nu):
+    """The critic input in env.TrackingEnv.critic_obs order: (name, width, content)."""
+    return (
+        ("proprioception", PROPRIO_DIM, "the actor's per-frame proprioception terms of the current state, unnoised"),
+        ("goal", FUTURE * GOAL_FRAME_DIM, "the next FUTURE reference rows' goal features, as the actor's goal rows"),
+        ("anchor_orientation", ANCHOR_WIDTH, "first two columns of robot_rotation^T reference_rotation of the torso "
+                                             "anchor at the current row (entries 3..8 of anchor_relative_pose)"),
+        ("root_error", 4, "root height minus the reference row's root height, then the root linear velocity in the "
+                          "yaw (heading) frame"),
+        ("anchor_relative_pose", ANCHOR_DIM, "reference torso anchor position in the robot anchor frame (3), then the "
+                                             "first two columns of the relative rotation (6)"),
+        ("domain_draws", 1 + nu + 3, "(friction - 0.75) / 0.45, encoder bias / 0.01 per joint, torso COM offset / "
+                                     "0.05 (the episode's domain randomisation draws)"),
+    )
+
+
+def critic_arrays(checkpoint, cfg, nu):
+    """{key: array} for the critic and its input normaliser, and the architecture record; refuses another structure."""
+    terms = critic_input_terms(nu)
+    width = sum(w for _, w, _ in terms)
+    hidden = [int(h) for h in _require(cfg, "critic_hidden")]
+    widths = [width, *hidden, 1]
+    layers = checkpoint.get("critic")
+    if not isinstance(layers, (list, tuple)) or len(layers) != len(widths) - 1:
+        raise ValueError(f"critic: expected {len(widths) - 1} layers (widths {widths})")
+    arrays = {}
+    for i, layer in enumerate(layers):
+        w, b = (np.asarray(x) for x in layer)
+        if w.shape != (widths[i], widths[i + 1]) or b.shape != (widths[i + 1],):
+            raise ValueError(f"critic layer {i}: kernel {w.shape}, bias {b.shape}, expected "
+                             f"({widths[i]}, {widths[i + 1]})")
+        for x in (w, b):
+            if x.dtype != np.float32 or not np.all(np.isfinite(x)):
+                raise ValueError(f"critic layer {i}: parameters must be finite float32, got {x.dtype}")
+        arrays[f"critic.{2 * i}.weight"] = np.ascontiguousarray(w.T)
+        arrays[f"critic.{2 * i}.bias"] = np.array(b)
+    norm = checkpoint.get("cnorm")
+    if not isinstance(norm, (list, tuple)) or len(norm) != 2:
+        raise ValueError("cnorm: expected the pair (mean, variance)")
+    for name, x in zip(("mean", "variance"), (np.asarray(v) for v in norm)):
+        if x.shape != (width,) or x.dtype != np.float32 or not np.all(np.isfinite(x)):
+            raise ValueError(f"critic normaliser {name}: expected finite float32 ({width},), got {x.dtype} {x.shape}")
+        arrays[f"normalizer.{name}"] = np.array(x)
+    if not np.all(arrays["normalizer.variance"] > 0):
+        raise ValueError("critic normaliser variance must be positive")
+    return arrays, terms, hidden
+
+
+def build_critic_file(checkpoint, cfg, *, label, checkpoint_name, run_dir, source_revision, nu):
+    """(arrays, declaration) of the critic and its input normaliser (format "bm-nabla-critic-v1")."""
+    if not source_revision:
+        raise ValueError("a source revision is required")
+    recorded = cfg.get("git_commit")
+    if recorded and recorded != source_revision:
+        raise ValueError(f"source revision {source_revision} differs from config.json's git_commit {recorded}")
+    completed, _, _ = update_counts(checkpoint, cfg, label)
+    arrays, terms, hidden = critic_arrays(checkpoint, cfg, nu)
+    width = sum(w for _, w, _ in terms)
+    pre_state = bool(_require(cfg, "critic_pre_state"))
+    declaration = dict(
+        format=CRITIC_FORMAT,
+        checkpoint=str(checkpoint_name), run=str(run_dir), checkpoint_label=label, completed_updates=completed,
+        source_revision=source_revision, run_git_commit=recorded,
+        training_framework=training_framework(cfg),
+        input_layout=[[n, w] for n, w, _ in terms],
+        input_terms=[dict(name=n, width=w, content=c) for n, w, c in terms],
+        input_width=width, activation="ELU", hidden=hidden, output=1,
+        layout="critic.<N>.weight [out, in] and .bias [out], N = 0, 2, 4: the Linear layers of a flat sequence with "
+               "ELU between them and none after the last; the input is normalised first",
+        dtype="float32", training_matmul_precision=_require(cfg, "matmul_precision"),
+        normalizer=dict(
+            stored=["mean", "variance"],
+            application="clip((x - mean) / sqrt(variance + 1e-5), -10, 10)",
+            update="once per outer update on the window's post-step critic inputs: mean <- 0.99 mean + 0.01 "
+                   "batch_mean; variance <- 0.99 variance + 0.01 max(batch_mean_of_squares - batch_mean^2, 1e-6)",
+            initial="mean 0, variance 1"),
+        normalizer_count="absent",
+        fitted_inputs="pre_step_state" if pre_state else "post_step_state",
+    )
+    return arrays, declaration
+
+
 def check_action_parameters(act):
     if not isinstance(act, ActionParameters):
         raise TypeError("action parameters must be env.ActionParameters")
@@ -409,19 +496,21 @@ def compiled_action_parameters(cfg):
     return action_parameters(m, kp)
 
 
-def write_policy_file(arrays, declaration, out):
-    """Write the npz once: a temporary file beside out, then a hard link (refused if out exists)."""
+def write_policy_file(arrays, declaration, out, *, file_format=None):
+    """Write the npz once: a temporary file beside out, then a hard link (refused if out exists). file_format adds a
+    0-d "format" entry (the critic file has one; the policy file states its format in the declaration only)."""
     out = Path(out)
     if out.suffix != ".npz":
         raise ValueError(f"{out}: the policy file must end in .npz")
     if out.exists():
         raise FileExistsError(out)
-    if "declaration" in arrays:
-        raise ValueError("'declaration' is reserved")
+    if "declaration" in arrays or "format" in arrays:
+        raise ValueError("'declaration' and 'format' are reserved")
+    extra = {} if file_format is None else dict(format=np.array(file_format))
     tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
     try:
         with open(tmp, "xb") as f:
-            np.savez(f, **arrays, declaration=np.array(json.dumps(declaration, indent=1)))
+            np.savez(f, **arrays, **extra, declaration=np.array(json.dumps(declaration, indent=1)))
             f.flush()
             os.fsync(f.fileno())
         os.link(tmp, out)
@@ -448,10 +537,20 @@ def main(argv=None):
     ap.add_argument("--engine-constraint-row-capacity", type=int, required=True,
                     help="constraint rows per world of that build")
     ap.add_argument("--out", required=True, help="the policy file (.npz); refused if it exists")
+    ap.add_argument("--critic-out", help=f"also write the checkpoint's critic and its input normaliser ({CRITIC_FORMAT},"
+                                         " .npz); refused if it exists")
+    ap.add_argument("--source-revision", help="with --critic-out: the fork commit the run trained with (recorded, "
+                                              "refused if config.json records another git_commit)")
     args = ap.parse_args(argv)
     out = Path(args.out)
     if out.suffix != ".npz" or out.exists():
         ap.error(f"--out must name a new .npz file: {out}")
+    critic_out = None if args.critic_out is None else Path(args.critic_out)
+    if critic_out is not None and (critic_out.suffix != ".npz" or critic_out.exists()
+                                   or critic_out.resolve() == out.resolve()):
+        ap.error(f"--critic-out must name a new .npz file other than --out: {critic_out}")
+    if (critic_out is None) != (args.source_revision is None):
+        ap.error("--critic-out and --source-revision go together")
     label = checkpoint_label(args.checkpoint)
     cfg, cfg_path = load_run_config(args.run_config)
     run_dir = cfg_path.resolve().parent
@@ -461,12 +560,21 @@ def main(argv=None):
     manifest = read_manifest(args.reference_manifest)
     with open(args.checkpoint, "rb") as f:
         checkpoint = pickle.load(f)
+    act = compiled_action_parameters(cfg)
     arrays, declaration = build_policy_file(
-        checkpoint, cfg, compiled_action_parameters(cfg), manifest, policy=args.policy, label=label,
+        checkpoint, cfg, act, manifest, policy=args.policy, label=label,
         artifact_id=args.artifact_id, source_artifact_id=args.source_artifact_id, engine_revision=args.engine_revision,
         contact_capacity=args.engine_contact_capacity, constraint_row_capacity=args.engine_constraint_row_capacity,
         end_markers=markers, source_checkpoint=Path(args.checkpoint).resolve(), source_config=cfg_path.resolve())
+    if critic_out is not None:
+        critic, critic_declaration = build_critic_file(
+            checkpoint, cfg, label=label, checkpoint_name=Path(args.checkpoint).name, run_dir=run_dir,
+            source_revision=args.source_revision, nu=len(act.joint_names))
     write_policy_file(arrays, declaration, out)
+    if critic_out is not None:
+        write_policy_file(critic, critic_declaration, critic_out, file_format=CRITIC_FORMAT)
+        print(f"{critic_out}: critic {critic_declaration['input_width']}-{critic_declaration['hidden']}-1 after "
+              f"{critic_declaration['completed_updates']} outer updates, normaliser mean and variance, no count")
     src = declaration["policy_source"]
     print(f"{out}: {len(arrays)} arrays, {src['selected_weights']} weights after "
           f"{src['counts']['completed_outer_updates']} outer updates ({src['counts']['averaging_updates']} averaging "

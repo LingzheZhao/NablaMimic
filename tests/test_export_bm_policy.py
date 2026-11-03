@@ -18,12 +18,13 @@ import numpy as np
 from nablamimic import export_bm_policy as ebp
 from nablamimic.env import BM_BODIES, ActionParameters
 from nablamimic.motion import SCENE
-from nablamimic.nets import actor_init, actor_apply
+from nablamimic.nets import actor_apply, actor_init, critic_apply, mlp_init, normalize
 
 HIDDEN, LATENT, NU = (8, 4), 3, 29
 HIDDEN4 = (8, 7, 6, 5)  # four hidden layers, as the trained actor has: Linear indices 0, 2, 4, 6, 8
 ENV = types.SimpleNamespace(goal_dim=10 * 68 + 6, hist_dim=10 * 93, nu=NU)  # the real input widths
 LABEL, PER_UPDATE = 12, 16 * 1 * 4
+CRITIC_HIDDEN, CRITIC_IN = (7, 5), 93 + 680 + 6 + 4 + 9 + 33  # env.TrackingEnv.critic_dim
 
 
 def numpy_tree(tree):
@@ -33,7 +34,10 @@ def numpy_tree(tree):
 def released_checkpoint(seed=0, hidden=HIDDEN):
     """A checkpoint as the released recipe saves it: no evaluation policy, completed or EMA counts."""
     actor = numpy_tree(actor_init(jax.random.PRNGKey(seed), ENV, hidden=hidden, latent=LATENT, anchor_to_decoder=6))
-    return dict(actor=actor, critic=[], iter=LABEL, wall_s=1.0, env_steps=LABEL * PER_UPDATE)
+    critic = numpy_tree(mlp_init(jax.random.PRNGKey(seed + 100), [CRITIC_IN, *CRITIC_HIDDEN, 1]))
+    rng = np.random.default_rng(seed)
+    cnorm = (rng.normal(size=CRITIC_IN).astype(np.float32), rng.uniform(0.5, 2.0, CRITIC_IN).astype(np.float32))
+    return dict(actor=actor, critic=critic, cnorm=cnorm, iter=LABEL, wall_s=1.0, env_steps=LABEL * PER_UPDATE)
 
 
 def averaged_checkpoint():
@@ -49,6 +53,7 @@ def run_config(**override):
                anchor_to_decoder=True, actor_obs_norm=False, actor_hidden=list(HIDDEN), actor_latent=LATENT,
                residual_action=True, action_rate_space="setpoint", solver_iterations=10, robot="mjlab",
                contacts="all", matmul_precision="nets_tf32", clips=["all"], motion_lib=None, git_commit=None,
+               critic_hidden=list(CRITIC_HIDDEN), critic_pre_state=True,
                git_dirty=False, gpu="test card", argv=["--residual-action"],
                segments=[dict(engine=dict(version="0.1.0", key="library-key", arch="sm_80"))])
     cfg.update(override)
@@ -395,6 +400,87 @@ class RefusalTests(unittest.TestCase):
             np.testing.assert_array_equal(x, y)
 
 
+def critic_export(checkpoint=None, cfg=None, **kw):
+    args = dict(label=LABEL, checkpoint_name=f"it_{LABEL:06d}.pkl", run_dir="RUN", source_revision="fork-commit", nu=NU)
+    args.update(kw)
+    return ebp.build_critic_file(released_checkpoint() if checkpoint is None else checkpoint,
+                                 run_config() if cfg is None else cfg, **args)
+
+
+class CriticTests(unittest.TestCase):
+    def test_arrays_are_the_kernels_transposed(self):
+        ck = released_checkpoint()
+        arrays, _ = critic_export(ck)
+        self.assertEqual(set(arrays), {f"critic.{n}.{s}" for n in (0, 2, 4) for s in ("weight", "bias")}
+                         | {"normalizer.mean", "normalizer.variance"})
+        for i, (w, b) in enumerate(ck["critic"]):
+            np.testing.assert_array_equal(arrays[f"critic.{2 * i}.weight"], w.T)
+            np.testing.assert_array_equal(arrays[f"critic.{2 * i}.bias"], b)
+        self.assertEqual(arrays["critic.0.weight"].shape, (CRITIC_HIDDEN[0], CRITIC_IN))
+        self.assertEqual(arrays["critic.4.weight"].shape, (1, CRITIC_HIDDEN[-1]))
+        np.testing.assert_array_equal(arrays["normalizer.mean"], ck["cnorm"][0])
+        np.testing.assert_array_equal(arrays["normalizer.variance"], ck["cnorm"][1])
+
+    def test_numpy_execution_equals_the_critic(self):
+        ck = released_checkpoint()
+        arrays, _ = critic_export(ck)
+        x = np.random.default_rng(2).normal(size=(5, CRITIC_IN)).astype(np.float32)
+        with jax.default_matmul_precision("highest"):
+            want = np.asarray(critic_apply(jax.tree_util.tree_map(jnp.asarray, ck["critic"]),
+                                           normalize(tuple(map(jnp.asarray, ck["cnorm"])), x)))
+        h = np.clip((x - arrays["normalizer.mean"]) / np.sqrt(arrays["normalizer.variance"] + 1e-5), -10, 10)
+        for j, i in enumerate((0, 2, 4)):
+            h = h @ arrays[f"critic.{i}.weight"].T + arrays[f"critic.{i}.bias"]
+            if j < 2:
+                h = np.where(h > 0, h, np.expm1(h))
+        np.testing.assert_allclose(h, want, rtol=1e-5, atol=1e-6)
+
+    def test_declaration(self):
+        _, d = critic_export()
+        self.assertEqual((d["format"], d["checkpoint"], d["run"], d["completed_updates"], d["source_revision"]),
+                         (ebp.CRITIC_FORMAT, f"it_{LABEL:06d}.pkl", "RUN", LABEL, "fork-commit"))
+        self.assertEqual(d["input_layout"], [["proprioception", 93], ["goal", 680], ["anchor_orientation", 6],
+                                             ["root_error", 4], ["anchor_relative_pose", 9], ["domain_draws", 33]])
+        self.assertEqual((d["input_width"], d["hidden"], d["activation"]), (CRITIC_IN, list(CRITIC_HIDDEN), "ELU"))
+        self.assertEqual((d["normalizer_count"], d["normalizer"]["stored"]), ("absent", ["mean", "variance"]))
+        self.assertEqual(d["fitted_inputs"], "pre_step_state")
+        json.dumps(d)
+
+    def test_critic_width_is_the_environment_width(self):
+        from nablamimic import env as env_module
+        self.assertEqual(sum(w for _, w, _ in ebp.critic_input_terms(NU)),
+                         env_module.PROPRIO_DIM + env_module.ANCHOR_DIM + ENV.goal_dim + 1 + 3 + (1 + NU + 3))
+
+    def test_refusals(self):
+        def refused(**kw):
+            with self.assertRaises((ValueError, KeyError, TypeError)):
+                critic_export(**kw)
+        refused(source_revision="")
+        refused(cfg=run_config(git_commit="another-commit"))
+        refused(cfg=run_config(critic_hidden=[7, 4]))
+        refused(label=LABEL + 1)
+        ck = released_checkpoint()
+        ck["critic"] = ck["critic"][:-1]
+        refused(checkpoint=ck)
+        ck = released_checkpoint()
+        w, b = ck["critic"][1]
+        w = w.copy()
+        w[0, 0] = np.nan
+        ck["critic"][1] = (w, b)
+        refused(checkpoint=ck)
+        ck = released_checkpoint()
+        ck["cnorm"] = (ck["cnorm"][0], np.zeros(CRITIC_IN, np.float32))
+        refused(checkpoint=ck)
+        ck = released_checkpoint()
+        ck["cnorm"] = (ck["cnorm"][0][:-1], ck["cnorm"][1][:-1])
+        refused(checkpoint=ck)
+        ck = released_checkpoint()
+        del ck["cnorm"]
+        refused(checkpoint=ck)
+        _, d = critic_export(cfg=run_config(git_commit="fork-commit"))
+        self.assertEqual(d["run_git_commit"], "fork-commit")
+
+
 class RunDirectoryTests(unittest.TestCase):
     """main() on temporary files; compiled_action_parameters (Menagerie) is replaced by the synthetic values."""
 
@@ -413,11 +499,12 @@ class RunDirectoryTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def main(self, out, run_config_arg=None, checkpoint=None):
+    def main(self, out, run_config_arg=None, checkpoint=None, extra=()):
         argv = ["--checkpoint", str(checkpoint or self.checkpoint), "--run-config", str(run_config_arg or self.run),
                 "--policy", "live", "--artifact-id", "policy-from-main", "--source-artifact-id", "checkpoint-from-main",
                 "--reference-manifest", str(self.manifest), "--engine-revision", "engine-from-main",
-                "--engine-contact-capacity", "64", "--engine-constraint-row-capacity", "288", "--out", str(out)]
+                "--engine-contact-capacity", "64", "--engine-constraint-row-capacity", "288", "--out", str(out),
+                *extra]
         with mock.patch.object(ebp, "compiled_action_parameters", return_value=action_parameters()) as compiled, \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             ebp.main(argv)
@@ -444,6 +531,28 @@ class RunDirectoryTests(unittest.TestCase):
         out_file = self.root / "from-file.npz"
         self.main(out_file, run_config_arg=self.run / "config.json")
         self.assertEqual(self.declaration(out_file)[1], d)
+
+    def test_critic_file(self):
+        out, critic = self.root / "policy.npz", self.root / "critic.npz"
+        self.main(out, extra=["--critic-out", str(critic), "--source-revision", "fork-commit"])
+        with np.load(critic, allow_pickle=False) as z:
+            self.assertEqual(set(z.files), {f"critic.{n}.{s}" for n in (0, 2, 4) for s in ("weight", "bias")}
+                             | {"normalizer.mean", "normalizer.variance", "format", "declaration"})
+            self.assertEqual(z["format"].item(), ebp.CRITIC_FORMAT)
+            d = json.loads(z["declaration"].item())
+            for x in z.files:
+                if x not in ("format", "declaration"):
+                    self.assertEqual(z[x].dtype, np.float32)
+        self.assertEqual((d["checkpoint"], d["run"], d["normalizer_count"]),
+                         (self.checkpoint.name, str(self.run.resolve()), "absent"))
+        for extra in (["--critic-out", str(self.root / "c2.npz")], ["--source-revision", "fork-commit"],
+                      ["--critic-out", str(critic), "--source-revision", "fork-commit"],
+                      ["--critic-out", str(self.root / "p3.npz"), "--source-revision", "fork-commit"]):
+            p3 = self.root / "p3.npz"
+            with self.assertRaises(SystemExit):
+                self.main(p3, extra=extra)
+            self.assertFalse(p3.exists())
+            self.assertFalse((self.root / "c2.npz").exists())
 
     def test_existing_output_refused(self):
         out = self.root / "policy.npz"
