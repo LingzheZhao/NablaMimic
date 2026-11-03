@@ -7,14 +7,23 @@ Explicit CUDA Graphs capture the complete differentiable window and reusable
 updates. Random inputs are sampled outside capture. Compilation/capture errors
 stop the run; no automatic eager fallback changes the execution condition.
 
-The code follows the official 0.2.0 arguments and evaluation interface. In a
-pinned provisioned CPU environment, all 84 package tests, 32 mathematical-update
-comparisons and 36 capacity-source checks passed, with no failed or skipped
-conditions. Native GPU, compilation/capture and full-workload validation of this
-upstream-based implementation remain pending. Experiments performed with earlier
-fixed snapshots do not validate this revised source or establish its training
-quality, speed or cross-framework numerical equivalence. The
-[validation studies](studies/pytorch/README.md) state the necessary GPU checks.
+The code follows the official 0.2.0 arguments and evaluation interface. In the
+pinned provisioned environment, all 84 CPU tests, 32 mathematical-update
+comparisons and 36 capacity-source checks passed. On an RTX 6000 Ada 48 GB with
+the declared 96-contact/416-row Engine, the native JAX/Torch window comparison
+passed all 137 checks. Three separate compiled-versus-CUDA-Graph comparisons
+passed all 1,923 checks each: FP32, TF32-permitted, and FP32 with EMA disabled.
+These comparisons use eight environments, four controls and two updates.
+
+The complete 4,096-by-64 FP32 workload with replay length 1,000 also completed
+twelve updates. Native invalidity counters stayed zero, all five graph replay
+counts matched, and actual precision stayed highest/TF32-disabled. Peak Torch
+allocated/reserved memory was 31.81/38.24 GiB and did not grow across the twelve
+logged updates. None of these five GPU validation stages failed or was skipped.
+They establish their stated native, capture/storage and bounded execution
+scopes; they do not establish full-size compiler equivalence or long-training
+quality on this revision. Earlier fixed-snapshot experiments remain separate
+readings. The [validation studies](studies/pytorch/README.md) define the checks.
 
 ## Environment and training
 
