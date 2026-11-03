@@ -74,14 +74,84 @@ the fresh-process repeat. Two original executions also
 terminated one clip early. These timings are one fixed-order batch observation;
 **numerical equivalence is not established**, and the optimizations remain opt-in.
 
-The PyTorch reproduction uses the same native NablaEngine with fullgraph Inductor
-and explicit CUDA Graphs. Its first three-hour attempt stopped after **26.623 native
+A fresh PyTorch run with fullgraph Inductor and five explicit CUDA Graphs completed
+**12,640 outer updates in 10,801.301 native training seconds**. It uses the same
+NablaEngine physical equations, with a separate [96-contact / 416-row capacity
+extension](https://github.com/LingzheZhao/NablaEngine/pull/2) based on the published
+288-row correction. Setup/compilation/capture took 151.980 seconds; the complete
+training Python process, including imports, input loading and final serialization,
+took 11,161.825 seconds. All 12,640 logged updates were contiguous, with correct
+optimizer/EMA counts and zero capacity, unsupported-state, nonfinite-gradient and
+replay-mismatch counters. Finite solver iteration-limit, nonconvergence and singular
+diagnostics remain recorded; they were not all zero. Logged Torch allocation and
+reservation stayed near 20.506/38.076 GiB, with a 31.815 GiB allocation peak during
+setup. These are allocator readings, not every native or driver allocation.
+
+This is one seed on the CMP 170HX, using the same all-forty-clip workload and
+zero-update JAX actor/critic weights, with fresh Torch optimizer and EMA state.
+The existing original and independently observed MuJoCo Warp evaluators use
+separate fresh processes and physics states. Early conditions use at most two
+workers on the same GPU; final EMA/live and the separately predeclared update-1500
+condition are sequential. Evaluation begins after timed training.
+
+| Checkpoint / policy | Native training min | Original return | Observed return | Observed complete | Body-fidelity qualifiers |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 560 EMA | 8.0048 | 0.735056 | 0.765108 | 37/40 | 0/40 |
+| 1402 EMA | 20.0081 | 0.832314 | 0.832242 | 40/40 | 0/40 |
+| 1500 EMA, matched update count | 21.4118 | 0.833954 | 0.824701 | 39/40 | 0/40 |
+| 4211 EMA | 60.0043 | 0.868747 | 0.867958 | 40/40 | 2/40 |
+| 6317 EMA | 90.0095 | 0.873693 | 0.874791 | 40/40 | 6/40 |
+| 12640 EMA | 180.0093 | 0.876124 | 0.877816 | 40/40 | 11/40 |
+| 12640 live | 180.0093 | 0.846315 | 0.846955 | 40/40 | 0/40 |
+
+Original execution completed 35/40 clips at update 560 and 40/40 in the other
+conditions. All seven observed conditions had finite scientific scalars and zero
+invalid active steps or observed capacity losses. No condition passed the separate
+body-fidelity gate requiring 36 qualifiers and all forty completions. The final EMA
+world-body and donor-aligned MPJPE means were 0.266111 m and 0.025490 m on its own
+recorded executed support. Original and observed readings remain independent;
+partial trajectories and their supports are retained.
+
+At 1,500 updates, current-paper JAX took 22.2628 minutes with original return
+0.837293; this Torch condition took 21.4118 minutes with return 0.833954, a **3.82%
+shorter native clock**. In approximately three native hours, Torch completed
+**3.43% more updates**, but its final original EMA return was **0.026010 lower**
+than JAX's 0.902134. JAX's final independent observed return was 0.902194, with
+40/40 completions and 12/40 qualifiers. This Torch run has not matched that JAX
+learning result, and its eight-minute checkpoint remains below 0.82. The sampled
+twenty-minute checkpoint is above 0.82; it does not locate the first crossing.
+
+These are bounded observations, not a causal framework benchmark. Torch excludes
+all compilation/capture from its native clock, while JAX includes some lazy
+compilation. JAX's per-update checkpoints include optimizer state; Torch's policy
+checkpoints contain weights and metadata, with full state saved after timed training.
+Torch and JAX have distinct random streams, compiler arithmetic and capacity
+conditions; equal time also produces different update and schedule positions.
+A read-only audit found no new mismatch in the declared EMA, LR, optimizer,
+normalization, clipping, replay, horizon or action-control recipe. It did not
+establish the cause of the learning gap or numerical equivalence of the complete
+initialization/training paths.
+
+For the new capacity, 36 CPU model/tape checks, 122 CPU tests, 32 mathematical update
+groups and 122 native-interface checks passed. The production compiled-versus-graph
+check passed 1,923 checks, including 612 bitwise-identical arrays and independent
+collector-history copy checks. The full-size twelve-update smoke passed. The
+[capacity study](studies/pytorch/CAPACITY_PROTOCOL.md) additionally passed 999 old/new
+checks on shared inputs, real collision coverage through 96 contacts and beyond
+the overflow boundary, 61 high-contact interface checks and 67 independent
+Jacobian/Hessian checks. The first 5,120-state stress pool reached only 82 contacts
+and remains a failed coverage condition; a separate frozen 43,040-state pool
+covered every count 65–96 and correctly flagged 3,600 states above 96. Capacity
+validation does not make 96 a universal upper bound.
+
+The earlier 64-contact three-hour attempt stopped after **26.623 native
 minutes** when update 1,878 exceeded the 64-contact capacity. The last valid saved
 policy is update 1,750; there is no completed three-hour Torch result for this build.
 The [published Engine row-capacity fix](https://github.com/LingzheZhao/NablaEngine/pull/1)
 retains that 64-contact limit. A contact-capacity extension is a separate Engine condition.
 
-At 8.0055 and 20.0058 native minutes, Torch EMA's original nominal returns were
+In that earlier failed condition, at 8.0055 and 20.0058 native minutes, EMA's
+original nominal returns were
 **0.756694 and 0.836650**, with 37/40 and 40/40 completed clips. At update 1,500,
 return was **0.839496** after 21.2962 minutes, compared with current-paper JAX's
 0.837293 after 22.2628 minutes. The 4.34% shorter native clock is a bounded observation:
@@ -90,15 +160,16 @@ and per-update checkpoint contents differ. The same zero-update actor/critic wei
 were used, but the frameworks have different RNG streams. This single-seed partial
 run does not establish a causal framework speed advantage or the eight-minute claim.
 
-At the latest valid saved checkpoint, EMA/live original returns were **0.812234 /
+At that failed condition's latest valid saved checkpoint, EMA/live original returns
+were **0.812234 /
 0.800892**, completing 38/40 and 35/40 clips. Their independent observed executions
-returned 0.811798 / 0.807769 and completed 38/40 and 36/40. Across all five evaluated
+returned 0.811798 / 0.807769 and completed 38/40 and 36/40. Across those five earlier
 Torch checkpoint/policy conditions, observed physical-invalid and capacity-loss counts
 were zero, but the separate body-fidelity gate remained 0/40. All partial trajectories
 remain included. These checkpoint scores do not imply monotonic learning.
 
-The production compiled-versus-compiled-graph check passed all 1,924 checks, with all
-612 compared arrays bitwise identical and independent collector-history copy checks
+For that earlier 64-contact build, the production compiled-versus-compiled-graph
+check passed all 1,924 checks, with all 612 compared arrays bitwise identical and independent collector-history copy checks
 passing. The full-size twelve-update smoke passed the native validity and graph-count
 gates. The separate eager-versus-compiled-graph FP32 check failed 17/1,924 checks,
 including a reset-frame support difference; strict eager/compiled numerical equivalence

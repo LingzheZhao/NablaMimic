@@ -85,3 +85,11 @@ The [contact-capacity protocol](CAPACITY_PROTOCOL.md) checks the separate
 real collision discovery above 64 contacts, overflow protection, and independent
 Jacobian/Hessian references. These capacity checks supplement the execution and
 training checks above; they do not establish convergence or motion fidelity.
+
+The completed single-seed learning experiment and its remaining quality gap are
+reported in [REPRODUCTION.md](../../REPRODUCTION.md). It uses the
+[qualified Engine implementation](https://github.com/LingzheZhao/NablaEngine/commit/1f0a833171db9571cad3214f021aae7903978ecd);
+later Engine changes record row capacity in the Torch artifact without changing
+the physical kernel strings. A fresh standalone artifact-loader check passed for
+that metadata update. No resume or complete cross-framework numerical-equivalence
+claim follows from these results.
