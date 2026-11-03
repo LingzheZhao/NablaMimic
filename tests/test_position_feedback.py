@@ -193,5 +193,5 @@ class PositionFeedbackTest(unittest.TestCase):
             self.assertEqual((args.num_envs, args.horizon, args.replay_steps, args.collect_envs),
                              (4096, 64, 1000, 4096))
             self.assertEqual((args.lr_warmup_steps, args.lr_decay_steps), (100, 16000))
-            self.assertEqual((args.action_target[0], args.critic_iters), (8, 20))
+            self.assertEqual((args.action_target[0], args.critic_epochs * args.critic_minibatches), (8, 20))
             self.assertTrue(args.anchor_to_decoder and args.policy_ema and args.residual_action)
