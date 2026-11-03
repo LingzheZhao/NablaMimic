@@ -61,6 +61,7 @@ python -m nablamimic.train --config configs/ours_ema.args --out runs/ours_ema_s0
 | Config | What |
 |---|---|
 | `configs/ours_ema.args` | Current-paper EMA recipe on NablaEngine; fresh runs only |
+| `configs/ours_ema_position_feedback.args` | EMA recipe with current reference-position error supplied directly to the decoder |
 | `configs/ours.args` | Released NablaEngine recipe, retained as the control |
 | `configs/ours_mjw.args` | ∇Mimic on MuJoCo Warp |
 | `configs/bones.args` | ∇Mimic on BONES-SEED (add `--motion-lib DATA_DIR/lib50`) |
@@ -72,6 +73,16 @@ The EMA recipe requires a fresh output directory and rejects `--resume`: upstrea
 checkpoints do not restore the complete RNG, replay, collector and physical state.
 The released non-EMA trainer retains its upstream continuation option; this is not
 a claim of exact interrupted-run recovery. See [checkpoint semantics](PAPER_RECIPE.md).
+
+Position feedback adds three torso-frame position-error values beside the six
+relative-orientation values at the decoder input. The reference-only encoder,
+critic inputs, reward and termination are unchanged. This is an extension of the
+[upstream NablaMimic controller](https://github.com/OamIcs/NablaMimic), not a claim
+about the paper's original policy. Both the training config and checkpoint record
+the option, and nominal evaluation validates it. The current `bones.benchmark`
+entry has not been adapted for these nine-value feedback checkpoints; use the
+nominal LAFAN1 evaluator above for this recipe. See the
+[position-feedback results and capacity requirements](REPRODUCTION.md#decoder-position-feedback).
 
 ## Evaluate
 
