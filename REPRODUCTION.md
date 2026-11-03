@@ -91,7 +91,8 @@ The encoder route requires `--enc-hoist off` because its inputs depend on the cu
 physical state. Each control recomputes its encoder with that state's position error,
 preserving input derivatives. For a matched comparison set this option off in both
 routes. With equal encoder and decoder first-layer widths, the position routes have
-equal parameter counts. Their first input matrices have different shapes and initial
+equal trainable parameter counts. The decoder route also stores three additional
+nontrainable marker scalars. Their first input matrices have different shapes and initial
 values despite equal seeds. All remaining layer shapes and initialization keys agree.
 Checkpoint metadata records the selected route and evaluation validates both live
 and EMA actor input dimensions. BONES evaluation accepts `--policy auto`, `ema` or
