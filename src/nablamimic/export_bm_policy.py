@@ -406,7 +406,7 @@ def main(argv=None):
     label = checkpoint_label(args.checkpoint)
     cfg, cfg_path = load_run_config(args.run_config)
     run_dir = cfg_path.resolve().parent
-    if Path(args.checkpoint).resolve().parent != run_dir / "ckpt":
+    if Path(args.checkpoint).resolve().parent != (run_dir / "ckpt").resolve():
         ap.error(f"--checkpoint must lie in the run directory's ckpt/: {run_dir / 'ckpt'}")
     markers = run_markers(run_dir)
     manifest = read_manifest(args.reference_manifest)
