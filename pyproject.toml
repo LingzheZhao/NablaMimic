@@ -32,6 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 engine = ["nablaengine[jax] @ git+https://github.com/OamIcs/NablaEngine.git@c61a6fe7f5ec47c7f4f9b0a4c055d60cbe40807c"]  # NablaEngine (--physics engine, ppo.py)
+torch = ["torch==2.9.1"]  # Optional Torch trainer; requires a compatible NablaEngine Torch interface.
 data = ["huggingface_hub"]  # scripts/download_lafan1.sh, scripts/download_bones_seed.sh
 test = ["pytest"]
 

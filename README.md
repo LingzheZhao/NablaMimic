@@ -98,6 +98,9 @@ python -m nablamimic.train --config configs/ours.args --out runs/ours_s0
 Options after `--config` override the file (for example `--seed 1` or `--hours 1`). A stopped run continues with
 `--resume latest` and the same `--config` and `--out`.
 
+The optional [PyTorch trainer](TORCH.md) uses the current `ours.args` recipe with NablaEngine, `torch.compile` and
+explicit CUDA Graphs. Its validation and current limitations are described separately.
+
 ## 📊 Evaluate
 
 ```bash
