@@ -47,10 +47,18 @@ CPU checks use fresh synthetic observations and networks:
 JAX_PLATFORMS=cpu python -m unittest discover -s tests -p test_position_feedback.py
 ```
 
-These checks cover position sensitivity, preserved orientation noise, direct
-versus hoisted encoder action and input gradients, unchanged critic/reward/
-termination definitions, metadata rejection and inheritance of the current
-recipe. They do not establish physical tracking quality on the updated upstream
-implementation. No new training or execution measurement accompanies this
-source adaptation. This option is not integrated into a Torch trainer, policy
-exporter, BONES workflow or BeyondMimic.
+All 48 CPU tests passed in the pinned provisioned environment. They cover
+position sensitivity, preserved orientation noise, direct versus hoisted encoder
+action and input gradients, unchanged critic/reward/termination definitions,
+current metadata, recipe inheritance and PPO/SHAC/default compatibility.
+
+On an RTX 6000 Ada 48 GB with the declared 96-contact/416-row Engine, a bounded
+run completed two updates with eight environments, four controls and replay
+length eight. Its native invalidity counters were zero; the current-schema
+checkpoint had finite live/EMA weights and the nine-value decoder layout. The
+original MuJoCo Warp evaluator then loaded checkpoint two with actor_ema and
+produced finite results for all forty clips. All forty ended early for height,
+so this is execution compatibility evidence only. The original evaluator was
+not instrumented for physical invalidity, and no new tracking-quality claim
+follows from this smoke. This option is not integrated into a Torch trainer,
+policy exporter, BONES workflow or BeyondMimic.
