@@ -1,0 +1,3 @@
+# Current upstream recipe plus decoder-only measured reference-position feedback.
+@ours.args
+--decoder-position-feedback

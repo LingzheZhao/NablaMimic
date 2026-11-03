@@ -52,7 +52,7 @@ import numpy as np
 import optax
 
 from . import jax_cache, nets, sim
-from .env import BM_BODIES, GOAL_ANCHOR, EnvConfig, TrackingEnv
+from .env import BM_BODIES, GOAL_ANCHOR, EnvConfig, TrackingEnv, validate_feedback
 from .motion import all_clip_names, load_library
 from .nets import actor_apply, actor_decode, actor_encode, actor_init, clip_rows_to_median, critic_apply, normalize
 from .params import git_state, latest_checkpoint, resolve_params
@@ -250,6 +250,8 @@ def build_parser():
                     help="warp: IFT solve of patch 0004 (1: scaled right-hand side, 2: no augmented border)")
     ap.add_argument("--actor-obs-norm", action="store_true",
                     help="normalize the actor input [history, goal] by running statistics (EMA 0.01 per update)")
+    ap.add_argument("--decoder-position-feedback", action="store_true",
+                    help="add current robot-frame reference position error to decoder feedback")
     ap.add_argument("--anchor-to-decoder", action="store_true",
                     help="the anchor-relative orientation goes to the decoder beside the history; the motion encoder "
                          "sees only the future reference frames")
@@ -326,6 +328,8 @@ def main(argv=None):
     use_at = bool(args.action_target)
     assert not use_at or args.action_target_lr is not None, "--action-target: with --action-target-lr"
     assert not (args.shac_strict and use_at), "--shac-strict: the direct actor gradient (no --action-target)"
+    assert not args.decoder_position_feedback or args.anchor_to_decoder, \
+        "--decoder-position-feedback requires --anchor-to-decoder"
     assert args.enc_hoist == "off" or (args.anchor_to_decoder and not args.actor_obs_norm), \
         "--enc-hoist: with --anchor-to-decoder (the encoder input must not depend on the state), not --actor-obs-norm"
     assert not args.motion_lib or args.replay_steps > 0, "--motion-lib restarts the collector's replay with each working set"
@@ -345,7 +349,8 @@ def main(argv=None):
         cfg = json.loads((out / "config.json").read_text())
         cfg["segments"] = cfg.get("segments", []) + [seg]
     else:
-        cfg = dict(vars(args), **FIXED, devices=nd, processes=1, git_commit=commit, git_dirty=dirty, gpu=gpu)
+        fixed = dict(FIXED, obs_mode="anchor_pos_ori" if args.decoder_position_feedback else "anchor_ori")
+        cfg = dict(vars(args), **fixed, devices=nd, processes=1, git_commit=commit, git_dirty=dirty, gpu=gpu)
         if params_info is not None:
             cfg.update(argv=params_info["argv"], config_args=params_info["config_args"], config_file=str(args.config),
                        segments=[seg])
@@ -374,7 +379,8 @@ def main(argv=None):
         assert clips, "no LAFAN1 clips found (scripts/download_lafan1.sh, LAFAN1_G1_DIR)"
         lib = load_library(clips, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, residual_action=args.residual_action,
-                                     action_rate_space=args.action_rate_space))
+                                     action_rate_space=args.action_rate_space,
+                                     decoder_position_feedback=args.decoder_position_feedback))
     n = args.num_envs
     nc = args.collect_envs or n  # replay columns (envs per row)
     sizes = sorted({n, nc} if args.replay_steps > 0 else {n})
@@ -398,7 +404,8 @@ def main(argv=None):
 
     key = jax.random.PRNGKey(args.seed)
     key, ka, kc = jax.random.split(key, 3)
-    k_anchor = GOAL_ANCHOR.stop - GOAL_ANCHOR.start if args.anchor_to_decoder else 0
+    k_anchor = (GOAL_ANCHOR.stop - GOAL_ANCHOR.start +
+                (3 if args.decoder_position_feedback else 0)) if args.anchor_to_decoder else 0
     actor = actor_init(ka, env, anchor_to_decoder=k_anchor)
     if args.actor_obs_norm:  # placeholder; set from the first reset batch below
         actor["obs_norm"] = (jnp.zeros(env.hist_dim + env.goal_dim), jnp.ones(env.hist_dim + env.goal_dim))
@@ -679,6 +686,7 @@ def main(argv=None):
     if args.resume:
         with open(args.resume, "rb") as f:
             ck = pickle.load(f)
+        validate_feedback(ck, vars(args))
         as_j = lambda t: jax.tree_util.tree_map(jnp.asarray, t)  # noqa: E731
         actor, critic, cnorm = as_j(ck["actor"]), as_j(ck["critic"]), as_j(tuple(ck["cnorm"]))
         st_a, st_c, bin_q = as_j(ck["st_a"]), as_j(ck["st_c"]), as_j(ck["bin_q"])
@@ -792,6 +800,7 @@ def main(argv=None):
                              st_c=jax.device_get(first(st_c)), bin_q=jax.device_get(first(bin_q)),
                              **({"st_r": jax.device_get(first(buf["opt"]))} if "opt" in buf else {}),
                              **({"actor_ema": jax.device_get(first(actor_ema))} if actor_ema is not None else {}),
+                             decoder_position_feedback=args.decoder_position_feedback,
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file
 
