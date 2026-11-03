@@ -85,6 +85,9 @@ options whose strict numerical equivalence is not established. The portable
 [observed-evaluation tools](studies/evaluation/README.md) retain complete per-clip
 trajectories and provide bounded two-thread compression.
 
+To execute a trained policy outside this package, [export](EXPORT.md) its actor as a
+NumPy policy file and its reference cache as a JSON manifest.
+
 ## CPU checks
 
 After installing the dependencies and the test extra:
