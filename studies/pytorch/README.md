@@ -58,7 +58,7 @@ it does not establish compiler-versus-eager equivalence or replace an eager
 comparison. The default remains `--reference-execution eager`. Every condition
 uses a fresh output root, retaining earlier failures.
 
-The planned full comparison uses one CMP 170HX, seed 0, all forty 50 Hz LAFAN1
+The full comparison uses one CMP 170HX, seed 0, all forty 50 Hz LAFAN1
 clips, 4,096 training and collector worlds, a 64-control window, 1,000 replay
 steps, UTD 0.4, eight actor regressions of 16,384 samples, five critic epochs with
 four minibatches, and three hours of training. Solver settings and the EMA recipe
@@ -93,3 +93,14 @@ later Engine changes record row capacity in the Torch artifact without changing
 the physical kernel strings. A fresh standalone artifact-loader check passed for
 that metadata update. No resume or complete cross-framework numerical-equivalence
 claim follows from these results.
+
+The fixed-input learning-gap diagnostics keep their protocols separate:
+[reset/orientation](RESET_ORIENTATION_PROTOCOL.md) compares independent state
+construction, frozen network readouts and local derivatives;
+[compiler/precision](PRECISION_PROTOCOL.md) separates eager execution, compilation
+and CUDA Graph replay at fixed weights; and
+[full-window precision](WINDOW_PRECISION_PROTOCOL.md) uses the production
+4,096-environment, 64-control shape with explicit shared random inputs.
+These studies do not update weights, resume intermediate replay, or estimate
+training-seed variation. Failed strict comparisons remain visible; they do not
+justify silently relaxing numerical tolerances.

@@ -175,5 +175,104 @@ gates. The separate eager-versus-compiled-graph FP32 check failed 17/1,924 check
 including a reset-frame support difference; strict eager/compiled numerical equivalence
 is not established. [The Torch study](studies/pytorch/README.md) defines the protocol.
 
+## Fixed-input diagnosis of the Torch learning gap
+
+The final original EMA evaluations both complete all forty reference horizons.
+An approximate decomposition of the per-clip reward terms attributes 73.65% of
+the 0.026010 return gap to body orientation and 18.11% to root position. The terms
+were rounded to four decimals, so this attribution is approximate. The largest
+joint-error increases include left wrist yaw, right wrist pitch and right wrist
+yaw: their mean absolute errors increase from 0.1058/0.1023/0.0546 rad in JAX to
+0.3928/0.4001/0.2747 rad in Torch. This locates the quality loss; it does not by
+itself identify a training defect.
+
+A frozen [reset and orientation study](studies/pytorch/RESET_ORIENTATION_PROTOCOL.md)
+completed 1,361 comparisons on one CMP 170HX: 1,261 passed and 100 failed, with no
+threshold changes. All failures involved TF32 network outputs or their own-action
+downstream quantities. Independent reset/restore states and features passed at
+160 rows over all forty clips under nominal, domain-randomization-only and full
+training-reset settings. All FP32 readouts passed. With the same observations,
+FP32 action differences for the initial, final JAX EMA and final Torch EMA weights
+were at most 2.21e-8, 6.74e-6 and 6.20e-6. Allowing TF32 increased the final-policy
+differences to 0.002795 and 0.004387 dimensionless action units. Holding the action
+identical passed all 396 control comparisons, including exact control targets.
+This isolates a cross-framework network-arithmetic difference under TF32
+permission; it does not establish identical kernel selection.
+
+All 31 orientation checks passed. Each final checkpoint supplied 64 separate
+states from its observed fight1 trajectory: 32 evenly spaced eligible rows and
+32 additional low-orientation-reward rows. Quaternion VJPs agreed with an
+independent float64 finite-difference calculation within 3.41e-8; independent
+MJX/native kinematics and one-step native control VJPs also passed, including
+all three wrist coordinates. The one-step test used zero warmstart because the
+trace did not record it, so it is a controlled counterfactual, not exact replay.
+This error-enriched selection does not estimate overall policy quality.
+
+The [compiler and precision study](studies/pytorch/PRECISION_PROTOCOL.md) separately
+holds each final EMA policy, critic and normalizer fixed and tests two explicit
+inputs over forty clips and four controls. All six execution/precision conditions
+completed for each checkpoint. An earlier auxiliary nested-VJP compilation
+failure is retained as a probe failure, without serving as training evidence. At each precision, compiled execution and explicit
+CUDA Graph replay agree bitwise on all 173 retained fields. Fixed-action body
+orientation gradients and boundary primitives pass throughout. FP32 eager versus
+compiled execution fails two fields per checkpoint: a few BF16 history values
+cross rounding boundaries. Those failures remain failures; they are not evidence
+of bitwise eager/compiled equivalence.
+
+Changing compiled FP32 to TF32 changes the four-step action-gradient vector by
+0.295%/1.233% relative L2 for the two JAX-weight cases and 1.140%/1.329% for the
+Torch-weight cases. Termination and frame support remain equal. In one Torch-weight
+case, policy-output differences of about 0.003 in the first three controls grow
+to 0.118756 in the fourth, at the right ankle pitch in fallAndGetUp2_subject3;
+the target difference is 0.118243. The largest observed amplification is not
+specific to the wrists. All nine retained invalid-state/gradient counters are
+zero, while finite solver iteration-limit and nonconvergence counters are not
+necessarily zero. This demonstrates precision-dependent closed-loop divergence,
+not a demonstrated cause of the final three-hour learning gap.
+
+The [production-shape window study](studies/pytorch/WINDOW_PRECISION_PROTOCOL.md)
+then fixes the initial live weights and the Torch update-1,500 live weights
+separately, at 4,096 environments and 64 controls. Each uses the checkpoint's own
+critic and normalizer, the same materialized randomized reset states and noise,
+and one compiled CUDA Graph at a time. Neither condition advances RNG state or
+changes weights. These are controlled reset-start windows, not continuations of
+the missing intermediate replay state.
+
+| Live checkpoint | Raw action-gradient relative L2 difference | After target-gradient clipping | First unequal termination (control step) | Unequal termination entries |
+| --- | ---: | ---: | ---: | ---: |
+| Initial weights | 8.59% | 3.83% | 27th | 24 |
+| Torch update 1,500 | 87.03% | 36.71% | 20th | 7 |
+
+Both precision conditions complete with all nine invalid guards at zero. Each
+checkpoint fails 26 of 29 strict precision comparisons; these remain failed
+conditions, with finite outputs and no runtime exception. The
+first initial-policy branch has FP32 terminate while TF32 continues, so these
+readings do not establish that FP32 has better policy quality. Backpropagation
+at the start of the window includes later branch differences; its early mismatch
+must not be described as an early local-physics derivative defect. The common
+64-control budget includes different reset paths after each first branch.
+
+At update 1,500, the clipped wrist-gradient relative differences are
+21.31%/25.75%/25.55%, with TF32-to-FP32 norm ratios 1.00066/1.00178/1.00049.
+The target increment's overall relative difference is approximately 36.74%,
+while its norm ratio is 1.00042. This is a change in direction and sample
+allocation, without evidence of uniform wrist-gradient or step-size suppression.
+Other joints also differ substantially. Torch peak allocated memory remains
+below 16 GB, falling below 1 GB after each graph is released; reserved memory
+also drops before the next condition. No simultaneous second trainer is used.
+
+The precision intervention therefore changes actual reset branches and learning
+targets at the production window size. It still does not establish the direction
+or magnitude of its contribution to the final return gap. That attribution
+requires a matched training comparison, with common random-number controls and
+replicates; the present study makes no optimizer updates or convergence claim.
+
+The actor-regression source audit and earlier shared-sample CPU update check found
+no formula mismatch in BF16 storage, targets, clipping, Adam, schedules or EMA.
+Distinct framework random streams remain an uncontrolled training difference.
+The earlier 64- and 96-contact Torch runs also differ in their first update while
+all invalid counters are zero; their different physical GPU assignments and
+capacity builds prevent attributing that historical difference to capacity alone.
+
 This work covers simulation-based NablaMimic reference tracking. It does not establish
 generated skills or command composition, and does not integrate NablaMimic into BM.
