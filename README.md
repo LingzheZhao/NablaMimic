@@ -3,7 +3,7 @@
 <p align="center"><b>Humanoid motion tracking in minutes, learned from exact simulator gradients.</b></p>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2610.41654"><img alt="Paper on arXiv" src="assets/badge_arxiv.svg" height="36"></a>
+  <a href="https://sailab.ai/nablamimic/assets/nablamimic.pdf"><img alt="Paper" src="assets/badge_arxiv.svg" height="36"></a>
   <a href="https://sailab.ai/nablamimic/"><img alt="Project page" src="assets/badge_page.svg" height="36"></a>
   <a href="https://github.com/OamIcs/NablaEngine"><img alt="NablaEngine" src="assets/badge_engine.svg" height="36"></a>
   <a href="LICENSE"><img alt="License" src="assets/badge_license.svg" height="36"></a>
@@ -45,7 +45,7 @@ motion error in real time.</sub></p>
 - 🖥️ **One GPU, one command.** Training runs on [NablaEngine](https://github.com/OamIcs/NablaEngine), a fused
   differentiable engine for the G1, or on MuJoCo Warp.
 
-📄 [Paper](https://arxiv.org/abs/2610.41654) · 🌐 [Project page](https://sailab.ai/nablamimic/) · ⚙️ [NablaEngine](https://github.com/OamIcs/NablaEngine)
+📄 [Paper](https://sailab.ai/nablamimic/assets/nablamimic.pdf) · 🌐 [Project page](https://sailab.ai/nablamimic/) · ⚙️ [NablaEngine](https://github.com/OamIcs/NablaEngine)
 
 ## 🛠️ Installation
 
