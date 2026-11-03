@@ -1,0 +1,8 @@
+# Matched position feedback comparison on all forty LAFAN1 motions.
+# Choose --position-feedback encoder or decoder and --seed explicitly at launch.
+# Stop after 9,000 completed outer updates. The launcher supplies the finite wall budget.
+@base/action_target.args
+--policy-ema --lr-warmup-steps 100
+--physics engine --residual-action
+--enc-hoist off
+--iters 9000

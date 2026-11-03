@@ -177,3 +177,21 @@ class PositionFeedbackTest(unittest.TestCase):
                 ('policy_obs', 'critic_obs', 'step', 'reward', 'terminated', 'clip_ended'))):
             with self.assertRaisesRegex(ValueError, 'Cannot hoist'):
                 rollout({}, None, None, SimpleNamespace(frame=jnp.array([0])), None, None, None)
+
+    def test_matched_lafan_config_has_fixed_updates_and_original_workload(self):
+        from pathlib import Path
+        from nablamimic import train
+        from nablamimic.params import read_params
+        config = Path(__file__).resolve().parents[1] / 'configs/position_feedback_lafan1.args'
+        for route in ('encoder', 'decoder'):
+            args = train.build_parser().parse_args(read_params(config) + [
+                '--position-feedback', route, '--seed', '1', '--out', 'unused'])
+            self.assertEqual(args.position_feedback, route)
+            self.assertEqual(args.iters, 9000)
+            self.assertIsNone(args.hours)
+            self.assertEqual(args.enc_hoist, 'off')
+            self.assertEqual((args.num_envs, args.horizon, args.replay_steps, args.collect_envs),
+                             (4096, 64, 1000, 4096))
+            self.assertEqual((args.lr_warmup_steps, args.lr_decay_steps), (100, 16000))
+            self.assertEqual((args.action_target[0], args.critic_iters), (8, 20))
+            self.assertTrue(args.anchor_to_decoder and args.policy_ema and args.residual_action)
