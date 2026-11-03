@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="186.25" height="36" viewBox="0 0 186.25 36">
+<defs><filter id="s" x="-10%" y="-30%" width="120%" height="160%"><feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity="0.14"/></filter>
+<clipPath id="c"><rect x="4" y="3" width="178.25" height="28" rx="5"/></clipPath></defs>
+<rect x="4" y="3" width="178.25" height="28" rx="5" fill="#fff" filter="url(#s)"/>
+<g clip-path="url(#c)"><svg x="4" y="3" xmlns="http://www.w3.org/2000/svg" width="178.25" height="28" role="img" aria-label="LICENSE: APACHE 2.0"><title>LICENSE: APACHE 2.0</title><g shape-rendering="crispEdges"><rect width="75.75" height="28" fill="#ffffff"/><rect x="75.75" width="102.5" height="28" fill="#30a46c"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100"><text transform="scale(.1)" x="378.75" y="175" textLength="517.5" fill="#333">LICENSE</text><text transform="scale(.1)" x="1270" y="175" textLength="785" font-weight="bold">APACHE 2.0</text></g></svg></g></svg>

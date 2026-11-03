@@ -5,4 +5,4 @@ Importing the package loads nothing heavy: MuJoCo Warp reads its backward switch
 after mjw_options.configure() (sim.make_warp, evaluate.py, bones/benchmark.py).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

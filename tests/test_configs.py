@@ -15,9 +15,14 @@ def parse(module, name, *extra):
     return module.build_parser().parse_args(read_params(CONFIGS / name) + ["--out", "unused", *extra])
 
 
+V2 = {"mask_after_done": False, "lr_warmup_steps": 100, "actor_ema": 0.999, "actor_ema_warmup": True}
+V1 = {"mask_after_done": True, "lr_warmup_steps": 500, "actor_ema": 0.0, "actor_ema_warmup": False}
+
+
 def test_ours():
     """The recipe on both simulators; configs/ours*.args use residual actions, configs/reported/ours_absolute*.args
-    (the reported comparisons) absolute ones, and otherwise equal them."""
+    (the reported comparisons) absolute ones, and otherwise equal them, except that configs/ours.args has the 0.2.0
+    defaults (base/ours.args) and the others the v0.1.0 recipe (base/ours_v1.args)."""
     for name, physics, residual in (("ours.args", "engine", True), ("ours_mjw.args", "warp", True),
                                     ("reported/ours_absolute.args", "engine", False),
                                     ("reported/ours_absolute_mjw.args", "warp", False)):
@@ -25,10 +30,11 @@ def test_ours():
         assert a.physics == physics and a.horizon == 64 and a.num_envs == 4096 and a.no_remat
         assert a.action_target == [8, 1, 0.03] and a.action_target_lr == 6e-4 and a.action_target_delta_floor == 0.3
         assert a.act_cot_clip == 3 and a.act_noise == 0.05 and a.anchor_to_decoder and a.enc_hoist == "on"
-        assert a.critic_pre_state and a.mask_after_done and a.term_penalty == [2, 0.08, 0.10]
+        assert a.critic_pre_state and a.term_penalty == [2, 0.08, 0.10]
+        assert all(vars(a)[k] == v for k, v in (V2 if name == "ours.args" else V1).items()), name
         assert (a.replay_steps, a.collect_envs, a.collect_noise, a.utd) == (1000, 4096, 0.1, 0.4)
         assert (a.reset_sampling, a.uniform_over) == ("supermimic", "bins")
-        assert (a.lr_warmup_steps, a.lr_decay_steps, a.lr_decay_to) == (500, 16000, 0.1)
+        assert (a.lr_decay_steps, a.lr_decay_to) == (16000, 0.1)
         assert a.solver_iterations == 10 and a.hours == 3 and not a.actor_obs_norm
         assert not a.v_bound and a.clip_end_boot == "next" and not a.shac_strict and a.residual_action == residual
         assert a.action_rate_space == "setpoint"
@@ -37,7 +43,7 @@ def test_ours():
         assert (a.mjw_adj_normal, a.mjw_adj_parallel, a.mjw_ift_solve) == (3, 1, 1)
     for res, ab in (("ours.args", "reported/ours_absolute.args"), ("ours_mjw.args", "reported/ours_absolute_mjw.args")):
         a, b = vars(parse(train, res)), vars(parse(train, ab))
-        assert {k for k in a if a[k] != b[k]} == {"residual_action"}, res
+        assert {k for k in a if a[k] != b[k]} == {"residual_action"} | (set(V2) if res == "ours.args" else set()), res
 
 
 def test_shac():
@@ -58,11 +64,11 @@ def test_shac():
 
 def test_ablations():
     """Each ablation is the absolute-action recipe (configs/reported/ours_absolute.args, configs/reported/ablations/) or
-    the residual-action recipe (configs/ours.args, configs/reported/ablations_residual/) with exactly the intended
-    options changed, and a 1.5 h budget; the residual-action ablation's arm is configs/ours.args with
-    --hours 1.5 and the action-rate term on the raw policy outputs, as in the reported runs."""
+    the residual-action recipe (configs/reported/ablations_residual/) with exactly the intended options changed, and a
+    1.5 h budget, all on the v0.1.0 recipe; the residual-action ablation's arm is the absolute recipe with
+    --residual-action, --hours 1.5 and the action-rate term on the raw policy outputs, as in the reported runs."""
     ours = vars(parse(train, "reported/ours_absolute.args"))
-    res = vars(parse(train, "ours.args", "--hours", "1.5", "--action-rate-space", "raw"))
+    res = vars(parse(train, "reported/ours_absolute.args", "--residual-action", "--hours", "1.5", "--action-rate-space", "raw"))
     assert {k for k in res if res[k] != ours[k]} == {"residual_action", "action_rate_space", "hours"}
     assert res["residual_action"] and res["action_rate_space"] == "raw" and res["hours"] == 1.5
     changed = {
@@ -73,8 +79,8 @@ def test_ablations():
         "no_replay.args": {"replay_steps": 0, "collect_envs": 0},
         "uniform_resets.args": {"reset_sampling": "uniform"},
     }
-    # the same ablations of the residual-action recipe (configs/ours.args)
-    ours_res = vars(parse(train, "ours.args"))
+    # the same ablations of the residual-action recipe (v0.1.0)
+    ours_res = vars(parse(train, "reported/ours_absolute.args", "--residual-action"))
     for d, base in (("reported/ablations", ours), ("reported/ablations_residual", ours_res)):
         assert sorted(p.name for p in (CONFIGS / d).glob("*.args")) == sorted(changed), d
         for name, diff in changed.items():

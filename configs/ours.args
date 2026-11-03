@@ -1,8 +1,9 @@
 # NablaMimic on NablaEngine (the fused differentiable engine), the recommended configuration: residual actions, i.e.
 # the joint setpoints are the next reference frame's joint angles plus the scaled action instead of the default pose
 # plus the scaled action, with the reward unchanged (the action-rate term on the commanded setpoints, the default
-# --action-rate-space setpoint); otherwise equal to the absolute-action recipe of the reported comparisons
-# (configs/reported/ours_absolute.args). 3 h of training.
+# --action-rate-space setpoint), on the 0.2.0 defaults of base/ours.args (no objective cut after an episode end inside
+# a window, the evaluation scores the actor's Polyak average, 100-update learning-rate warmup). 3 h of training. The
+# absolute-action recipe of the reported v0.1.0 comparisons: configs/reported/ours_absolute.args.
 @base/ours.args
 --physics engine --residual-action
 --hours 3

@@ -173,7 +173,7 @@ def main(argv=None):
             continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as fh:
             ck = pickle.load(fh)
-        actor = jax.tree_util.tree_map(jnp.asarray, ck["actor"])
+        actor = jax.tree_util.tree_map(jnp.asarray, ck["actor_ema" if "actor_ema" in ck else "actor"])
         t1, names, rets, falls, lens = time.time(), [], [], [], []
         for g in groups:
             n_real, lengths, lib = batch_library(g, batch, cap)

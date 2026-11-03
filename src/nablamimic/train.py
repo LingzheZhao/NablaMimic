@@ -307,6 +307,12 @@ def build_parser():
                     help=">0 with --lr-decay-steps: linear warmup from 0 over this many updates, then the cosine decay "
                          "(warmup included in --lr-decay-steps)")
     ap.add_argument("--ckpt-every", type=int, default=250, help="numbered checkpoints for the evaluation")
+    ap.add_argument("--actor-ema", type=float, default=0.0,
+                    help=">0: also keep a Polyak average of the actor (decay per update; training and the collector use "
+                         "the live actor) and store it in every checkpoint as actor_ema, which the evaluation scores")
+    ap.add_argument("--actor-ema-warmup", action="store_true",
+                    help="--actor-ema D: the decay after n averaging steps is min(D, (1 + n) / (10 + n)), a short "
+                         "average early growing to D, so the early weights do not dominate")
     return ap
 
 
@@ -676,6 +682,7 @@ def main(argv=None):
         as_j = lambda t: jax.tree_util.tree_map(jnp.asarray, t)  # noqa: E731
         actor, critic, cnorm = as_j(ck["actor"]), as_j(ck["critic"]), as_j(tuple(ck["cnorm"]))
         st_a, st_c, bin_q = as_j(ck["st_a"]), as_j(ck["st_c"]), as_j(ck["bin_q"])
+        ema0 = as_j(ck["actor_ema"]) if "actor_ema" in ck else None
         start_it, env_steps0, wall0 = int(ck["iter"]), int(ck["env_steps"]), float(ck["wall_s"])
         print(f"resumed from {args.resume} at update {start_it}", flush=True)
 
@@ -687,6 +694,12 @@ def main(argv=None):
     rep = lambda tree: jax.tree_util.tree_map(lambda x: jnp.broadcast_to(x, (nd,) + jnp.shape(x)), tree)  # noqa: E731
     first = lambda tree: jax.tree_util.tree_map(lambda x: x[0], tree)  # noqa: E731
     actor, critic, st_a, st_c, cnorm, bin_q = map(rep, (actor, critic, st_a, st_c, cnorm, bin_q))
+    actor_ema = None
+    if args.actor_ema > 0:
+        actor_ema = rep(ema0) if args.resume and ema0 is not None else actor
+    n_ema = start_it  # averaging steps so far (one per update)
+    ema_step = jax.jit(lambda e, a, d: jax.tree_util.tree_map(
+        lambda x, y: (d * x + (1.0 - d) * y).astype(x.dtype) if jnp.issubdtype(x.dtype, jnp.floating) else y, e, a))
     key, kr = jax.random.split(key)
     probs0 = jax.jit(frame_probs)(first(bin_q), aux)
 
@@ -778,6 +791,7 @@ def main(argv=None):
                              cnorm=jax.device_get(first(cnorm)), st_a=jax.device_get(first(st_a)),
                              st_c=jax.device_get(first(st_c)), bin_q=jax.device_get(first(bin_q)),
                              **({"st_r": jax.device_get(first(buf["opt"]))} if "opt" in buf else {}),
+                             **({"actor_ema": jax.device_get(first(actor_ema))} if actor_ema is not None else {}),
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file
 
@@ -822,6 +836,10 @@ def main(argv=None):
         else:
             actor, st_a, state, pool, ptr, outs, loss, gnorm, buf = p_actor(actor, st_a, critic, cnorm, state, pool,
                                                                             ptr, probs, keys_now, tables, buf)
+        if actor_ema is not None:
+            d = min(args.actor_ema, (1.0 + n_ema) / (10.0 + n_ema)) if args.actor_ema_warmup else args.actor_ema
+            actor_ema = ema_step(actor_ema, actor, jnp.float32(d))
+            n_ema += 1
         gn = float(gnorm[0])
         if args.shac_strict and not (math.isfinite(gn) and gn <= SHAC_GUARD):  # SHAC raises here; not applied
             save(out / "ckpt" / f"it_{it:06d}.pkl", it, time.time() - t_start, env_steps)

@@ -123,6 +123,8 @@ def build_parser():
     ap.add_argument("--iters", type=int, nargs="+", required=True, help="checkpoint iterations")
     ap.add_argument("--solver-iterations", type=int, default=10, help="Newton iterations of the evaluation physics")
     ap.add_argument("--out", required=True, help="JSON file the results are merged into")
+    ap.add_argument("--actor-key", default=None,
+                    help="checkpoint entry to score; default: actor_ema when the run keeps one (--actor-ema), else actor")
     return ap
 
 
@@ -153,13 +155,14 @@ def main(argv=None):
             continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as f:
             ck = pickle.load(f)
-        actor = jax.tree_util.tree_map(jnp.asarray, ck["actor"])
+        akey = args.actor_key or ("actor_ema" if "actor_ema" in ck else "actor")
+        actor = jax.tree_util.tree_map(jnp.asarray, ck[akey])
         t0 = time.time()
         res = jax.device_get(fn(actor, jnp.asarray(starts), jax.random.PRNGKey(1), env.tables()))
         rec = summarize(res, env, names)
         rec.update(iter=int(ck["iter"]), wall_s=float(ck["wall_s"]), seconds=round(time.time() - t0, 1),
                    gpu=jax.devices()[0].device_kind, solver_iterations=args.solver_iterations,
-                   action_rate_space="setpoint")
+                   action_rate_space="setpoint", actor_key=akey)
         out[key] = rec
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(out))

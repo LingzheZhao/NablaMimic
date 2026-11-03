@@ -6,6 +6,7 @@
 # without the bound, the critic's values ran past it and training diverged. Give the converted library on the command
 # line:
 # --motion-lib DATA/lib50 (scripts/download_bones_seed.sh).
-@base/ours.args
+# the v0.1.0 recipe (base/ours_v1.args)
+@base/ours_v1.args
 --physics engine --residual-action --ws-shards 8 --ws-swap 2000 --lr-decay-steps 52000 --v-bound --clip-end-boot pre
 --hours 6
