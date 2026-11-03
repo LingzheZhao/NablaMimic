@@ -142,3 +142,14 @@ the actual JAX networks, output-path protection and reference manifest order.
 The compiled-model comparison runs when the current Menagerie checkout is
 available. These tests do not establish a downstream executor's physical
 behavior, nor do earlier exports validate the updated source automatically.
+
+The pinned provisioned CPU suite passed all 78 tests with no skips. An integration
+run then used the actual official seed-zero checkpoint after 1,500 updates and
+its processed reference cache. All four CLI/verification stages and all 142
+checks passed: forty clips, 441,120 frames, fourteen bodies, twenty-nine actions,
+current checkpoint counts, both live/EMA policy exports and the same checkpoint
+critic. Exported kernels, normalizer arrays and model-derived action parameters
+matched exactly. NumPy actor/critic inference on fresh deterministic inputs
+satisfied rtol 1e-5 and atol 1e-6 against JAX for both policies. These measurements
+validate export layout and inference only; no downstream physical execution was
+performed by this integration check.
