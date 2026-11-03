@@ -136,6 +136,35 @@ def build_model(cfg: EnvConfig):
     return m, kp
 
 
+class ActionParameters(NamedTuple):
+    """The joint-setpoint action space of a compiled model, per actuator in actuator order (float64, as the model holds
+    them; TrackingEnv casts nominal, scale and the setpoint range to float32)."""
+    joint_names: tuple      # the joint each actuator drives
+    nominal: np.ndarray     # q0: mjlab's knees-bent pose (Q0)
+    kp: np.ndarray          # position gain
+    effort: np.ndarray      # torque limit (jnt_actfrcrange upper bound)
+    scale: np.ndarray       # ACTION_EFFORT_FRACTION * effort / kp: setpoint radians per unit of action
+    setpoint_lower: np.ndarray  # actuator_ctrlrange (robot.widen_ctrlrange)
+    setpoint_upper: np.ndarray
+
+
+ACTION_EFFORT_FRACTION = 0.25
+
+
+def action_parameters(m, kp):
+    """ActionParameters of the model build_model returns (m, kp)."""
+    jnames = tuple(m.joint(m.actuator_trnid[i, 0]).name for i in range(m.nu))
+    q0 = np.zeros(m.nu)
+    for i, n in enumerate(jnames):
+        for k, v in Q0.items():
+            if k in n:
+                q0[i] = v
+    effort = np.array([m.jnt_actfrcrange[m.actuator_trnid[i, 0], 1] for i in range(m.nu)])
+    kp = np.asarray(kp, np.float64)
+    return ActionParameters(jnames, q0, kp.copy(), effort, ACTION_EFFORT_FRACTION * effort / kp,
+                            np.array(m.actuator_ctrlrange[:, 0]), np.array(m.actuator_ctrlrange[:, 1]))
+
+
 class TrackingEnv:
     def __init__(self, lib: MotionLibrary, cfg: EnvConfig):
         assert lib.bodies == BM_BODIES, "load the library with bodies=BM_BODIES"
@@ -150,17 +179,11 @@ class TrackingEnv:
         mujoco.mj_forward(m, d)
         self.d0 = mjx.put_data(m, d, device=dev)
         self.nu = m.nu
-        jnames = [m.joint(m.actuator_trnid[i, 0]).name for i in range(m.nu)]
-        q0 = np.zeros(m.nu)
-        for i, n in enumerate(jnames):
-            for k, v in Q0.items():
-                if k in n:
-                    q0[i] = v
-        self.q0, self._q0_np = jnp.asarray(q0, jnp.float32), q0
-        effort = np.array([m.jnt_actfrcrange[m.actuator_trnid[i, 0], 1] for i in range(m.nu)])
-        self.action_scale = jnp.asarray(0.25 * effort / kp, jnp.float32)
-        self.ctrl_lo = jnp.asarray(m.actuator_ctrlrange[:, 0], jnp.float32)
-        self.ctrl_hi = jnp.asarray(m.actuator_ctrlrange[:, 1], jnp.float32)
+        act = action_parameters(m, kp)
+        self.q0, self._q0_np = jnp.asarray(act.nominal, jnp.float32), act.nominal
+        self.action_scale = jnp.asarray(act.scale, jnp.float32)
+        self.ctrl_lo = jnp.asarray(act.setpoint_lower, jnp.float32)
+        self.ctrl_hi = jnp.asarray(act.setpoint_upper, jnp.float32)
         jr = np.array([m.jnt_range[m.actuator_trnid[i, 0]] for i in range(m.nu)])
         mid, half = jr.mean(1), 0.5 * (jr[:, 1] - jr[:, 0]) * 0.9
         self.soft_lo, self.soft_hi = jnp.asarray(mid - half, jnp.float32), jnp.asarray(mid + half, jnp.float32)
