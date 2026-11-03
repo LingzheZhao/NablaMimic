@@ -31,6 +31,23 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def read_matmul_precision():
+    """Read the actual process-wide backend policy without running device work."""
+    return dict(float32_matmul_precision=torch.get_float32_matmul_precision(),
+                cuda_matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+                cudnn_allow_tf32=torch.backends.cudnn.allow_tf32)
+
+
+def configure_matmul_precision(mode):
+    """Set network matmul policy before compilation or CUDA graph capture."""
+    if mode not in ('nets_tf32', 'highest'):
+        raise ValueError(f'Unsupported matmul precision: {mode}')
+    torch.set_float32_matmul_precision('highest')
+    torch.backends.cuda.matmul.allow_tf32 = mode == 'nets_tf32'
+    torch.backends.cudnn.allow_tf32 = False
+    return read_matmul_precision()
+
+
 def clone_tree(tree):
     return nets.tree_map(lambda x: x.detach().clone(), tree)
 
@@ -464,6 +481,8 @@ def build_parser():
     parser = donor_parser()
     parser.prog = 'python -m nablamimic.torch_train'
     parser.description = __doc__
+    parser.add_argument('--matmul-precision', choices=('nets_tf32', 'highest'), default='nets_tf32',
+                        help='nets_tf32: permit TF32 network matrix multiplies; highest: FP32 with TF32 disabled')
     parser.add_argument('--execution',choices=('eager','compile','compile-graph'),default='compile-graph')
     parser.add_argument('--regression-batch',type=int,default=16384)
     parser.add_argument('--initial-checkpoint',type=Path,help='Current-format initial weights for a matched comparison; update count must be zero')
@@ -504,12 +523,12 @@ def main(argv=None):
     (output/'ckpt').mkdir(parents=True,exist_ok=True)
     if not torch.cuda.is_available() or torch.cuda.device_count()!=1:raise RuntimeError('Exactly one provisioned CUDA device required')
     torch.set_num_threads(8)
-    torch.backends.cuda.matmul.allow_tf32=True
-    torch.backends.cudnn.allow_tf32=False
+    precision=configure_matmul_precision(args.matmul_precision)
     torch.manual_seed(args.seed);np.random.seed(args.seed);random.seed(args.seed)
     code=os.environ.get('NABLA_SOURCE_REVISION') or git_state()[0]
     if not code:raise ValueError('Declared committed source revision required')
     config={**vars(args),**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
+            'matmul_precision':args.matmul_precision,'observed_precision':precision,
             'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
             'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
             'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
@@ -538,10 +557,14 @@ def main(argv=None):
     started=time.monotonic()
     try:
         trainer=TorchTrainer(env,actor,critic,args)
+        setup_precision=read_matmul_precision()
+        if setup_precision!=precision:
+            raise RuntimeError(f'Matmul precision changed during setup: {precision} -> {setup_precision}')
     except BaseException as error:
         write_json(output/'FAILED.json',dict(stage='setup',error=repr(error),
             setup_s=time.monotonic()-started,completed_updates=0))
         raise
+    trainer.setup_record['observed_precision']=setup_precision
     write_json(output/'execution.json',trainer.setup_record)
     torch_ffi.read_diagnostics(reset=True)
     training_started=time.monotonic();trainer.save(output,0.)
@@ -565,10 +588,14 @@ def main(argv=None):
                     while next_deadline<len(deadlines) and elapsed>=deadlines[next_deadline]:next_deadline+=1
                 if stop_requested or (args.hours is not None and elapsed>=args.hours*3600):break
         elapsed=time.monotonic()-training_started
+        terminal_precision=read_matmul_precision()
+        if terminal_precision!=precision:
+            raise RuntimeError(f'Matmul precision changed during training: {precision} -> {terminal_precision}')
         checkpoint=trainer.save(output,elapsed,full=args.full_state_at_end)
         status='interrupted' if stop_requested else 'completed'
         write_json(output/'terminal.json',dict(status=status,completed_updates=trainer.completed_updates,
             training_s=elapsed,total_s=time.monotonic()-started,checkpoint=checkpoint,
+            observed_precision=terminal_precision,
             setup=trainer.setup_record,graphs={k:v.record for k,v in trainer.graphs.items()}))
         if not stop_requested:(output/'DONE').write_text('completed\n')
     except BaseException as error:

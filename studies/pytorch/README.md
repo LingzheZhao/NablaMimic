@@ -10,7 +10,12 @@ fullgraph Inductor compilation and explicit CUDA Graphs. Compilation covers the
 control body, reference encoder, action targets, TD targets, collector, optimizers
 and statistics. Explicit graphs capture the entire differentiable window and
 backward, plus separate reusable collector, actor regression, critic and statistics
-calls. Compilation/capture errors fail the run. Random inputs are sampled outside
+calls. Compilation/capture errors fail the run. The default `--matmul-precision nets_tf32` permits TF32 network matrix
+multiplication. Select `--matmul-precision highest` for FP32 matrix multiplication
+with CUDA matmul and cuDNN TF32 disabled. Both choices retain compilation and
+CUDA Graph execution. The requested precision and actual backend settings are
+recorded before setup, checked again after capture, and checked before the final
+save; a changed setting fails the run. Random inputs are sampled outside
 graphs. Warmup and capture mutations are restored before training starts.
 
 Use a fixed committed revision and pinned environment with Torch 2.9.1+cu128 and
