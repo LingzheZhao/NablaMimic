@@ -73,8 +73,8 @@ ACTOR_HIDDEN, ACTOR_LATENT, CRITIC_HIDDEN = (2048, 1024, 512, 256), 32, (256, 12
 def actor_init(key, env, hidden=ACTOR_HIDDEN, latent=ACTOR_LATENT, anchor_to_decoder=0):
     """Encoder-decoder actor (SuperMimic's): the goal encoder maps the reference frames to z = tanh(.) of width latent,
     the decoder maps [z, proprioception history] to the action. anchor_to_decoder = k > 0: the goal's last k entries
-    (the anchor-relative orientation) go to the decoder beside the history instead of through the encoder, which then
-    sees only the future reference frames (marked by the parameter "anchor_dec" of shape (k,), never trained)."""
+    (orientation and optionally position) go to the decoder beside the history. Remaining goal entries enter the
+    encoder, including current position feedback when that route is selected (marked by the parameter "anchor_dec" of shape (k,), never trained)."""
     ke, kd = jax.random.split(key)
     k = anchor_to_decoder
     p = dict(enc=mlp_init(ke, [env.goal_dim - k, *hidden, latent]),
@@ -101,7 +101,7 @@ def actor_apply(p, hist, goal):
 
 @net_precision
 def actor_encode(p, goal_ref):
-    """--anchor-to-decoder actor: the motion encoder on the goal's reference part alone."""
+    """Encode supplied goal features, including state-dependent position when routed to the encoder."""
     return jnp.tanh(mlp_apply(p["enc"], goal_ref))
 
 

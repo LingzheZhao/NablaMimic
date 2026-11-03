@@ -120,17 +120,31 @@ def summarize(res, env, names):
 
 
 def validate_feedback(checkpoint, cfg):
-    enabled = bool(cfg.get("decoder_position_feedback", False))
-    if bool(checkpoint.get("decoder_position_feedback", False)) != enabled:
-        raise ValueError("Checkpoint position feedback condition differs from run configuration")
+    route = cfg.get("position_feedback", "none")
+    if route not in ("none", "encoder", "decoder"):
+        raise ValueError("Unknown position feedback route")
+    if checkpoint.get("position_feedback", "none") != route:
+        raise ValueError("Checkpoint position feedback route differs from run configuration")
+    expected = 9 if route == "decoder" else 6
     for name in ("actor", "actor_ema"):
-        if name in checkpoint:
-            actor = checkpoint[name]
-            expected = 9 if enabled else 6
-            if "anchor_dec" in actor and actor["anchor_dec"].shape[-1] != expected:
-                raise ValueError("Checkpoint decoder feedback dimension differs from run configuration")
-            if enabled and "anchor_dec" not in actor:
-                raise ValueError("Position feedback requires a decoder feedback checkpoint")
+        if name not in checkpoint:
+            continue
+        actor = checkpoint[name]
+        if "anchor_dec" in actor and actor["anchor_dec"].shape[-1] != expected:
+            raise ValueError("Checkpoint decoder feedback dimension differs from run configuration")
+        if route != "none" and "anchor_dec" not in actor:
+            raise ValueError("Position feedback requires orientation feedback in the decoder")
+        if "enc" in actor and "dec" in actor:
+            from .env import FUTURE, GOAL_FRAME_DIM, HIST, PROPRIO_DIM
+            encoder_input = FUTURE * GOAL_FRAME_DIM + (3 if route == "encoder" else 0)
+            if "anchor_dec" not in actor:
+                encoder_input += 6
+            decoder_input = actor["enc"][-1][1].shape[-1] + HIST * PROPRIO_DIM
+            if "anchor_dec" in actor:
+                decoder_input += expected
+            if (actor["enc"][0][0].shape[0] != encoder_input or
+                    actor["dec"][0][0].shape[0] != decoder_input):
+                raise ValueError("Checkpoint actor input dimensions differ from feedback route")
 
 
 class EvaluationSession:
@@ -155,7 +169,7 @@ class EvaluationSession:
         self.env = TrackingEnv(lib, EnvConfig(solver_iterations=self.solver_iterations,
                                              dr=False, obs_noise=False, reset_noise=False,
                                              residual_action=bool(self.cfg.get("residual_action", False)),
-                                             decoder_position_feedback=bool(self.cfg.get("decoder_position_feedback", False)),
+                                             position_feedback=self.cfg.get("position_feedback", "none"),
                                              action_rate_space="setpoint"))
         self.env.warp = sim.make_warp(self.env, [len(self.env.starts)], train=False,
                                       forward_only=self.forward_only)
@@ -295,7 +309,7 @@ def main(argv=None):
     lib = load_library(names, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False,
                                      reset_noise=False, residual_action=bool(cfg.get("residual_action", False)),
-                                     decoder_position_feedback=bool(cfg.get("decoder_position_feedback", False)),
+                                     position_feedback=cfg.get("position_feedback", "none"),
                                      action_rate_space="setpoint"))
     nclip = len(env.starts)
     env.warp = sim.make_warp(env, [nclip], train=False, forward_only=args.forward_only)

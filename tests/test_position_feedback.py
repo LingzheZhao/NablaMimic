@@ -1,4 +1,4 @@
-"""CPU behavioral contracts for decoder-only position feedback; no physics instantiated."""
+"""CPU behavioral contracts for position feedback routes; no physics instantiated."""
 from types import SimpleNamespace
 import unittest
 import jax
@@ -12,7 +12,7 @@ from nablamimic.evaluate import validate_feedback
 class PositionFeedbackTest(unittest.TestCase):
     def fixture(self, enabled, noise=True):
         env = object.__new__(TrackingEnv)
-        env.cfg = EnvConfig(decoder_position_feedback=enabled, obs_noise=noise)
+        env.cfg = EnvConfig(position_feedback=(enabled if isinstance(enabled, str) else "decoder" if enabled else "none"), obs_noise=noise)
         env.torso_id = env.anchor_k = 0
         env.ref_body_pos = jnp.array([[[2., 3., 1.]]])
         env.ref_body_quat = jnp.array([[[1., 0., 0., 0.]]])
@@ -53,22 +53,22 @@ class PositionFeedbackTest(unittest.TestCase):
     def test_checkpoint_feedback_flag_and_both_actor_dimensions(self):
         for enabled in (False, True):
             k = 9 if enabled else 6
-            cfg = dict(decoder_position_feedback=enabled)
-            checkpoint = dict(decoder_position_feedback=enabled, actor={'anchor_dec': jnp.zeros(k)}, actor_ema={'anchor_dec': jnp.zeros(k)})
+            cfg = dict(position_feedback="decoder" if enabled else "none")
+            checkpoint = dict(position_feedback="decoder" if enabled else "none", actor={'anchor_dec': jnp.zeros(k)}, actor_ema={'anchor_dec': jnp.zeros(k)})
             validate_feedback(checkpoint, cfg)
             with self.assertRaises(ValueError):
-                validate_feedback(checkpoint, dict(decoder_position_feedback=not enabled))
+                validate_feedback(checkpoint, dict(position_feedback="none" if enabled else "decoder"))
             for name in ('actor', 'actor_ema'):
                 bad = dict(checkpoint, **{name: {'anchor_dec': jnp.zeros(15-k)}})
                 with self.assertRaises(ValueError):
                     validate_feedback(bad, cfg)
         validate_feedback({'actor': {}}, {})
         with self.assertRaises(ValueError):
-            validate_feedback({'decoder_position_feedback': True, 'actor': {}}, {'decoder_position_feedback': True})
+            validate_feedback({'position_feedback': 'decoder', 'actor': {}}, {'position_feedback': 'decoder'})
 
     def test_real_critic_reward_and_termination_are_flag_invariant(self):
         baseline, state = self.fixture(False)
-        feedback, _ = self.fixture(True)
+        feedback, _ = self.fixture("encoder")
         for env in (baseline, feedback):
             env.nu = 29
             env.q0 = jnp.zeros(29)
@@ -107,10 +107,10 @@ class PositionFeedbackTest(unittest.TestCase):
         configs = Path(__file__).resolve().parents[1] / 'configs'
         def parse(name):
             return train.build_parser().parse_args(read_params(configs / name) + ['--out', 'unused'])
-        self.assertFalse(EnvConfig().decoder_position_feedback)
-        self.assertFalse(parse('ours_ema.args').decoder_position_feedback)
+        self.assertEqual(EnvConfig().position_feedback, "none")
+        self.assertEqual(parse('ours_ema.args').position_feedback, 'none')
         enabled = parse('ours_ema_position_feedback.args')
-        self.assertTrue(enabled.decoder_position_feedback)
+        self.assertEqual(enabled.position_feedback, 'decoder')
         self.assertTrue(enabled.anchor_to_decoder)
         p = nets.actor_init(jax.random.PRNGKey(2), SimpleNamespace(goal_dim=26, hist_dim=4, nu=2),
                             hidden=(8,), latent=3, anchor_to_decoder=9)
@@ -118,3 +118,62 @@ class PositionFeedbackTest(unittest.TestCase):
         live = dict(p, anchor_dec=jnp.arange(9, dtype=jnp.float32))
         updated, _ = update_policy_ema(ema, live, count)
         np.testing.assert_array_equal(updated['anchor_dec'], live['anchor_dec'])
+
+    def test_encoder_and_decoder_receive_identical_feedback_and_noise(self):
+        for noise in (False, True):
+            encoder, state = self.fixture("encoder", noise)
+            decoder, _ = self.fixture("decoder", noise)
+            key = jax.random.PRNGKey(13)
+            np.testing.assert_array_equal(encoder.goal(state, key), decoder.goal(state, key))
+            def position_goal(pos):
+                dx = SimpleNamespace(xpos=pos[None], xquat=state.dx.xquat)
+                return encoder.goal(SimpleNamespace(frame=state.frame, dx=dx), key)
+            jac = jax.jacrev(position_goal)(state.dx.xpos[0])
+            n = FUTURE * GOAL_FRAME_DIM
+            np.testing.assert_allclose(jac[n:n+3], -np.eye(3), atol=1e-7)
+            np.testing.assert_array_equal(jac[:n], 0.)
+            np.testing.assert_array_equal(jac[n+3:], 0.)
+
+    def test_position_routes_and_shared_initialization(self):
+        env = SimpleNamespace(goal_dim=26, hist_dim=4, nu=2)
+        key = jax.random.PRNGKey(9)
+        encoder = nets.actor_init(key, env, hidden=(8, 5), latent=3, anchor_to_decoder=6)
+        decoder = nets.actor_init(key, env, hidden=(8, 5), latent=3, anchor_to_decoder=9)
+        for section in ("enc", "dec"):
+            for a, b in zip(encoder[section][1:], decoder[section][1:]):
+                for x, y in zip(a, b):
+                    np.testing.assert_array_equal(x, y)
+        hist, goal = jnp.ones(4), jnp.arange(26, dtype=jnp.float32) / 30
+        for actor, k in ((encoder, 6), (decoder, 9)):
+            direct = lambda g: nets.actor_apply(actor, hist, g)
+            split = lambda g: nets.actor_decode(actor, nets.actor_encode(actor, g[:-k]), hist, g[-k:])
+            np.testing.assert_allclose(direct(goal), split(goal), atol=1e-7)
+            gradient = jax.jacrev(direct)(goal)
+            np.testing.assert_allclose(gradient, jax.jacrev(split)(goal), atol=1e-7)
+            self.assertGreater(float(jnp.linalg.norm(gradient[:, -9:-6])), 0.)
+        self.assertEqual(encoder['enc'][0][0].shape[0], decoder['enc'][0][0].shape[0] + 3)
+        self.assertEqual(encoder['dec'][0][0].shape[0] + 3, decoder['dec'][0][0].shape[0])
+
+    def test_checkpoint_encoder_route_and_live_ema_input_dimensions(self):
+        from nablamimic.env import HIST, PROPRIO_DIM
+        env = SimpleNamespace(goal_dim=FUTURE * GOAL_FRAME_DIM + 9, hist_dim=HIST * PROPRIO_DIM, nu=2)
+        for route, k in (("encoder", 6), ("decoder", 9)):
+            actor = nets.actor_init(jax.random.PRNGKey(0), env, hidden=(8,), latent=3, anchor_to_decoder=k)
+            checkpoint = dict(position_feedback=route, actor=actor, actor_ema=actor)
+            validate_feedback(checkpoint, dict(position_feedback=route))
+            with self.assertRaises(ValueError):
+                validate_feedback(checkpoint, dict(position_feedback="decoder" if route == "encoder" else "encoder"))
+            for name in ("actor", "actor_ema"):
+                wrong = dict(actor, enc=[(actor['enc'][0][0][:-3], actor['enc'][0][1]), *actor['enc'][1:]])
+                with self.assertRaises(ValueError):
+                    validate_feedback(dict(checkpoint, **{name: wrong}), dict(position_feedback=route))
+
+    def test_encoder_hoist_is_rejected(self):
+        from nablamimic import train
+        env = SimpleNamespace(cfg=EnvConfig(position_feedback="encoder"))
+        rollout = train.make_rollout(env, 2, gamma=.99, max_ep=100, remat=False, enc_hoist=True)
+        from unittest.mock import patch
+        with patch.object(train, 'vmapped', return_value=dict.fromkeys(
+                ('policy_obs', 'critic_obs', 'step', 'reward', 'terminated', 'clip_ended'))):
+            with self.assertRaisesRegex(ValueError, 'Cannot hoist'):
+                rollout({}, None, None, SimpleNamespace(frame=jnp.array([0])), None, None, None)

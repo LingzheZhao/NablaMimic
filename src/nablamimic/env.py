@@ -64,7 +64,7 @@ SCALE = dict(joint_vel=1 / 5.0, ang_vel=1 / 2.0)
 
 @dataclass(frozen=True)
 class EnvConfig:
-    decoder_position_feedback: bool = False
+    position_feedback: str = "none"
     solver_iterations: int = 10
     dr: bool = True                # domain randomization (training); off for evaluation
     obs_noise: bool = True
@@ -74,6 +74,10 @@ class EnvConfig:
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions
+
+    def __post_init__(self):
+        if self.position_feedback not in ("none", "encoder", "decoder"):
+            raise ValueError("Unknown position feedback route")
 
 
 class Xi(NamedTuple):
@@ -174,7 +178,7 @@ class TrackingEnv:
         self.set_library(lib)
         self.goal_dim = FUTURE * GOAL_FRAME_DIM + (GOAL_ANCHOR.stop - GOAL_ANCHOR.start)
         critic_goal_dim = self.goal_dim
-        self.goal_dim += 3 if cfg.decoder_position_feedback else 0
+        self.goal_dim += 3 if cfg.position_feedback != "none" else 0
         self.hist_dim = HIST * PROPRIO_DIM
         self.xi_dim = 1 + m.nu + 3
         self.critic_dim = PROPRIO_DIM + ANCHOR_DIM + critic_goal_dim + 1 + 3 + self.xi_dim
@@ -274,7 +278,7 @@ class TrackingEnv:
         if key is not None and self.cfg.obs_noise:
             lim = jnp.concatenate([jnp.full(3, 0.25), jnp.full(6, 0.05)])[sl]
             a = a + jax.random.uniform(key, a.shape, minval=-1.0, maxval=1.0) * lim
-        if self.cfg.decoder_position_feedback:
+        if self.cfg.position_feedback != "none":
             pos = self._anchor_rel(state.dx, state.frame)[:3]
             if key is not None and self.cfg.obs_noise:
                 pos = pos + 0.25 * jax.random.uniform(

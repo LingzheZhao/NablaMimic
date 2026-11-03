@@ -100,6 +100,8 @@ def make_rollout(env, horizon, gamma, max_ep, remat, act_clip=None, act_noise=0.
         v_pobs, v_cobs, v_step, v_rew = f["policy_obs"], f["critic_obs"], f["step"], f["reward"]
         v_term, v_end = f["terminated"], f["clip_ended"]
         n = state.frame.shape[0]
+        if enc_hoist and env.cfg.position_feedback == "encoder":
+            raise ValueError("Cannot hoist a state-dependent position-feedback encoder")
         hoist = enc_hoist and "anchor_dec" in actor
         if hoist:
             assert "obs_norm" not in actor, "--enc-hoist: not with --actor-obs-norm"
@@ -251,8 +253,8 @@ def build_parser():
                     help="warp: IFT solve of patch 0004 (1: scaled right-hand side, 2: no augmented border)")
     ap.add_argument("--actor-obs-norm", action="store_true",
                     help="normalize the actor input [history, goal] by running statistics (EMA 0.01 per update)")
-    ap.add_argument("--decoder-position-feedback", action="store_true",
-                    help="add current robot-frame reference position error to decoder feedback")
+    ap.add_argument("--position-feedback", choices=["none", "encoder", "decoder"], default="none",
+                    help="route current robot-frame reference position error to encoder or decoder")
     ap.add_argument("--anchor-to-decoder", action="store_true",
                     help="the anchor-relative orientation goes to the decoder beside the history; the motion encoder "
                          "sees only the future reference frames")
@@ -339,8 +341,10 @@ def main(argv=None):
     use_at = bool(args.action_target)
     assert not use_at or args.action_target_lr is not None, "--action-target: with --action-target-lr"
     assert not (args.shac_strict and use_at), "--shac-strict: the direct actor gradient (no --action-target)"
-    assert not args.decoder_position_feedback or args.anchor_to_decoder, \
-        "--decoder-position-feedback requires --anchor-to-decoder"
+    assert args.position_feedback == "none" or args.anchor_to_decoder, \
+        "--position-feedback requires --anchor-to-decoder"
+    assert args.enc_hoist == "off" or args.position_feedback != "encoder", \
+        "--enc-hoist requires a reference-only encoder; encoder position feedback depends on the current state"
     assert args.enc_hoist == "off" or (args.anchor_to_decoder and not args.actor_obs_norm), \
         "--enc-hoist: with --anchor-to-decoder (the encoder input must not depend on the state), not --actor-obs-norm"
     assert not args.motion_lib or args.replay_steps > 0, "--motion-lib restarts the collector's replay with each working set"
@@ -360,7 +364,7 @@ def main(argv=None):
         cfg = json.loads((out / "config.json").read_text())
         cfg["segments"] = cfg.get("segments", []) + [seg]
     else:
-        fixed = dict(FIXED, obs_mode="anchor_pos_ori" if args.decoder_position_feedback else "anchor_ori")
+        fixed = dict(FIXED, obs_mode="anchor_pos_ori" if args.position_feedback != "none" else "anchor_ori")
         cfg = dict(vars(args), **fixed, devices=nd, processes=1, git_commit=commit, git_dirty=dirty, gpu=gpu)
         if params_info is not None:
             cfg.update(argv=params_info["argv"], config_args=params_info["config_args"], config_file=str(args.config),
@@ -391,7 +395,7 @@ def main(argv=None):
         lib = load_library(clips, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, residual_action=args.residual_action,
                                      action_rate_space=args.action_rate_space,
-                                     decoder_position_feedback=args.decoder_position_feedback))
+                                     position_feedback=args.position_feedback))
     n = args.num_envs
     nc = args.collect_envs or n  # replay columns (envs per row)
     sizes = sorted({n, nc} if args.replay_steps > 0 else {n})
@@ -416,7 +420,7 @@ def main(argv=None):
     key = jax.random.PRNGKey(args.seed)
     key, ka, kc = jax.random.split(key, 3)
     k_anchor = (GOAL_ANCHOR.stop - GOAL_ANCHOR.start +
-                (3 if args.decoder_position_feedback else 0)) if args.anchor_to_decoder else 0
+                (3 if args.position_feedback == "decoder" else 0)) if args.anchor_to_decoder else 0
     actor = actor_init(ka, env, anchor_to_decoder=k_anchor)
     if args.actor_obs_norm:  # placeholder; set from the first reset batch below
         actor["obs_norm"] = (jnp.zeros(env.hist_dim + env.goal_dim), jnp.ones(env.hist_dim + env.goal_dim))
@@ -697,6 +701,8 @@ def main(argv=None):
     if args.resume:
         with open(args.resume, "rb") as f:
             ck = pickle.load(f)
+        from .evaluate import validate_feedback
+        validate_feedback(ck, cfg)
         as_j = lambda t: jax.tree_util.tree_map(jnp.asarray, t)  # noqa: E731
         actor, critic, cnorm = as_j(ck["actor"]), as_j(ck["critic"]), as_j(tuple(ck["cnorm"]))
         st_a, st_c, bin_q = as_j(ck["st_a"]), as_j(ck["st_c"]), as_j(ck["bin_q"])
@@ -815,7 +821,7 @@ def main(argv=None):
                              st_c=jax.device_get(first(st_c)), bin_q=jax.device_get(first(bin_q)),
                              **({"st_r": jax.device_get(first(buf["opt"]))} if "opt" in buf else {}),
                              **ema_fields, evaluation_policy="ema" if args.policy_ema else "live",
-                             decoder_position_feedback=args.decoder_position_feedback,
+                             position_feedback=args.position_feedback,
                              completed_updates=completed_updates,
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file

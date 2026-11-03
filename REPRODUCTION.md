@@ -79,13 +79,26 @@ generated skills or command composition, and does not integrate NablaMimic into 
 
 ## Decoder position feedback
 
-The optional `--decoder-position-feedback` extends the upstream controller's
-relative torso orientation with the current reference torso position expressed in
-the measured torso frame. These three values go directly to the decoder. The
-encoder still receives only reference features, and the critic's dimensions and
-values, reward, termination, and existing orientation-noise draws remain unchanged.
-Position observation noise uses a separate random-key derivation. This is a
-controller extension, separate from the paper-recipe reproduction above.
+`--position-feedback decoder` supplies the current reference torso position expressed in
+the measured torso frame directly to the decoder. `--position-feedback encoder`
+supplies the same three values to the encoder. Both keep the original six relative
+orientation values in the decoder. `--position-feedback none` retains the original
+orientation-only controller. Position noise uses the same independent key derivation
+in both routes. The critic, reward, termination and existing orientation-noise draws
+remain unchanged.
+
+The encoder route requires `--enc-hoist off` because its inputs depend on the current
+physical state. Each control recomputes its encoder with that state's position error,
+preserving input derivatives. For a matched comparison set this option off in both
+routes. With equal encoder and decoder first-layer widths, the position routes have
+equal parameter counts. Their first input matrices have different shapes and initial
+values despite equal seeds. All remaining layer shapes and initialization keys agree.
+Checkpoint metadata records the selected route and evaluation validates both live
+and EMA actor input dimensions. BONES evaluation accepts `--policy auto`, `ema` or
+`live`, preserving separate output identities.
+
+The following historical comparison used decoder position feedback against the
+orientation-only controller under its original source revision.
 
 The comparison retains all 40 original LAFAN1 clips, seed 0, 4,096 environments,
 64-control windows, 1,000 replay rows, eight actor-regression updates and twenty

@@ -33,6 +33,8 @@ from ..env import BM_BODIES, EnvConfig, TrackingEnv
 from ..motion import MotionLibrary, all_clip_names, load_library
 from ..motion_lib import KEYS, ShardedLibrary
 from ..nets import actor_apply
+from ..params import evaluation_actor
+from ..evaluate import validate_feedback
 from ..sim import vmapped
 
 
@@ -139,6 +141,7 @@ def build_parser():
     ap.add_argument("--batch", type=int, default=4096, help="worlds per batch (2048 fit a 48 GB GPU)")
     ap.add_argument("--chunk", type=int, default=200)
     ap.add_argument("--solver-iterations", type=int, default=10)
+    ap.add_argument("--policy", choices=["auto", "ema", "live"], default="auto")
     ap.add_argument("--out", required=True)
     return ap
 
@@ -157,10 +160,12 @@ def main(argv=None):
           f"(capacity {cap} frames), loaded in {time.time() - t0:.0f} s", flush=True)
     del clips
     cfgp = run / "config.json"
-    resid = bool(json.loads(cfgp.read_text()).get("residual_action", False)) if cfgp.exists() else False
+    cfg = json.loads(cfgp.read_text())
+    resid = bool(cfg.get("residual_action", False))
     env = TrackingEnv(batch_library(groups[0], batch, cap)[2],
                       EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False, reset_noise=False,
-                                residual_action=resid, action_rate_space="setpoint"))
+                                residual_action=resid, action_rate_space="setpoint",
+                                position_feedback=cfg.get("position_feedback", "none")))
     env.warp = sim.make_warp(env, [batch], train=False)
     chunk_fn = make_chunk(env, args.chunk)
     reset = jax.jit(lambda keys, frames, tables: vmapped(env, tables)["reset"](keys, frames))
@@ -168,12 +173,15 @@ def main(argv=None):
     out = json.loads(out_path.read_text()) if out_path.exists() else {}
     tag = "lafan1" if args.lafan1 else (f"subset{args.subset}" if args.subset else "full")
     for it in args.iters:
-        key = f"it{it}/{tag}"
-        if key in out:
-            continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as fh:
             ck = pickle.load(fh)
-        actor = jax.tree_util.tree_map(jnp.asarray, ck["actor"])
+        validate_feedback(ck, cfg)
+        policy = ("ema" if cfg.get("policy_ema", False) else "live") if args.policy == "auto" else args.policy
+        selected = evaluation_actor(ck, policy)
+        key = f"it{it}/{tag}/{policy}"
+        if key in out:
+            continue
+        actor = jax.tree_util.tree_map(jnp.asarray, selected)
         t1, names, rets, falls, lens = time.time(), [], [], [], []
         for g in groups:
             n_real, lengths, lib = batch_library(g, batch, cap)
@@ -196,9 +204,9 @@ def main(argv=None):
                    norm_return=float(rets.mean()), failed=int(falls.sum()), failed_frac=float(falls.mean()),
                    frame_weighted_return=float((rets * lens).sum() / lens.sum()), seconds=round(time.time() - t1, 1),
                    gpu=jax.devices()[0].device_kind, solver_iterations=args.solver_iterations,
-                   action_rate_space="setpoint")
+                   action_rate_space="setpoint", policy=policy, position_feedback=cfg.get("position_feedback", "none"))
         save_merged(out_path, key, rec)
-        np.savez_compressed(out_path.with_suffix("").as_posix() + f"_it{it}_{tag}.npz", names=np.asarray(names),
+        np.savez_compressed(out_path.with_suffix("").as_posix() + f"_it{it}_{tag}_{policy}.npz", names=np.asarray(names),
                             norm_return=rets.astype(np.float32), failed=falls, length=lens.astype(np.int32))
         print(key, json.dumps(rec), flush=True)
 
