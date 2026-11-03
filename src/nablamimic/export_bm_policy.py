@@ -62,6 +62,20 @@ NON_ARGUMENT_FIELDS = frozenset({
     "robot", "obs_mode", "contacts", "reward_frame", "hist_len", "state_select", "matmul_precision", "actor_hidden",
     "actor_latent", "critic_hidden", "devices", "processes", "git_commit", "git_dirty", "gpu", "engine", "segments",
     "argv", "config_args", "config_file"})
+# Core fields written by the current upstream 0.2 JAX producer. A known optional
+# CLI extension may add records without changing which core fields are required.
+CORE_CONFIG_FIELDS = frozenset({
+    "act_cot_clip", "act_noise", "action_rate_space", "action_target", "action_target_delta_floor",
+    "action_target_lr", "actor_ema", "actor_ema_warmup", "actor_hidden", "actor_latent", "actor_obs_norm",
+    "anchor_to_decoder", "ckpt_every", "clip_end_boot", "clips", "collect_envs", "collect_noise", "config",
+    "contacts", "critic_epochs", "critic_hidden", "critic_minibatches", "critic_pre_state", "devices",
+    "enc_hoist", "gamma", "git_commit", "git_dirty", "gpu", "hist_len", "horizon", "hours", "iters", "lam",
+    "lr", "lr_decay_steps", "lr_decay_to", "lr_warmup_steps", "mask_after_done", "matmul_precision",
+    "max_episode_steps", "mjw_adj_normal", "mjw_adj_parallel", "mjw_ift_solve", "motion_lib", "no_remat",
+    "num_envs", "obs_mode", "out", "physics", "processes", "replay_steps", "reset_sampling",
+    "residual_action", "resume", "reward_frame", "robot", "seed", "shac_strict", "solver_iterations",
+    "state_select", "term_penalty", "uniform_over", "utd", "v_bound", "ws_shards", "ws_swap",
+})
 
 # Per-frame proprioception (env.TrackingEnv.proprio), in order: (name, width, factor applied to the quantity).
 PROPRIOCEPTION_TERMS = (
@@ -151,11 +165,11 @@ def _require(cfg, key):
 
 def validate_run_config(cfg):
     """Validate the current upstream JAX producer's complete fresh-run schema."""
-    from .train import FIXED, build_parser
+    from .train import build_parser
 
     arguments = {action.dest for action in build_parser()._actions} - {"help"}
-    required = arguments | set(FIXED) | {"devices", "processes", "git_commit", "git_dirty", "gpu"}
-    missing, extra = required - cfg.keys(), cfg.keys() - (arguments | NON_ARGUMENT_FIELDS)
+    missing = CORE_CONFIG_FIELDS - cfg.keys()
+    extra = cfg.keys() - (arguments | NON_ARGUMENT_FIELDS)
     if missing or extra:
         raise ValueError(f"config.json fields: missing {sorted(missing)}, unsupported {sorted(extra)}")
     if cfg["resume"] is not None or cfg["devices"] != 1 or cfg["processes"] != 1 or cfg["shac_strict"]:

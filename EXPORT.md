@@ -33,6 +33,12 @@ follow the current producer, including the optional action-target optimizer and
 averaged actor entries. Missing or unsupported fields are rejected, without a
 format converter or alternate reader.
 
+The required configuration fields are the explicit upstream 0.2 core schema.
+Known optional CLI records may be present without becoming mandatory core
+fields, and absent optional records are not filled with defaults. This keeps
+the baseline schema usable when an optional feature is added to the parser.
+Policy export still requires the explicit `obs_mode=anchor_ori` contract.
+
 ## Reference manifest
 
 ```bash

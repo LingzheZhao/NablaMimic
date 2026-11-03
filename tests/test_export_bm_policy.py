@@ -50,7 +50,8 @@ def averaged_checkpoint():
 
 def run_config(**override):
     from nablamimic.train import FIXED, build_parser
-    cfg = dict(vars(build_parser().parse_args(["--out", "RUN"])), **FIXED)
+    parsed = dict(vars(build_parser().parse_args(["--out", "RUN"])), **FIXED)
+    cfg = {key: value for key, value in parsed.items() if key in ebp.CORE_CONFIG_FIELDS}
     cfg.update(physics="engine", num_envs=16, devices=1, processes=1, horizon=4, hist_len=10, obs_mode="anchor_ori",
                anchor_to_decoder=True, actor_obs_norm=False, actor_hidden=list(HIDDEN), actor_latent=LATENT,
                residual_action=True, action_rate_space="setpoint", solver_iterations=10, robot="mjlab",
@@ -185,6 +186,23 @@ class ArrayTests(unittest.TestCase):
 
 
 class DeclarationTests(unittest.TestCase):
+    def test_known_optional_cli_record_does_not_become_a_required_core_field(self):
+        from nablamimic import train
+        cfg, checkpoint = run_config(), current_checkpoint()
+        original_parser = train.build_parser
+
+        def extended_parser():
+            parser = original_parser()
+            parser.add_argument("--optional-diagnostic-note")
+            return parser
+
+        with mock.patch.object(train, "build_parser", side_effect=extended_parser):
+            export(checkpoint, cfg=cfg)
+            self.assertNotIn("optional_diagnostic_note", cfg)
+            export(checkpoint, cfg=dict(cfg, optional_diagnostic_note="declared"))
+            with self.assertRaises(ValueError):
+                export(checkpoint, cfg=dict(cfg, unrecognized_field="not a known CLI argument"))
+
     def test_fields(self):
         act = action_parameters()
         _, d = export(act=act)
@@ -384,6 +402,7 @@ class RefusalTests(unittest.TestCase):
         self.assertRefused(cfg=run_config(segments=[]))
         self.assertRefused(cfg=run_config(hist_len=5))
         self.assertRefused(cfg=run_config(obs_mode="full"))
+        self.assertRefused(cfg=run_config(obs_mode="anchor_pos_ori"))
         self.assertRefused(cfg=run_config(residual_action=None))
         self.assertRefused(cfg=run_config(motion_lib="/data/bones"))
         self.assertRefused(cfg=run_config(unsupported_field="value"))
