@@ -52,7 +52,7 @@ import numpy as np
 import optax
 
 from . import jax_cache, nets, sim
-from .env import BM_BODIES, GOAL_ANCHOR, EnvConfig, TrackingEnv, validate_feedback
+from .env import BM_BODIES, GOAL_ANCHOR, EnvConfig, TrackingEnv, position_feedback_enabled, validate_feedback
 from .motion import all_clip_names, load_library
 from .nets import actor_apply, actor_decode, actor_encode, actor_init, clip_rows_to_median, critic_apply, normalize
 from .params import git_state, latest_checkpoint, resolve_params
@@ -354,6 +354,8 @@ def main(argv=None):
         if params_info is not None:
             cfg.update(argv=params_info["argv"], config_args=params_info["config_args"], config_file=str(args.config),
                        segments=[seg])
+    if position_feedback_enabled(cfg) != args.decoder_position_feedback:
+        raise ValueError("Run observation mode differs from the current CLI feedback condition")
     if dirty:
         (out / f"git_diff_{commit[:10]}.patch").write_text(diff)
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
