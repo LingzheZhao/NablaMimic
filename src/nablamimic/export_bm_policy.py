@@ -20,6 +20,14 @@ value comes from the checkpoint, the run's config.json, the model build_model co
 names, nominal pose, gains, torque limits, setpoint range: the values the policy trained with), the reference manifest
 (export_reference_manifest) or a required argument; a missing or inconsistent value is refused, never defaulted.
 
+The run directory is the directory of config.json, and the checkpoint must lie in its ckpt/. train.py writes its end
+markers there: DONE, DIVERGED or HALTED. DIVERGED (a non-finite loss, checked every 10 updates on the
+logged update) is refused: the checkpoint at that label holds the weights that produced the non-finite loss and the nine
+updates before it were not checked. HALTED (the --shac-strict guard) is recorded, not refused: the guard masks the
+rejected actor and optimiser update (jnp.where on the guard's flag) before the halt save, so that save holds the weights
+after its label's completed updates; only actor-input statistics advance, and actors with them are refused anyway. The
+declaration records the markers present (a run resumed after a halt can hold HALTED and DONE).
+
   python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_011667.pkl --run-config RUN --policy live \\
       --artifact-id POLICY_ID --source-artifact-id CHECKPOINT_ID --reference-manifest MANIFEST.json \\
       --engine-revision ENGINE_REVISION --engine-contact-capacity 64 --engine-constraint-row-capacity 288 --out FILE.npz
@@ -42,6 +50,13 @@ from .params import evaluation_actor
 
 FORMAT = "bm-nabla-tracking-policy-v1"
 ANCHOR_WIDTH = GOAL_ANCHOR.stop - GOAL_ANCHOR.start
+# The model compiled_action_parameters builds: env.build_model compiles the fixed scene (train.FIXED).
+TRAINING_MODEL = dict(robot="mjlab", contacts="all")
+# Top-level config.json fields that train.py writes beside the parsed arguments: train.FIXED and its own bookkeeping.
+NON_ARGUMENT_FIELDS = frozenset({
+    "robot", "obs_mode", "contacts", "reward_frame", "hist_len", "state_select", "matmul_precision", "actor_hidden",
+    "actor_latent", "critic_hidden", "devices", "processes", "git_commit", "git_dirty", "gpu", "engine", "segments",
+    "argv", "config_args", "config_file"})
 
 # Per-frame proprioception (env.TrackingEnv.proprio), in order: (name, width, factor applied to the quantity).
 PROPRIOCEPTION_TERMS = (
@@ -87,6 +102,39 @@ def load_run_config(path):
     if path.is_dir():
         path = path / "config.json"
     return json.loads(path.read_text()), path
+
+
+def training_model(cfg):
+    """{robot, contacts} of the run; refused unless the fixed scene env.build_model compiles."""
+    model = dict(robot=_require(cfg, "robot"), contacts=_require(cfg, "contacts"))
+    if model != TRAINING_MODEL:
+        raise ValueError(f"model {model}: the exporter compiles the fixed scene {TRAINING_MODEL} only")
+    return model
+
+
+def run_markers(run_dir):
+    """The end markers train.py wrote in the run directory, as {name: content}; refuses a run that diverged."""
+    run_dir = Path(run_dir)
+    if (run_dir / "DIVERGED").exists():
+        raise ValueError(f"{run_dir} holds DIVERGED (non-finite loss at update {(run_dir / 'DIVERGED').read_text()!r}, "
+                         "checked every 10 updates): its last checkpoints may follow the divergence; not exported")
+    markers = {}
+    if (run_dir / "DONE").exists():
+        markers["DONE"] = dict(last_update=int((run_dir / "DONE").read_text()))
+    if (run_dir / "HALTED").exists():
+        markers["HALTED"] = json.loads((run_dir / "HALTED").read_text())
+    return markers
+
+
+def run_arguments(cfg):
+    """The run's arguments as config.json records them. With --config, train.py records argv (the arguments used,
+    without --config, --out and --resume), config_args (those of the file) and config_file; without --config it
+    records none of them, and the parsed arguments are the top-level fields other than NON_ARGUMENT_FIELDS."""
+    recorded = {k: cfg[k] for k in ("argv", "config_args", "config_file") if k in cfg}
+    if "argv" in cfg:
+        return dict(arguments_source="argv_recorded_at_first_start_with_config_file", **recorded)
+    return dict(arguments_source="parsed_arguments_in_config_json_run_started_without_config_file", **recorded,
+                parsed_arguments={k: v for k, v in cfg.items() if k not in NON_ARGUMENT_FIELDS})
 
 
 def _require(cfg, key):
@@ -223,7 +271,7 @@ def engine_records(cfg):
 
 
 def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact_id, source_artifact_id,
-                      engine_revision, contact_capacity, constraint_row_capacity, source_checkpoint="",
+                      engine_revision, contact_capacity, constraint_row_capacity, end_markers, source_checkpoint="",
                       source_config=""):
     """(arrays, declaration) for one checkpoint; pure apart from its arguments."""
     for name, value in (("artifact id", artifact_id), ("source artifact id", source_artifact_id),
@@ -235,6 +283,9 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
             raise ValueError(f"the engine {name} must be a positive integer")
     if _require(cfg, "physics") != "engine":
         raise ValueError(f"physics {cfg['physics']!r}: only NablaEngine-trained runs are exported")
+    model = training_model(cfg)
+    if not isinstance(end_markers, dict):
+        raise TypeError("end_markers must be the mapping run_markers() returns")
     if int(_require(cfg, "hist_len")) != HIST or _require(cfg, "obs_mode") != "anchor_ori":
         raise ValueError("config.json must declare hist_len 10 and obs_mode anchor_ori (the inputs of env.py)")
     residual = _require(cfg, "residual_action")
@@ -254,7 +305,8 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
             completed_outer_updates_source=count_source,
             selected_weights="averaged" if policy == "ema" else "live",
             checkpoint_label=label, checkpoint_evaluation_policy=checkpoint.get("evaluation_policy"),
-            source_checkpoint=str(source_checkpoint), source_run_configuration=str(source_config)),
+            source_checkpoint=str(source_checkpoint), source_run_configuration=str(source_config),
+            run_end_markers=end_markers),
         architecture=architecture,
         inputs=dict(
             proprioception=dict(terms=_terms(PROPRIOCEPTION_TERMS), width=PROPRIO_DIM,
@@ -286,18 +338,20 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
             physics="NablaEngine",
             engine=dict(declared_revision=engine_revision, reported=engine_records(cfg),
                         contact_capacity=contact_capacity, constraint_row_capacity=constraint_row_capacity),
-            model=dict(robot=_require(cfg, "robot"), contacts=_require(cfg, "contacts")),
+            model=model,
             reference=reference_record(manifest, cfg),
             training_matmul_precision=_require(cfg, "matmul_precision"),
-            source_run=dict(argv=cfg.get("argv"), git_commit=_require(cfg, "git_commit"),
+            source_run=dict(**run_arguments(cfg), git_commit=_require(cfg, "git_commit"),
                             git_dirty=_require(cfg, "git_dirty"), gpu=_require(cfg, "gpu"))),
     )
     return arrays, declaration
 
 
 def compiled_action_parameters(cfg):
-    """ActionParameters of the model the run trained on (env.build_model of its configuration)."""
+    """ActionParameters of the model the run trained on (env.build_model of its configuration, which always compiles
+    the fixed scene: other robots or contact sets are refused)."""
     from .env import EnvConfig, action_parameters, build_model
+    training_model(cfg)
     m, kp = build_model(EnvConfig(solver_iterations=int(_require(cfg, "solver_iterations")),
                                   residual_action=bool(_require(cfg, "residual_action")),
                                   action_rate_space=_require(cfg, "action_rate_space")))
@@ -331,7 +385,8 @@ def main(argv=None):
                                  description="Export a train.py checkpoint's actor as a BM tracking policy file "
                                              f"({FORMAT}): torch-layout weights and a JSON declaration in one npz.")
     ap.add_argument("--checkpoint", required=True, help="RUN/ckpt/it_N.pkl")
-    ap.add_argument("--run-config", required=True, help="the run's config.json, or the run directory holding it")
+    ap.add_argument("--run-config", required=True,
+                    help="the run's config.json, or the run directory holding it (the checkpoint must lie in its ckpt/)")
     ap.add_argument("--policy", required=True, choices=["live", "ema"],
                     help="the weights to export (params.evaluation_actor: ema refuses an absent or inconsistent EMA)")
     ap.add_argument("--artifact-id", required=True, help="the identity the policy file is published under")
@@ -350,6 +405,10 @@ def main(argv=None):
         ap.error(f"--out must name a new .npz file: {out}")
     label = checkpoint_label(args.checkpoint)
     cfg, cfg_path = load_run_config(args.run_config)
+    run_dir = cfg_path.resolve().parent
+    if Path(args.checkpoint).resolve().parent != run_dir / "ckpt":
+        ap.error(f"--checkpoint must lie in the run directory's ckpt/: {run_dir / 'ckpt'}")
+    markers = run_markers(run_dir)
     manifest = read_manifest(args.reference_manifest)
     with open(args.checkpoint, "rb") as f:
         checkpoint = pickle.load(f)
@@ -357,7 +416,7 @@ def main(argv=None):
         checkpoint, cfg, compiled_action_parameters(cfg), manifest, policy=args.policy, label=label,
         artifact_id=args.artifact_id, source_artifact_id=args.source_artifact_id, engine_revision=args.engine_revision,
         contact_capacity=args.engine_contact_capacity, constraint_row_capacity=args.engine_constraint_row_capacity,
-        source_checkpoint=Path(args.checkpoint).resolve(), source_config=cfg_path.resolve())
+        end_markers=markers, source_checkpoint=Path(args.checkpoint).resolve(), source_config=cfg_path.resolve())
     write_policy_file(arrays, declaration, out)
     src = declaration["policy_source"]
     print(f"{out}: {len(arrays)} arrays, {src['selected_weights']} weights after "

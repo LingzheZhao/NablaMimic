@@ -34,6 +34,12 @@ manifest's directory and absolute otherwise; a reader opens
 carry a tag that `motion.cache_file_name` computes from the body list; a reader
 takes the names from the manifest and does not compute the tag.
 
+Build the manifest from the cache the run itself read (its `MOTION_CACHE_DIR`).
+When that directory is a copy of a published cache, the manifest describes the
+published cache only if the copy is complete; compare the two directories' file
+names and sizes before publishing the manifest under the published cache's
+identity.
+
 ## Policy file
 
 ```bash
@@ -43,8 +49,12 @@ python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_N.pkl --run-confi
     --engine-contact-capacity 64 --engine-constraint-row-capacity 288 --out POLICY.npz
 ```
 
+`--run-config` takes the run directory or its `config.json`; the run directory
+is the directory of `config.json`, and the checkpoint must lie in its `ckpt/`.
+
 The output is an `.npz` in the format `bm-nabla-tracking-policy-v1`, readable
-with `np.load(path, allow_pickle=False)`. It holds 21 entries:
+with `np.load(path, allow_pickle=False)`. For the trained actor, with four
+hidden layers per network, it holds 21 entries:
 
 | Key | Shape | Content |
 | --- | --- | --- |
@@ -73,7 +83,9 @@ The declaration has eight sections. `policy_source` names the kind
 updates and the averaging updates, how the update count was obtained (the
 checkpoint's `completed_updates`, or for checkpoints without it the trainer's
 rule `env_steps / (num_envs x devices x horizon)`, which must also equal the
-file label), and the selected weights (`live` or `averaged`). `architecture`
+file label), the selected weights (`live` or `averaged`), and the end markers
+found in the run directory (`run_end_markers`: `DONE` with its last update,
+`HALTED` with the guard's record, or neither while a run is unfinished). `architecture`
 gives the widths, activation, latent squash and decoder input order. `inputs`
 names each proprioception and goal term with its width and factor, the
 ten-frame history (frame-major, oldest first), the previous action
@@ -92,12 +104,31 @@ revision and capacities given on the command line, which `config.json` does not
 contain, and the identities the engine reported at training), the robot model,
 the reference (the manifest's identity, selection and clips, which must agree
 with the run's `--clips`), the training matmul precision and the run's
-arguments.
+arguments. A run started with `--config` records `argv` (the arguments used,
+without `--config`, `--out` and `--resume`), `config_args` and `config_file`,
+and the declaration copies them. A run started without `--config` records none
+of the three; the declaration then says so in `arguments_source` and holds
+`parsed_arguments`, every top-level field of `config.json` except the fixed
+settings and bookkeeping that `train.py` adds (`NON_ARGUMENT_FIELDS`), instead
+of an empty `argv`.
+
+`train.py` ends a run with a marker in its directory. `DIVERGED` (a non-finite
+loss, checked on every tenth update) is refused: the checkpoint at that label
+holds the weights that produced the non-finite loss, and the nine updates before
+it were not checked. `HALTED` (the `--shac-strict` guard) is recorded rather
+than refused: the guard masks the rejected actor and optimizer update before the
+halt save, so the checkpoint written at the halt holds the weights after its
+label's completed updates. Only the actor-input statistics advance at the halt,
+and actors with them are refused. A run resumed after a halt can hold both
+`HALTED` and `DONE`; both are recorded.
 
 The command refuses rather than fills in: a checkpoint other than a numbered
 `it_N.pkl`, a label or update count that disagrees with the checkpoint, an actor
 without the anchor-to-decoder structure or with observation normalisation,
 kernel shapes that differ from the configured widths, non-finite or non-float32
-parameters, runs trained on MuJoCo Warp or a sharded motion library, a missing
-configuration field, and a manifest whose bodies, frame rate or clips differ
-from the run's.
+parameters, runs trained on MuJoCo Warp or a sharded motion library, a robot
+other than `mjlab` or contacts other than `all` (the action values come from
+`env.build_model`, which compiles that fixed scene only), a missing
+configuration field, a checkpoint outside the run directory's `ckpt/`, a run
+directory holding `DIVERGED`, and a manifest whose bodies, frame rate or clips
+differ from the run's.

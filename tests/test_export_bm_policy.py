@@ -1,11 +1,15 @@
 """The BM policy file exporter on a tiny synthetic checkpoint (CPU; the compiled-model part needs Menagerie)."""
 
+import contextlib
 import copy
+import io
 import json
+import pickle
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +21,7 @@ from nablamimic.motion import SCENE
 from nablamimic.nets import actor_init, actor_apply
 
 HIDDEN, LATENT, NU = (8, 4), 3, 29
+HIDDEN4 = (8, 7, 6, 5)  # four hidden layers, as the trained actor has: Linear indices 0, 2, 4, 6, 8
 ENV = types.SimpleNamespace(goal_dim=10 * 68 + 6, hist_dim=10 * 93, nu=NU)  # the real input widths
 LABEL, PER_UPDATE = 12, 16 * 1 * 4
 
@@ -25,9 +30,9 @@ def numpy_tree(tree):
     return jax.tree_util.tree_map(lambda x: np.asarray(x, np.float32), jax.device_get(tree))
 
 
-def released_checkpoint(seed=0):
+def released_checkpoint(seed=0, hidden=HIDDEN):
     """A checkpoint as the released recipe saves it: no evaluation policy, completed or EMA counts."""
-    actor = numpy_tree(actor_init(jax.random.PRNGKey(seed), ENV, hidden=HIDDEN, latent=LATENT, anchor_to_decoder=6))
+    actor = numpy_tree(actor_init(jax.random.PRNGKey(seed), ENV, hidden=hidden, latent=LATENT, anchor_to_decoder=6))
     return dict(actor=actor, critic=[], iter=LABEL, wall_s=1.0, env_steps=LABEL * PER_UPDATE)
 
 
@@ -68,7 +73,7 @@ def manifest(**override):
 
 def export(checkpoint=None, cfg=None, act=None, man=None, policy="live", label=LABEL, **kw):
     args = dict(artifact_id="policy-test", source_artifact_id="checkpoint-test", engine_revision="engine-test",
-                contact_capacity=64, constraint_row_capacity=288)
+                contact_capacity=64, constraint_row_capacity=288, end_markers={})
     args.update(kw)
     return ebp.build_policy_file(released_checkpoint() if checkpoint is None else checkpoint,
                                  run_config() if cfg is None else cfg, act or action_parameters(),
@@ -103,6 +108,28 @@ class ArrayTests(unittest.TestCase):
         self.assertEqual(arrays["encoder.0.weight"].shape, (HIDDEN[0], 680))
         self.assertEqual(arrays["decoder.0.weight"].shape, (HIDDEN[0], LATENT + 930 + 6))
         self.assertEqual(arrays["decoder.4.weight"].shape, (NU, HIDDEN[-1]))
+
+    def test_four_hidden_layers_reach_indices_six_and_eight(self):
+        ck = released_checkpoint(hidden=HIDDEN4)
+        arrays, decl = export(ck, cfg=run_config(actor_hidden=list(HIDDEN4)))
+        expected = {f"{p}.{n}.{s}" for p in ("encoder", "decoder") for n in (0, 2, 4, 6, 8)
+                    for s in ("weight", "bias")}
+        self.assertEqual(set(arrays), expected)
+        for tree, prefix in (("enc", "encoder"), ("dec", "decoder")):
+            self.assertEqual(len(ck["actor"][tree]), 5)
+            for i, (w, b) in enumerate(ck["actor"][tree]):
+                np.testing.assert_array_equal(arrays[f"{prefix}.{2 * i}.weight"], w.T)
+                np.testing.assert_array_equal(arrays[f"{prefix}.{2 * i}.bias"], b)
+        self.assertEqual(arrays["encoder.6.weight"].shape, (HIDDEN4[3], HIDDEN4[2]))
+        self.assertEqual(arrays["encoder.8.weight"].shape, (LATENT, HIDDEN4[3]))
+        self.assertEqual(arrays["decoder.8.weight"].shape, (NU, HIDDEN4[3]))
+        self.assertEqual(decl["architecture"]["decoder"]["hidden"], list(HIDDEN4))
+        rng = np.random.default_rng(1)
+        hist = rng.normal(size=(4, 930)).astype(np.float32)
+        goal = rng.normal(size=(4, 686)).astype(np.float32)
+        with jax.default_matmul_precision("highest"):
+            want = np.asarray(actor_apply(jax.tree_util.tree_map(jnp.asarray, ck["actor"]), hist, goal))
+        np.testing.assert_allclose(numpy_forward(arrays, hist, goal), want, rtol=1e-5, atol=1e-6)
 
     def test_numpy_execution_equals_the_actor(self):
         ck = released_checkpoint()
@@ -189,6 +216,33 @@ class DeclarationTests(unittest.TestCase):
         self.assertIsNone(dom["source_run"]["git_commit"])
         json.dumps(d)  # plain JSON
 
+    def test_run_arguments(self):
+        _, d = export()
+        run = d["training_domain"]["source_run"]
+        self.assertEqual(run["arguments_source"], "argv_recorded_at_first_start_with_config_file")
+        self.assertEqual(run["argv"], ["--residual-action"])
+        self.assertNotIn("parsed_arguments", run)
+        _, d = export(cfg=run_config(config_args=["--residual-action"], config_file="configs/ours.args"))
+        run = d["training_domain"]["source_run"]
+        self.assertEqual((run["config_args"], run["config_file"]), (["--residual-action"], "configs/ours.args"))
+        cfg = run_config()
+        del cfg["argv"]
+        _, d = export(cfg=cfg)
+        run = d["training_domain"]["source_run"]
+        self.assertEqual(run["arguments_source"], "parsed_arguments_in_config_json_run_started_without_config_file")
+        self.assertNotIn("argv", run)
+        args = run["parsed_arguments"]
+        self.assertEqual((args["num_envs"], args["horizon"], args["residual_action"]), (16, 4, True))
+        for field in ("robot", "contacts", "gpu", "segments", "git_commit", "devices", "actor_hidden"):
+            self.assertNotIn(field, args)
+
+    def test_end_markers_recorded(self):
+        halted = dict(iter=LABEL, grad_norm="nan", wall_s=3.0, env_steps=LABEL * PER_UPDATE, rule="SHAC guard")
+        _, d = export(end_markers=dict(HALTED=halted))
+        self.assertEqual(d["policy_source"]["run_end_markers"], dict(HALTED=halted))
+        _, d = export()
+        self.assertEqual(d["policy_source"]["run_end_markers"], {})
+
     def test_absolute_actions(self):
         _, d = export(cfg=run_config(residual_action=False))
         self.assertEqual(d["action"]["baseline"], dict(kind="nominal_joint_position"))
@@ -265,6 +319,12 @@ class RefusalTests(unittest.TestCase):
 
     def test_configuration(self):
         self.assertRefused(cfg=run_config(physics="warp"))
+        self.assertRefused(cfg=run_config(robot="g1_menagerie"))
+        self.assertRefused(cfg=run_config(contacts="feet"))
+        self.assertRefused(end_markers=None)
+        for cfg in (run_config(robot="g1_menagerie"), run_config(contacts="feet")):
+            with self.assertRaises(ValueError):
+                ebp.compiled_action_parameters(cfg)  # refused before any model is compiled
         self.assertRefused(cfg=run_config(segments=[]))
         self.assertRefused(cfg=run_config(hist_len=5))
         self.assertRefused(cfg=run_config(obs_mode="full"))
@@ -296,6 +356,88 @@ class RefusalTests(unittest.TestCase):
         export(ck)
         for x, y in zip(jax.tree_util.tree_leaves(ck["actor"]), jax.tree_util.tree_leaves(before["actor"])):
             np.testing.assert_array_equal(x, y)
+
+
+class RunDirectoryTests(unittest.TestCase):
+    """main() on temporary files; compiled_action_parameters (Menagerie) is replaced by the synthetic values."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.run = self.root / "run"
+        (self.run / "ckpt").mkdir(parents=True)
+        (self.run / "config.json").write_text(json.dumps(run_config()))
+        self.checkpoint = self.run / "ckpt" / f"it_{LABEL:06d}.pkl"
+        with open(self.checkpoint, "wb") as f:
+            pickle.dump(released_checkpoint(), f)
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text(json.dumps(manifest(artifact_id="reference-from-file")))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def main(self, out, run_config_arg=None, checkpoint=None):
+        argv = ["--checkpoint", str(checkpoint or self.checkpoint), "--run-config", str(run_config_arg or self.run),
+                "--policy", "live", "--artifact-id", "policy-from-main", "--source-artifact-id", "checkpoint-from-main",
+                "--reference-manifest", str(self.manifest), "--engine-revision", "engine-from-main",
+                "--engine-contact-capacity", "64", "--engine-constraint-row-capacity", "288", "--out", str(out)]
+        with mock.patch.object(ebp, "compiled_action_parameters", return_value=action_parameters()) as compiled, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            ebp.main(argv)
+        return compiled
+
+    def declaration(self, out):
+        with np.load(out, allow_pickle=False) as z:
+            return set(z.files), json.loads(z["declaration"].item())
+
+    def test_directory_and_file_resolve_to_the_same_run(self):
+        out = self.root / "from-directory.npz"
+        compiled = self.main(out)
+        self.assertEqual(compiled.call_args.args[0], run_config())
+        files, d = self.declaration(out)
+        self.assertEqual(len(files), 13)
+        src = d["policy_source"]
+        self.assertEqual(src["source_run_configuration"], str((self.run / "config.json").resolve()))
+        self.assertEqual(src["source_checkpoint"], str(self.checkpoint.resolve()))
+        self.assertEqual((src["checkpoint_label"], src["run_end_markers"]), (LABEL, {}))
+        self.assertEqual((d["artifact_id"], src["source_artifact_id"]), ("policy-from-main", "checkpoint-from-main"))
+        self.assertEqual(d["training_domain"]["reference"]["artifact_id"], "reference-from-file")
+        self.assertEqual(d["training_domain"]["reference"]["clips"], ["dance1_subject1", "walk1_subject1"])
+        self.assertEqual(d["training_domain"]["engine"]["declared_revision"], "engine-from-main")
+        out_file = self.root / "from-file.npz"
+        self.main(out_file, run_config_arg=self.run / "config.json")
+        self.assertEqual(self.declaration(out_file)[1], d)
+
+    def test_existing_output_refused(self):
+        out = self.root / "policy.npz"
+        out.write_bytes(b"earlier output")
+        with self.assertRaises(SystemExit):
+            self.main(out)
+        self.assertEqual(out.read_bytes(), b"earlier output")
+        with self.assertRaises(SystemExit):
+            self.main(self.root / "policy.npy")
+
+    def test_checkpoint_outside_the_run_refused(self):
+        other = self.root / "other" / "ckpt"
+        other.mkdir(parents=True)
+        moved = other / self.checkpoint.name
+        moved.write_bytes(self.checkpoint.read_bytes())
+        with self.assertRaises(SystemExit):
+            self.main(self.root / "policy.npz", checkpoint=moved)
+        self.assertFalse((self.root / "policy.npz").exists())
+
+    def test_markers(self):
+        (self.run / "DONE").write_text(str(LABEL))
+        halted = dict(iter=LABEL, grad_norm=2e6, wall_s=3.0, env_steps=LABEL * PER_UPDATE, rule="SHAC guard")
+        (self.run / "HALTED").write_text(json.dumps(halted) + "\n")
+        out = self.root / "halted.npz"
+        self.main(out)
+        self.assertEqual(self.declaration(out)[1]["policy_source"]["run_end_markers"],
+                         dict(DONE=dict(last_update=LABEL), HALTED=halted))
+        (self.run / "DIVERGED").write_text(str(LABEL))
+        with self.assertRaises(ValueError):
+            self.main(self.root / "diverged.npz")
+        self.assertFalse((self.root / "diverged.npz").exists())
 
 
 @unittest.skipIf(not SCENE.exists(), f"no Menagerie checkout at {SCENE} (scripts/setup_menagerie.sh)")
