@@ -276,3 +276,76 @@ capacity builds prevent attributing that historical difference to capacity alone
 
 This work covers simulation-based NablaMimic reference tracking. It does not establish
 generated skills or command composition, and does not integrate NablaMimic into BM.
+
+## Fixed-code FP32 training reading
+
+These measurements belong to the fixed pre-rebase implementations preserved in
+this archive. They do not qualify the current upstream-based candidates.
+The seed-0 FP32 run used one CMP 170HX, all forty reference clips, 4,096
+environments, horizon 64, replay length 1,000 and the 96-contact/416-row
+NablaEngine. Initial weights were shared with the earlier comparison.
+`torch.compile` and CUDA Graphs remained enabled. Actual precision readings
+before setup, after setup and at termination confirmed `highest`, with both
+CUDA matmul and cuDNN TF32 disabled.
+
+The nominal three-hour FP32 endpoint completed 5,232 updates and obtained
+original EMA return **0.8754723074**, completing 39/40 clips. The earlier TF32
+endpoint completed 12,640 updates and obtained **0.8761235155**, with 40/40
+complete. Thus disabling TF32 did not demonstrate a higher total return at this
+wall-clock budget. The JAX EMA endpoint was **0.9021339396** after 12,221 updates,
+but used the different 64-contact/288-row Engine condition; it is not an isolated
+precision comparison.
+
+Each checkpoint and execution keeps its own reading. Times below are saved
+checkpoint wall times, excluding compilation and capture. “Qualifying” refers
+only to the observed execution.
+
+| Saved minutes | Updates | Weights | Original return | Complete | Observed return | Complete | Qualifying |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 8.0108 | 232 | EMA | 0.466490 | 15/40 | 0.455838 | 14/40 | 0/40 |
+| 20.0274 | 579 | EMA | 0.756245 | 38/40 | 0.757760 | 38/40 | 0/40 |
+| 60.0075 | 1740 | EMA | 0.842730 | 40/40 | 0.842081 | 40/40 | 0/40 |
+| 90.0335 | 2613 | EMA | 0.859533 | 40/40 | 0.861245 | 40/40 | 0/40 |
+| 180.0269 | 5232 | EMA | 0.875472 | 39/40 | 0.874564 | 39/40 | 3/40 |
+| 180.0269 | 5232 | Live | 0.826100 | 39/40 | 0.845130 | 40/40 | 0/40 |
+
+All twelve evaluation processes completed; none was skipped. All six observed
+executions had finite scientific scalars and complete capacity instrumentation
+at 200 Hz, with no observed invalid active states or capacity loss. This evidence
+does not transfer to the uninstrumented original executions. All six failed the
+declared engineering gate: forty completions and at least 36 clips satisfying
+p95 world-body and torso-XY errors at most 0.3 m, p95 absolute torso yaw at most
+20 degrees, and mean aligned-body error at most 0.1 m. Successful execution and
+survival therefore did not establish tracking fidelity.
+
+Final EMA ended fallAndGetUp2_subject3 at 159.26 seconds for tilt in both
+executions, retaining 97.18% of that clip. Final live original ended
+fightAndSports1_subject1 at 14.56 seconds for height; live observed completed it.
+The incomplete reading is retained, not replaced by the complete one.
+
+The final original FP32 EMA body-orientation reward fraction was **0.942095**,
+versus **0.850161** at the earlier TF32 endpoint. Left wrist yaw, right wrist
+pitch and right wrist yaw MAE were **0.0611/0.0442/0.0572 rad**, versus
+**0.3928/0.4001/0.2747 rad**. These descriptive improvements coexist with weaker
+global position tracking: root-position reward fraction was **0.407314**, versus
+**0.550211**. The checkpoints have different update counts and executed supports;
+these differences do not identify a unique training cause.
+
+Final EMA observed had world-body MPJPE **0.402145 m**, aligned-body MPJPE
+**0.024505 m**, and torso-XY error **0.401017 m**. Final live observed had
+**1.049513 m** world-body MPJPE. These are macro means on executed supports,
+including partial trajectories. Small local pose error and substantial world
+drift remain distinct findings.
+
+Every one of the 5,232 training log rows passed count and finiteness checks.
+All nine native invalidity counters stayed zero; optimizer, EMA, native
+forward/backward and graph replay counts matched the workload. Nonzero solver
+iteration-limit, nonconvergence and singular diagnostics were retained.
+Mean update duration was **2.0600 s**. Setup took **156.3078 s**; the trainer's
+terminal training interval was **10,802.3553 s**, while the complete Python child
+lifetime, including startup and final serialization, was **11,178.4840 s**.
+Peak allocated/reserved GPU memory was **34.16/40.93 GB**.
+
+Equal-update comparisons at 1,500 and 5,000 updates were still pending when
+this reading was written. The endpoint table is therefore a measured wall-budget
+comparison, not the final matched-update conclusion.
