@@ -12,16 +12,34 @@ import jax.numpy as jnp
 import numpy as np
 
 from nablamimic import nets, sim
-from nablamimic.env import BM_BODIES, W, EnvConfig, TrackingEnv
+from nablamimic.env import BM_BODIES, DT, W, EnvConfig, TrackingEnv
 from nablamimic.evaluate import validate_feedback
 from nablamimic.motion import all_clip_names, load_library
 from nablamimic.params import evaluation_actor
 
 HERE = Path(__file__).resolve().parent
 INSTRUMENTATION = HERE.parent / "evaluation" / "instrumentation"
-DISPLACEMENTS = (0.0, -0.30, 0.30)
-PREFIX_CONTROLS = 50
-MAX_CONTROLS = 250
+
+
+def load_settings(path):
+    settings = json.loads(Path(path).read_text())
+    if settings["paired_routes"] != ["encoder", "decoder"] or settings["policy"] not in ("ema", "live"):
+        raise ValueError("Select paired encoder/decoder routes and a supported policy")
+    for name in ("checkpoint_update", "prefix_controls", "maximum_controls"):
+        if type(settings[name]) is not int or settings[name] < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    offsets = settings["world_x_offsets_m"]
+    if not offsets or offsets[0] != 0.0 or len(set(offsets)) != len(offsets) or not np.isfinite(offsets).all():
+        raise ValueError("Select unique finite world-X offsets starting with sham zero")
+    seeds = settings["training_seeds"]
+    if not seeds or any(type(seed) is not int or seed < 0 for seed in seeds):
+        raise ValueError("Select nonnegative integer training seeds")
+    times = settings["readout_seconds"]
+    if not times or not np.isfinite(times).all() or min(times) < DT:
+        raise ValueError("Select finite readout times of at least one control")
+    if any(not np.isclose(seconds / DT, round(seconds / DT), rtol=0, atol=1e-6) for seconds in times):
+        raise ValueError("Readout times must lie on the native control clock")
+    return settings
 
 
 def load_helper(name):
@@ -33,8 +51,8 @@ def load_helper(name):
 
 
 def translated_compact(compact, displacement):
-    if displacement not in DISPLACEMENTS:
-        raise ValueError("Displacement must be zero or signed 0.30 m world X")
+    if not np.isfinite(displacement):
+        raise ValueError("World X displacement must be finite")
     return {**compact, "qpos": compact["qpos"].at[..., 0].add(displacement)}
 
 
@@ -56,11 +74,11 @@ def check_branch_inputs(env, sham_state, branch_state, displacement):
     np.testing.assert_array_equal(np.asarray(sham_goal[..., -6:]), np.asarray(branch_goal[..., -6:]))
 
 
-def planned_controls(frame, last):
-    return min(MAX_CONTROLS, max(0, int(last) - int(frame)))
+def planned_controls(frame, last, maximum):
+    return min(maximum, max(0, int(last) - int(frame)))
 
 
-def summarize(valid, terminated, planned, remaining):
+def summarize(valid, terminated, planned, remaining, maximum):
     valid = np.asarray(valid, bool)
     terminated = np.asarray(terminated, bool)
     executed = len(valid)
@@ -72,13 +90,14 @@ def summarize(valid, terminated, planned, remaining):
     return dict(planned_controls=int(planned), executed_controls=executed,
                 valid_controls=int(valid.sum()), native_termination=native_termination,
                 reference_completed=reference_completed, reference_end_reached=reference_end_reached,
-                full_five_second_metrics_available=bool(executed == MAX_CONTROLS and valid.all()),
+                full_requested_horizon_metrics_available=bool(executed == maximum and valid.all()),
+                requested_horizon_seconds=maximum * DT,
                 end=("native_termination" if native_termination else "invalid_physics" if not valid.all()
-                     else "reference_completed" if reference_completed else "five_seconds" if executed == MAX_CONTROLS
+                     else "reference_completed" if reference_completed else "maximum_controls" if executed == maximum
                      else "partial"))
 
 
-def paired_diagnostic(sham, perturbed):
+def paired_diagnostic(sham, perturbed, maximum, readout_seconds):
     """Describe own-checkpoint excess errors on a visible, matched physical prefix."""
     available = min(len(sham), len(perturbed))
     support = 0
@@ -89,7 +108,7 @@ def paired_diagnostic(sham, perturbed):
             break
         support += 1
     report = dict(shared_valid_prefix_controls=support, sham_executed_controls=len(sham),
-                  perturbed_executed_controls=len(perturbed), full_five_seconds_available=support == MAX_CONTROLS)
+                  perturbed_executed_controls=len(perturbed), full_requested_horizon_available=support == maximum, requested_horizon_seconds=maximum * DT)
     fields = {"world_body_mpjpe_m": 0, "donor_aligned_body_mpjpe_m": 1,
               "torso_xy_m": 6, "torso_abs_yaw_rad": 9}
     report["excess_errors"] = {}
@@ -98,9 +117,9 @@ def paired_diagnostic(sham, perturbed):
                              for t in range(support)])
         report["excess_errors"][name] = dict(
             shared_prefix_mean=float(values.mean()) if support else None,
-            shared_prefix_integral=float(values.sum() * .02) if support else None,
-            at_seconds={str(seconds): float(values[int(seconds * 50) - 1])
-                        if support >= int(seconds * 50) else None for seconds in (.5, 1., 2., 5.)})
+            shared_prefix_integral=float(values.sum() * DT) if support else None,
+            at_seconds={str(seconds): float(values[int(round(seconds / DT)) - 1])
+                        if support >= int(round(seconds / DT)) else None for seconds in readout_seconds})
     return report
 
 
@@ -223,7 +242,10 @@ def advance(actor, state, count, transition, audit, trace_path):
     return state, rows
 
 
-def load_actors(runs):
+def load_actors(runs, settings):
+    selected_update = settings["checkpoint_update"]
+    if list(runs) != settings["paired_routes"]:
+        raise ValueError("Run routes differ from selected study input")
     actors, configs = {}, {}
     for route, run in runs.items():
         cfg = json.loads((run / "config.json").read_text())
@@ -231,14 +253,14 @@ def load_actors(runs):
             raise ValueError("Run must declare its route and all forty clips")
         if cfg.get("actor_obs_norm", False):
             raise ValueError("The matched recovery study requires unnormalized actor inputs")
-        if cfg.get("seed") not in (0, 1):
-            raise ValueError("Only the two declared training seeds are supported")
-        with (run / "ckpt/it_009000.pkl").open("rb") as handle:
+        if cfg.get("seed") not in settings["training_seeds"]:
+            raise ValueError("Run seed differs from selected study input")
+        with (run / "ckpt" / f"it_{selected_update:06d}.pkl").open("rb") as handle:
             checkpoint = pickle.load(handle)
         validate_feedback(checkpoint, cfg)
-        if checkpoint.get("completed_updates") != 9000 or checkpoint.get("iter") != 9000:
-            raise ValueError("Each frozen checkpoint must have exactly 9,000 completed updates")
-        actors[route] = jax.tree_util.tree_map(jnp.asarray, evaluation_actor(checkpoint, "ema"))
+        if checkpoint.get("completed_updates") != selected_update or checkpoint.get("iter") != selected_update:
+            raise ValueError("Checkpoint update differs from selected study input")
+        actors[route] = jax.tree_util.tree_map(jnp.asarray, evaluation_actor(checkpoint, settings["policy"]))
         configs[route] = cfg
     if configs["encoder"]["seed"] != configs["decoder"]["seed"]:
         raise ValueError("Routes must belong to the same training seed")
@@ -250,6 +272,8 @@ def load_actors(runs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resolved-config", type=Path, required=True)
+    parser.add_argument("--training-seed", type=int, required=True)
     parser.add_argument("--encoder-run", type=Path, required=True)
     parser.add_argument("--decoder-run", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
@@ -259,16 +283,21 @@ def main(argv=None):
     import mujoco
     import warp as wp
     from nablamimic.evaluation_state import WarpEvaluationState
-    actors, configs = load_actors(dict(encoder=args.encoder_run, decoder=args.decoder_run))
+    settings = load_settings(args.resolved_config)
+    offsets = settings["world_x_offsets_m"]
+    prefix_controls = settings["prefix_controls"]
+    maximum = settings["maximum_controls"]
+    actors, configs = load_actors(dict(encoder=args.encoder_run, decoder=args.decoder_run), settings)
     cfg = configs["encoder"]
+    if cfg["seed"] != args.training_seed:
+        raise ValueError("Checkpoint seed differs from the requested paired study")
     if not cfg.get("residual_action") or cfg.get("action_rate_space") != "setpoint":
         raise ValueError("The matched runs require reference residual actions and setpoint rate cost")
     args.out.mkdir(parents=True, exist_ok=False)
     summary_path = args.out / "conditions.jsonl"
     (args.out / "inputs.json").write_text(json.dumps(dict(
         runs={"encoder": str(args.encoder_run), "decoder": str(args.decoder_run)},
-        seed=cfg["seed"], checkpoint_updates=9000, policy="ema", max_controls=MAX_CONTROLS, prefix_controls=PREFIX_CONTROLS,
-        displacements_world_x_m=DISPLACEMENTS, fresh_execution=True), indent=2) + "\n")
+        seed=cfg["seed"], study_input=settings, resolved_config=str(args.resolved_config), fresh_execution=True), indent=2) + "\n")
     helper = load_helper("observed_helpers")
     observer = load_helper("evaluation_capacity")
     audits = observer.install(sim)
@@ -310,16 +339,16 @@ def main(argv=None):
             folder.mkdir()
             initial_native.restore()
             state = reset(keys, jnp.asarray([env.starts[clip_index]], jnp.int32))
-            prefix_count = min(PREFIX_CONTROLS, last - int(state.frame[0]))
+            prefix_count = min(prefix_controls, last - int(state.frame[0]))
             state, prefix = advance(donor_actor, state, prefix_count, step_for(donor), audit, folder / "prefix.npz")
             write_trace(folder / "prefix.npz", prefix)
-            available = (len(prefix) == PREFIX_CONTROLS and bool(prefix[-1]["valid"][0])
+            available = (len(prefix) == prefix_controls and bool(prefix[-1]["valid"][0])
                          and not bool(prefix[-1]["terminated"][0]) and int(state.frame[0]) < last)
             donor_info = dict(clip=name, donor=donor, seed=cfg["seed"], prefix_executed=len(prefix),
                               release_frame=int(state.frame[0]), donor_available=available)
             if not available:
                 for target in actors:
-                    for displacement in DISPLACEMENTS:
+                    for displacement in offsets:
                         save_summary({**donor_info, "target": target, "displacement_world_x_m": displacement,
                                       "status": "donor_unavailable"})
                 continue
@@ -333,10 +362,10 @@ def main(argv=None):
             direct_state, direct_rows = advance(donor_actor, state, 1, step_for(donor), audit, folder / "direct-first-control.npz")
             write_trace(folder / "direct-first-control.npz", direct_rows)
             remaining = last - int(state.frame[0])
-            count = planned_controls(state.frame[0], last)
+            count = planned_controls(state.frame[0], last, maximum)
             for target, actor in actors.items():
                 target_rows = {}
-                for displacement in DISPLACEMENTS:
+                for displacement in offsets:
                     branch = f"{target}-dx{displacement:+.2f}"
                     shifted = translated_compact(compact, displacement)
                     pre_capacity = native_refresh(physics, snapshot, shifted, audit)
@@ -364,13 +393,14 @@ def main(argv=None):
                         identity = {name: value if np.isfinite(value) else None for name, value in identity.items()}
                         (folder / "sham-first-control-identity.json").write_text(
                             json.dumps(identity, indent=2, allow_nan=False) + "\n")
-                    report = summarize([r["valid"][0] for r in rows], [r["terminated"][0] for r in rows], count, remaining)
+                    report = summarize([r["valid"][0] for r in rows], [r["terminated"][0] for r in rows], count, remaining, maximum)
                     if not pre_ok:
                         report["end"] = "invalid_before_first_action"
                     save_summary({**donor_info, "target": target, "displacement_world_x_m": displacement,
                                   "pre_action_valid": bool(pre_ok), **report})
-                paired = {str(displacement): paired_diagnostic(target_rows[0.0], target_rows[displacement])
-                          for displacement in DISPLACEMENTS if displacement != 0.0}
+                paired = {str(displacement): paired_diagnostic(target_rows[0.0], target_rows[displacement],
+                                                              maximum, settings["readout_seconds"])
+                          for displacement in offsets if displacement != 0.0}
                 (folder / f"{target}-perturbation-minus-sham.json").write_text(
                     json.dumps(paired, indent=2, allow_nan=False) + "\n")
             del snapshot

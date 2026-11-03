@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import json
 
 import jax
 import jax.numpy as jnp
@@ -84,25 +85,25 @@ class RecoveryTest(unittest.TestCase):
             np.testing.assert_array_equal(nets.actor_apply(actor, before['history'], corrected), before['action'])
 
     def test_short_motion_full_horizon_and_failure_accounting(self):
-        self.assertEqual(recovery.planned_controls(50, 285), 235)
-        short = recovery.summarize([True] * 235, [False] * 235, 235, 235)
+        self.assertEqual(recovery.planned_controls(50, 285, 250), 235)
+        short = recovery.summarize([True] * 235, [False] * 235, 235, 235, 250)
         self.assertTrue(short['reference_completed'])
-        self.assertFalse(short['full_five_second_metrics_available'])
+        self.assertFalse(short['full_requested_horizon_metrics_available'])
         self.assertEqual(short['end'], 'reference_completed')
-        final_failure = recovery.summarize([True] * 235, [False] * 234 + [True], 235, 235)
+        final_failure = recovery.summarize([True] * 235, [False] * 234 + [True], 235, 235, 250)
         self.assertTrue(final_failure['reference_end_reached'])
         self.assertFalse(final_failure['reference_completed'])
         self.assertEqual(final_failure['end'], 'native_termination')
-        full = recovery.summarize([True] * 250, [False] * 250, 250, 900)
-        self.assertTrue(full['full_five_second_metrics_available'])
-        failed = recovery.summarize([True] * 4, [False] * 3 + [True], 250, 900)
+        full = recovery.summarize([True] * 250, [False] * 250, 250, 900, 250)
+        self.assertTrue(full['full_requested_horizon_metrics_available'])
+        failed = recovery.summarize([True] * 4, [False] * 3 + [True], 250, 900, 250)
         self.assertEqual(failed['executed_controls'], 4)
         self.assertTrue(failed['native_termination'])
-        self.assertFalse(failed['full_five_second_metrics_available'])
-        partial = recovery.summarize([True, False], [False, False], 250, 900)
+        self.assertFalse(failed['full_requested_horizon_metrics_available'])
+        partial = recovery.summarize([True, False], [False, False], 250, 900, 250)
         self.assertEqual(partial['valid_controls'], 1)
         self.assertEqual(partial['end'], 'invalid_physics')
-        self.assertEqual(recovery.summarize([], [], 235, 235)['end'], 'partial')
+        self.assertEqual(recovery.summarize([], [], 235, 235, 250)['end'], 'partial')
 
     def test_transition_records_queried_latent_and_executed_action(self):
         env, compact = fixture()
@@ -132,18 +133,18 @@ class RecoveryTest(unittest.TestCase):
             return dict(frame=np.array([frame]), valid=np.array([valid]), metrics=metrics)
         sham = [row(51 + i, True, 1.) for i in range(25)]
         perturbed = [row(51 + i, i != 24, 1.5) for i in range(25)]
-        report = recovery.paired_diagnostic(sham, perturbed)
+        report = recovery.paired_diagnostic(sham, perturbed, 250, [.5, 1., 2., 5.])
         self.assertEqual(report['shared_valid_prefix_controls'], 24)
         self.assertEqual(report['perturbed_executed_controls'], 25)
-        self.assertFalse(report['full_five_seconds_available'])
+        self.assertFalse(report['full_requested_horizon_available'])
         body = report['excess_errors']['world_body_mpjpe_m']
         self.assertAlmostEqual(body['shared_prefix_mean'], .5)
         self.assertAlmostEqual(body['shared_prefix_integral'], .24)
         self.assertIsNone(body['at_seconds']['0.5'])
-        self.assertIsNone(recovery.paired_diagnostic([], sham)['excess_errors']['torso_xy_m']['shared_prefix_mean'])
+        self.assertIsNone(recovery.paired_diagnostic([], sham, 250, [.5, 1., 2., 5.])['excess_errors']['torso_xy_m']['shared_prefix_mean'])
         wrong = [row(52, True, 1.5)]
         with self.assertRaisesRegex(ValueError, 'reference frames'):
-            recovery.paired_diagnostic(sham, wrong)
+            recovery.paired_diagnostic(sham, wrong, 250, [.5, 1., 2., 5.])
 
     def test_capacity_failure_flushes_returned_physical_sample(self):
         trace = dict(frame=jnp.array([51]), finite=jnp.ones(1, bool), terminated=jnp.zeros(1, bool))
@@ -158,6 +159,25 @@ class RecoveryTest(unittest.TestCase):
                 np.testing.assert_array_equal(data['capacity_observed'], [False])
                 np.testing.assert_array_equal(data['valid'], [False])
             self.assertTrue(path.with_suffix('.failure.json').exists())
+
+    def test_selected_input_defines_the_comparison(self):
+        selected = dict(checkpoint_update=9000, prefix_controls=50, maximum_controls=250,
+                        world_x_offsets_m=[0., -.30, .30], paired_routes=['encoder', 'decoder'],
+                        training_seeds=[0, 1], policy='ema', readout_seconds=[.5, 1., 2., 5.])
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'resolved-study.json'
+            path.write_text(json.dumps(selected))
+            settings = recovery.load_settings(path)
+            selected['checkpoint_update'] = 123
+            path.write_text(json.dumps(selected))
+            self.assertEqual(recovery.load_settings(path)['checkpoint_update'], 123)
+        self.assertEqual(settings['checkpoint_update'], 9000)
+        self.assertEqual(settings['prefix_controls'], 50)
+        self.assertEqual(settings['maximum_controls'], 250)
+        self.assertEqual(settings['world_x_offsets_m'], [0., -.30, .30])
+        self.assertEqual(settings['paired_routes'], ['encoder', 'decoder'])
+        self.assertEqual(settings['training_seeds'], [0, 1])
+        self.assertEqual(settings['policy'], 'ema')
 
 
 if __name__ == '__main__':

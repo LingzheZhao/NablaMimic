@@ -1,0 +1,8 @@
+checkpoint_update: 9000
+prefix_controls: 50
+maximum_controls: 250
+world_x_offsets_m: [0.0, -0.30, 0.30]
+paired_routes: [encoder, decoder]
+policy: ema
+training_seeds: [0, 1]
+readout_seconds: [0.5, 1.0, 2.0, 5.0]
