@@ -346,6 +346,71 @@ terminal training interval was **10,802.3553 s**, while the complete Python chil
 lifetime, including startup and final serialization, was **11,178.4840 s**.
 Peak allocated/reserved GPU memory was **34.16/40.93 GB**.
 
-Equal-update comparisons at 1,500 and 5,000 updates were still pending when
-this reading was written. The endpoint table is therefore a measured wall-budget
-comparison, not the final matched-update conclusion.
+## Matched-update FP32 and TF32 reading
+
+The equal-update comparison is now complete for the same fixed pre-rebase
+training runs. The late checkpoint was selected as the largest positive common
+250-update save below both terminal counts: **5,000**, chosen from checkpoint
+identities before reading evaluation scores. The source, checkpoint, policy,
+update counts and original evaluator settings were checked for every condition.
+All devices were CMP 170HX. Historical results retain their original device
+assignments and worker counts; the three newly evaluated checkpoint conditions
+used one assigned GPU with at most two workers.
+
+All weights below are EMA. Times are saved native training times. Original and
+observed executions remain independent, each with fresh physics state.
+
+| Updates | Training precision | Saved minutes | Original return | Complete | Observed return | Complete | Observed qualifiers |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1500 | FP32 | 51.7597 | 0.825304115 | 39/40 | 0.827822251 | 39/40 | 0/40 |
+| 1500 | TF32 | 21.4118 | 0.833953626 | 40/40 | 0.824701335 | 39/40 | 0/40 |
+| 5000 | FP32 | 172.0651 | 0.873862259 | 40/40 | 0.874284763 | 40/40 | 2/40 |
+| 5000 | TF32 | 71.2449 | 0.863067414 | 40/40 | 0.861376207 | 40/40 | 0/40 |
+
+At 1,500 updates, the return difference changes direction between the two
+execution conditions. FP32 terminates fight1_subject2 at 81.12 seconds in the
+original execution and 104.04 seconds in the observed execution, retaining
+33.13% and 42.49% of its horizon. TF32 original completes all clips; its observed
+execution terminates dance1_subject1 at 73.76 seconds, retaining 56.11%.
+These partial supports remain included and are not equal-horizon body-error
+comparisons.
+
+At 5,000 updates, all four executions complete every reference horizon. FP32
+return is higher by **0.010794845** in original execution and **0.012908556** in
+observed execution. Observed world-body MPJPE is **0.413113 m** for FP32 versus
+**0.497289 m** for TF32; aligned-body MPJPE is **0.024585 / 0.025558 m**.
+Neither meets the separate fidelity gate.
+
+The following original-execution reward fractions are equal-clip means of the
+donor's four-decimal per-clip terms, each on that clip's executed support. They
+are distinct from the pooled alive-step fractions quoted above. Wrist MAE uses
+the donor's equal-clip mean, in radians; the order is left wrist yaw, right wrist
+pitch, right wrist yaw.
+
+| Updates | Precision | Body orientation | Root position | Wrist MAE, in the stated order |
+| --- | --- | ---: | ---: | --- |
+| 1500 | FP32 | 0.920360 | 0.186865 | 0.0467 / 0.0375 / 0.0551 |
+| 1500 | TF32 | 0.915315 | 0.157498 | 0.0513 / 0.0573 / 0.0577 |
+| 5000 | FP32 | 0.938355 | 0.398043 | 0.0634 / 0.0436 / 0.0571 |
+| 5000 | TF32 | 0.920763 | 0.326115 | 0.2583 / 0.1298 / 0.0698 |
+| 5232, three-hour endpoint | FP32 | 0.939060 | 0.416083 | 0.0611 / 0.0442 / 0.0572 |
+| 12640, three-hour endpoint | TF32 | 0.848208 | 0.555270 | 0.3928 / 0.4001 / 0.2747 |
+
+The matched checkpoint therefore shows better FP32 tracking at 5,000 updates,
+while requiring **2.415 times** the saved training time. It does not overturn
+the measured three-hour endpoint result: original return remains
+**0.875472307 / 0.876123515**, with **39/40 / 40/40** completions. TF32's later
+checkpoint improves global position tracking while its orientation and wrist
+errors worsen. These are separate checkpoint readings, not evidence that total
+quality must improve monotonically or that one precision is universally better.
+
+The audit covers eight primary checkpoint/policy conditions plus all ten
+milestone readings, representing sixteen distinct conditions and thirty-two
+executions. Six executions were new; the others were verified read-only reuse.
+None failed or was skipped. All sixteen observed conditions have finite
+scientific scalars, complete 200 Hz capacity instrumentation and zero observed
+invalid active states or capacity losses. All sixteen fail the engineering
+fidelity gate; validity is not transferred to original executions. A single
+seed, historical hardware assignments and independent compiler caches still
+limit causal attribution. This archive supplies no acceptance claim for the
+later upstream-based implementations.
