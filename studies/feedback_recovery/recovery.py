@@ -365,8 +365,8 @@ def main(argv=None):
             count = planned_controls(state.frame[0], last, maximum)
             for target, actor in actors.items():
                 target_rows = {}
-                for displacement in offsets:
-                    branch = f"{target}-dx{displacement:+.2f}"
+                for offset_index, displacement in enumerate(offsets):
+                    branch = f"{target}-offset{offset_index:02d}"
                     shifted = translated_compact(compact, displacement)
                     pre_capacity = native_refresh(physics, snapshot, shifted, audit)
                     branch_state = restore(shifted)
@@ -397,7 +397,7 @@ def main(argv=None):
                     if not pre_ok:
                         report["end"] = "invalid_before_first_action"
                     save_summary({**donor_info, "target": target, "displacement_world_x_m": displacement,
-                                  "pre_action_valid": bool(pre_ok), **report})
+                                  "pre_action_valid": bool(pre_ok), "trace": f"{label}/{branch}.npz", **report})
                 paired = {str(displacement): paired_diagnostic(target_rows[0.0], target_rows[displacement],
                                                               maximum, settings["readout_seconds"])
                           for displacement in offsets if displacement != 0.0}
