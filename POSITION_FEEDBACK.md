@@ -22,7 +22,11 @@ learning-rate warmup. The option requires `--anchor-to-decoder`.
 Checkpoints retain the official schema without an added feedback field.
 Configuration `obs_mode` explicitly names `anchor_ori` or `anchor_pos_ori`;
 evaluation rejects missing or unknown modes and checks the live and averaged
-actors' six- or nine-value decoder markers and first-layer input widths.
+actors' six- or nine-value decoder markers and first-layer input widths when
+`anchor_to_decoder` is enabled. Current PPO and non-anchor SHAC/default actors
+keep their existing evaluation and resume paths without decoder-marker or
+actor-latent metadata requirements. `anchor_pos_ori` always requires
+`anchor_to_decoder` and the nine-value layout.
 The optional CLI record `decoder_position_feedback`, when present, must agree
 with `obs_mode`. A current official baseline therefore uses its existing
 configuration and native actor layout directly. Resume checks the loaded actor

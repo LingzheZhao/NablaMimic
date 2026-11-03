@@ -64,7 +64,6 @@ SCALE = dict(joint_vel=1 / 5.0, ang_vel=1 / 2.0)
 
 @dataclass(frozen=True)
 class EnvConfig:
-    decoder_position_feedback: bool = False
     solver_iterations: int = 10
     dr: bool = True                # domain randomization (training); off for evaluation
     obs_noise: bool = True
@@ -74,6 +73,7 @@ class EnvConfig:
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions
+    decoder_position_feedback: bool = False
 
 
 class Xi(NamedTuple):
@@ -99,6 +99,10 @@ def position_feedback_enabled(cfg):
     if mode not in ("anchor_ori", "anchor_pos_ori"):
         raise ValueError(f"Unsupported observation mode: {mode}")
     enabled = mode == "anchor_pos_ori"
+    if "anchor_to_decoder" in cfg and type(cfg["anchor_to_decoder"]) is not bool:
+        raise ValueError("anchor_to_decoder must be boolean when declared")
+    if enabled and ("anchor_to_decoder" not in cfg or cfg["anchor_to_decoder"] is not True):
+        raise ValueError("anchor_pos_ori requires anchor_to_decoder enabled")
     if "decoder_position_feedback" in cfg:
         declared = cfg["decoder_position_feedback"]
         if type(declared) is not bool or declared != enabled:
@@ -107,8 +111,20 @@ def position_feedback_enabled(cfg):
 
 
 def validate_feedback(checkpoint, cfg):
-    """Check the current native actor layout without extending checkpoint metadata."""
+    """Check opted-in decoder feedback, preserving other current upstream actors."""
     enabled = position_feedback_enabled(cfg)
+    if "anchor_to_decoder" not in cfg:
+        # The current PPO producer declares algo/arch and exports one of these
+        # two actor kinds; it has no anchor_to_decoder or actor_latent field.
+        if "algo" not in cfg or cfg["algo"] != "ppo" or cfg["arch"] not in ("mlp", "supermimic"):
+            raise ValueError("A non-PPO run must declare anchor_to_decoder")
+        fields = {"net", "obs_norm"} if cfg["arch"] == "mlp" else {"enc", "dec"}
+        if "actor" not in checkpoint or set(checkpoint["actor"]) != fields:
+            raise ValueError("PPO evaluation actor differs from its declared arch")
+        return
+    if not cfg["anchor_to_decoder"]:
+        # Non-anchor SHAC/default training actors retain their existing path.
+        return
     width = 9 if enabled else 6
     latent = cfg["actor_latent"]
     if type(latent) is not int or latent <= 0:

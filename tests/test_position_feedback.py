@@ -53,7 +53,8 @@ class PositionFeedbackTest(unittest.TestCase):
     def test_native_actor_payloads_use_explicit_modes_without_checkpoint_flags(self):
         for enabled in (False, True):
             k = 9 if enabled else 6
-            cfg = dict(obs_mode="anchor_pos_ori" if enabled else "anchor_ori", actor_latent=3)
+            cfg = dict(obs_mode="anchor_pos_ori" if enabled else "anchor_ori", actor_latent=3,
+                       anchor_to_decoder=True)
             env = SimpleNamespace(goal_dim=FUTURE*GOAL_FRAME_DIM+k, hist_dim=930, nu=2)
             actor = nets.actor_init(jax.random.PRNGKey(3), env, hidden=(8,), latent=3, anchor_to_decoder=k)
             checkpoint = dict(actor=actor, actor_ema=actor)
@@ -83,9 +84,69 @@ class PositionFeedbackTest(unittest.TestCase):
             position_feedback_enabled({})
         for cfg in (dict(obs_mode="unknown"), dict(obs_mode="anchor_ori", decoder_position_feedback=True),
                     dict(obs_mode="anchor_pos_ori", decoder_position_feedback=False),
-                    dict(obs_mode="anchor_ori", decoder_position_feedback=0)):
+                    dict(obs_mode="anchor_ori", decoder_position_feedback=0),
+                    dict(obs_mode="anchor_pos_ori"), dict(obs_mode="anchor_pos_ori", anchor_to_decoder=False),
+                    dict(obs_mode="anchor_ori", anchor_to_decoder=1)):
             with self.assertRaises(ValueError):
                 position_feedback_enabled(cfg)
+        with self.assertRaises(ValueError):
+            validate_feedback(dict(actor={}), dict(obs_mode='anchor_ori'))
+
+    def test_current_ppo_actors_do_not_require_decoder_feedback_metadata(self):
+        from nablamimic import ppo
+        dimensions = SimpleNamespace(goal_dim=686, hist_dim=930, nu=29)
+        history, goal = jnp.zeros(930), jnp.zeros(686)
+        for architecture in ('mlp', 'supermimic'):
+            args = ppo.build_parser().parse_args(['--out', 'unused', '--arch', architecture, '--hidden', '8'])
+            cfg = dict(vars(args), **ppo.FIXED, algo='ppo', devices=1,
+                       git_commit='test-source', git_dirty=False, gpu='CPU fixture')
+            if architecture == 'mlp':
+                actor = dict(net=nets.mlp_init(jax.random.PRNGKey(11), [1616, 8, 29]),
+                             obs_norm=(jnp.zeros(1616), jnp.ones(1616)))
+            else:
+                actor = nets.actor_init(jax.random.PRNGKey(12), dimensions, hidden=(8,), latent=32)
+            # Native PPO evaluation payload: actor/critic/cnorm alongside the
+            # producer's optimization and observation-normalizer records.
+            checkpoint = dict(actor=actor, critic=[], cnorm=(jnp.zeros(825), jnp.ones(825)),
+                params={}, opt_state=(), onorm=(), cnorm_full=(), bin_q=jnp.ones((2, 1)),
+                iter=0, wall_s=0., env_steps=0)
+            self.assertNotIn('actor_latent', cfg)
+            self.assertNotIn('anchor_to_decoder', cfg)
+            self.assertFalse(position_feedback_enabled(cfg))
+            validate_feedback(checkpoint, cfg)
+            self.assertEqual(nets.actor_apply(actor, history, goal).shape, (29,))
+
+    def test_current_default_and_shac_non_anchor_actors_remain_valid(self):
+        from pathlib import Path
+        from nablamimic import train
+        from nablamimic.params import read_params
+        configs = Path(__file__).resolve().parents[1] / 'configs'
+        choices = [[], read_params(configs / 'shac.args')]
+        dimensions = SimpleNamespace(goal_dim=686, hist_dim=930, nu=29)
+        for values in choices:
+            args = train.build_parser().parse_args([*values, '--out', 'unused'])
+            cfg = dict(vars(args), **train.FIXED, devices=1, processes=1,
+                       git_commit='test-source', git_dirty=False, gpu='CPU fixture')
+            actor = nets.actor_init(jax.random.PRNGKey(13), dimensions, hidden=(8,), latent=32)
+            if args.actor_obs_norm:
+                actor['obs_norm'] = (jnp.zeros(1616), jnp.ones(1616))
+            checkpoint = dict(actor=actor, critic=[], cnorm=(jnp.zeros(825), jnp.ones(825)),
+                st_a=(), st_c=(), bin_q=jnp.ones((2, 1)), iter=0, wall_s=0., env_steps=0)
+            self.assertFalse(cfg['anchor_to_decoder'])
+            self.assertNotIn('anchor_dec', actor)
+            validate_feedback(checkpoint, cfg)
+            self.assertEqual(nets.actor_apply(actor, jnp.zeros(930), jnp.zeros(686)).shape, (29,))
+
+    def test_position_uses_measured_torso_rotation(self):
+        env, state = self.fixture(True, noise=False)
+        state.dx.xquat = jnp.array([[2**-.5, 0., 0., 2**-.5]])
+        offset = FUTURE * GOAL_FRAME_DIM
+        np.testing.assert_allclose(env.goal(state)[offset:offset+3], [3., -2., 0.], atol=1e-6)
+
+    def test_existing_positional_env_config_argument_is_preserved(self):
+        cfg = EnvConfig(7)
+        self.assertEqual(cfg.solver_iterations, 7)
+        self.assertFalse(cfg.decoder_position_feedback)
 
     def test_real_critic_reward_and_termination_are_flag_invariant(self):
         baseline, state = self.fixture(False)

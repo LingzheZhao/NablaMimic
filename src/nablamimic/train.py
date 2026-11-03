@@ -689,6 +689,7 @@ def main(argv=None):
         with open(args.resume, "rb") as f:
             ck = pickle.load(f)
         validate_feedback(ck, dict(FIXED, decoder_position_feedback=args.decoder_position_feedback,
+                                  anchor_to_decoder=args.anchor_to_decoder,
                                   obs_mode="anchor_pos_ori" if args.decoder_position_feedback else "anchor_ori"))
         as_j = lambda t: jax.tree_util.tree_map(jnp.asarray, t)  # noqa: E731
         actor, critic, cnorm = as_j(ck["actor"]), as_j(ck["critic"]), as_j(tuple(ck["cnorm"]))
