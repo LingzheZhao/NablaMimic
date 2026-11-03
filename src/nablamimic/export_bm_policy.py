@@ -28,6 +28,11 @@ rejected actor and optimiser update (jnp.where on the guard's flag) before the h
 after its label's completed updates; only actor-input statistics advance, and actors with them are refused anyway. The
 declaration records the markers present (a run resumed after a halt can hold HALTED and DONE).
 
+Runs of torch_train.py (branch codex/pytorch-nablaengine; config.json declares training_framework "torch") are read
+by their own records: DONE holds "completed", config.json holds the parsed arguments (with "config", the file the run
+started with) but no argv and no git_dirty, which the declaration then states absent; the checkpoint keys equal
+train.py's (actor, actor_ema, critic, cnorm, iter, env_steps, completed_updates, ema_updates, evaluation_policy).
+
   python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_011667.pkl --run-config RUN --policy live \\
       --artifact-id POLICY_ID --source-artifact-id CHECKPOINT_ID --reference-manifest MANIFEST.json \\
       --engine-revision ENGINE_REVISION --engine-contact-capacity 64 --engine-constraint-row-capacity 288 --out FILE.npz
@@ -57,6 +62,12 @@ NON_ARGUMENT_FIELDS = frozenset({
     "robot", "obs_mode", "contacts", "reward_frame", "hist_len", "state_select", "matmul_precision", "actor_hidden",
     "actor_latent", "critic_hidden", "devices", "processes", "git_commit", "git_dirty", "gpu", "engine", "segments",
     "argv", "config_args", "config_file"})
+# Top-level config.json fields that torch_train.py (branch codex/pytorch-nablaengine) writes beside vars(args) and
+# train.FIXED: its own bookkeeping. It records the training framework as "torch"; train.py records none.
+TORCH_NON_ARGUMENT_FIELDS = frozenset({
+    "training_framework", "torch_version", "torch_cuda", "random_stream", "clock", "inputs", "declared_environment"})
+# The end of a completed run as each trainer writes DONE: train.py the last update, torch_train.py the word below.
+TORCH_DONE_CONTENT = "completed"
 
 # Per-frame proprioception (env.TrackingEnv.proprio), in order: (name, width, factor applied to the quantity).
 PROPRIOCEPTION_TERMS = (
@@ -112,15 +123,31 @@ def training_model(cfg):
     return model
 
 
-def run_markers(run_dir):
-    """The end markers train.py wrote in the run directory, as {name: content}; refuses a run that diverged."""
+def training_framework(cfg):
+    """"jax" for a train.py run (config.json records no framework), "torch" for a torch_train.py run."""
+    framework = cfg.get("training_framework", "jax")
+    if framework not in ("jax", "torch"):
+        raise ValueError(f"training_framework {framework!r}: only train.py and torch_train.py runs are exported")
+    return framework
+
+
+def run_markers(run_dir, framework="jax"):
+    """The end markers the trainer wrote in the run directory, as {name: content}; refuses a run that diverged.
+    train.py writes DONE holding the last update; torch_train.py writes DONE holding "completed" (its terminal.json
+    holds the count, which the checkpoint's completed_updates states for each checkpoint)."""
     run_dir = Path(run_dir)
     if (run_dir / "DIVERGED").exists():
         raise ValueError(f"{run_dir} holds DIVERGED (non-finite loss at update {(run_dir / 'DIVERGED').read_text()!r}, "
                          "checked every 10 updates): its last checkpoints may follow the divergence; not exported")
     markers = {}
     if (run_dir / "DONE").exists():
-        markers["DONE"] = dict(last_update=int((run_dir / "DONE").read_text()))
+        done = (run_dir / "DONE").read_text().strip()
+        if framework == "torch":
+            if done != TORCH_DONE_CONTENT:
+                raise ValueError(f"DONE holds {done!r}; torch_train.py writes {TORCH_DONE_CONTENT!r}")
+            markers["DONE"] = dict(content=done)
+        else:
+            markers["DONE"] = dict(last_update=int(done))
     if (run_dir / "HALTED").exists():
         markers["HALTED"] = json.loads((run_dir / "HALTED").read_text())
     return markers
@@ -129,7 +156,15 @@ def run_markers(run_dir):
 def run_arguments(cfg):
     """The run's arguments as config.json records them. With --config, train.py records argv (the arguments used,
     without --config, --out and --resume), config_args (those of the file) and config_file; without --config it
-    records none of them, and the parsed arguments are the top-level fields other than NON_ARGUMENT_FIELDS."""
+    records none of them, and the parsed arguments are the top-level fields other than NON_ARGUMENT_FIELDS.
+    torch_train.py records none of the three in either case: its parsed arguments are the top-level fields other than
+    NON_ARGUMENT_FIELDS and its own bookkeeping, among them "config", the configuration file it started with."""
+    if training_framework(cfg) == "torch":
+        if any(k in cfg for k in ("argv", "config_args", "config_file")):
+            raise ValueError("a torch_train.py config.json records no argv, config_args or config_file")
+        return dict(arguments_source="parsed_arguments_in_config_json_torch_train_records_no_argv",
+                    parsed_arguments={k: v for k, v in cfg.items()
+                                      if k not in NON_ARGUMENT_FIELDS | TORCH_NON_ARGUMENT_FIELDS})
     recorded = {k: cfg[k] for k in ("argv", "config_args", "config_file") if k in cfg}
     if "argv" in cfg:
         return dict(arguments_source="argv_recorded_at_first_start_with_config_file", **recorded)
@@ -259,6 +294,21 @@ def reference_record(manifest, cfg):
                 clip_order=manifest["clip_order"], clips=names, frames=[c["frames"] for c in manifest["clips"]])
 
 
+def source_run_record(cfg):
+    """The run's arguments and source state. train.py records git_commit and git_dirty; torch_train.py records
+    git_commit (its declared source revision) and no dirty flag, which is then stated absent, not filled in."""
+    framework = training_framework(cfg)
+    record = dict(**run_arguments(cfg), training_framework=framework, git_commit=_require(cfg, "git_commit"))
+    if framework == "torch":
+        if "git_dirty" in cfg:
+            raise ValueError("a torch_train.py config.json records no git_dirty")
+        record["git_dirty"] = "not_recorded_by_torch_train"
+    else:
+        record["git_dirty"] = _require(cfg, "git_dirty")
+    record["gpu"] = _require(cfg, "gpu")
+    return record
+
+
 def engine_records(cfg):
     """The engine identities config.json records (train.py writes them at the top level, or per segment with
     --config); refused when there are none."""
@@ -341,8 +391,7 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
             model=model,
             reference=reference_record(manifest, cfg),
             training_matmul_precision=_require(cfg, "matmul_precision"),
-            source_run=dict(**run_arguments(cfg), git_commit=_require(cfg, "git_commit"),
-                            git_dirty=_require(cfg, "git_dirty"), gpu=_require(cfg, "gpu"))),
+            source_run=source_run_record(cfg)),
     )
     return arrays, declaration
 
@@ -408,7 +457,7 @@ def main(argv=None):
     run_dir = cfg_path.resolve().parent
     if Path(args.checkpoint).resolve().parent != (run_dir / "ckpt").resolve():
         ap.error(f"--checkpoint must lie in the run directory's ckpt/: {run_dir / 'ckpt'}")
-    markers = run_markers(run_dir)
+    markers = run_markers(run_dir, training_framework(cfg))
     manifest = read_manifest(args.reference_manifest)
     with open(args.checkpoint, "rb") as f:
         checkpoint = pickle.load(f)

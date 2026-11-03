@@ -122,6 +122,17 @@ label's completed updates. Only the actor-input statistics advance at the halt,
 and actors with them are refused. A run resumed after a halt can hold both
 `HALTED` and `DONE`; both are recorded.
 
+Runs of `torch_train.py` (branch `codex/pytorch-nablaengine`), whose
+`config.json` declares `training_framework` `torch`, keep the same checkpoint
+keys but other run records: `DONE` holds `completed` (recorded as its content),
+and `config.json` holds the parsed arguments, among them `config` (the file the
+run started with), without `argv`, `config_args`, `config_file` or `git_dirty`.
+The declaration then gives `arguments_source`
+`parsed_arguments_in_config_json_torch_train_records_no_argv`, the parsed
+arguments without the trainer's bookkeeping (`TORCH_NON_ARGUMENT_FIELDS`) and
+`git_dirty` `not_recorded_by_torch_train`; `source_run.training_framework` is
+`jax` for `train.py` runs and `torch` for these.
+
 The command refuses rather than fills in: a checkpoint other than a numbered
 `it_N.pkl`, a label or update count that disagrees with the checkpoint, an actor
 without the anchor-to-decoder structure or with observation normalisation,

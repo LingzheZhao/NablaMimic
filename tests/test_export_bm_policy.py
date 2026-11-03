@@ -55,6 +55,20 @@ def run_config(**override):
     return cfg
 
 
+def torch_run_config(**override):
+    """config.json as torch_train.py writes it: vars(args) with "config", no argv or git_dirty, its own bookkeeping
+    and a top-level engine record."""
+    cfg = run_config(training_framework="torch", config="configs/ours_torch.args", out="RUN", resume=None,
+                     execution="compile-graph", initial_checkpoint="JAX_RUN/ckpt/it_000000.pkl", git_commit="abc123",
+                     torch_version="2.9.1", torch_cuda="12.8", random_stream="torch generators", clock="setup excluded",
+                     inputs=dict(MOTION_CACHE_DIR="CACHE"), declared_environment="image",
+                     engine=dict(version="0.1.0", key="torch-library-key", arch="sm_80", maxcon=96))
+    for key in ("argv", "git_dirty", "segments"):
+        del cfg[key]
+    cfg.update(override)
+    return cfg
+
+
 def action_parameters():
     i = np.arange(NU, dtype=np.float64)
     kp = 40.0 + i
@@ -236,6 +250,23 @@ class DeclarationTests(unittest.TestCase):
         for field in ("robot", "contacts", "gpu", "segments", "git_commit", "devices", "actor_hidden"):
             self.assertNotIn(field, args)
 
+    def test_torch_run(self):
+        _, d = export(averaged_checkpoint(), cfg=torch_run_config(), policy="ema")
+        run = d["training_domain"]["source_run"]
+        self.assertEqual(run["arguments_source"], "parsed_arguments_in_config_json_torch_train_records_no_argv")
+        self.assertEqual((run["training_framework"], run["git_commit"], run["git_dirty"]),
+                         ("torch", "abc123", "not_recorded_by_torch_train"))
+        args = run["parsed_arguments"]
+        self.assertEqual((args["config"], args["initial_checkpoint"], args["execution"]),
+                         ("configs/ours_torch.args", "JAX_RUN/ckpt/it_000000.pkl", "compile-graph"))
+        for field in ("training_framework", "torch_version", "clock", "inputs", "declared_environment", "engine",
+                      "gpu", "git_commit"):
+            self.assertNotIn(field, args)
+        self.assertEqual(d["training_domain"]["engine"]["reported"][0]["key"], "torch-library-key")
+        _, d = export()
+        run = d["training_domain"]["source_run"]
+        self.assertEqual((run["training_framework"], run["git_dirty"]), ("jax", False))
+
     def test_end_markers_recorded(self):
         halted = dict(iter=LABEL, grad_norm="nan", wall_s=3.0, env_steps=LABEL * PER_UPDATE, rule="SHAC guard")
         _, d = export(end_markers=dict(HALTED=halted))
@@ -330,6 +361,12 @@ class RefusalTests(unittest.TestCase):
         self.assertRefused(cfg=run_config(obs_mode="full"))
         self.assertRefused(cfg=run_config(residual_action=None))
         self.assertRefused(cfg=run_config(motion_lib="/data/bones"))
+        self.assertRefused(cfg=run_config(training_framework="other"))
+        self.assertRefused(cfg=torch_run_config(git_dirty=False))  # torch_train.py records none
+        self.assertRefused(cfg=torch_run_config(argv=["--seed", "0"]))
+        cfg = run_config()
+        del cfg["git_dirty"]
+        self.assertRefused(cfg=cfg)  # train.py records it
         cfg = run_config()
         del cfg["gpu"]
         self.assertRefused(cfg=cfg)
@@ -438,6 +475,23 @@ class RunDirectoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.main(self.root / "diverged.npz")
         self.assertFalse((self.root / "diverged.npz").exists())
+
+    def test_torch_run_directory(self):
+        (self.run / "config.json").write_text(json.dumps(torch_run_config()))
+        (self.run / "DONE").write_text("completed\n")
+        out = self.root / "torch.npz"
+        self.main(out)
+        d = self.declaration(out)[1]
+        self.assertEqual(d["policy_source"]["run_end_markers"], dict(DONE=dict(content="completed")))
+        self.assertEqual(d["training_domain"]["source_run"]["training_framework"], "torch")
+        (self.run / "DONE").write_text("12\n")  # a train.py marker in a torch_train.py run
+        with self.assertRaises(ValueError):
+            self.main(self.root / "torch-mixed.npz")
+        self.assertFalse((self.root / "torch-mixed.npz").exists())
+        (self.run / "config.json").write_text(json.dumps(run_config()))
+        (self.run / "DONE").write_text("completed\n")  # and the converse
+        with self.assertRaises(ValueError):
+            self.main(self.root / "jax-mixed.npz")
 
 
 @unittest.skipIf(not SCENE.exists(), f"no Menagerie checkout at {SCENE} (scripts/setup_menagerie.sh)")
