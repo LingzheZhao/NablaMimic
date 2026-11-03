@@ -7,11 +7,14 @@ Explicit CUDA Graphs capture the complete differentiable window and reusable
 updates. Random inputs are sampled outside capture. Compilation/capture errors
 stop the run; no automatic eager fallback changes the execution condition.
 
-The code follows the official 0.2.0 arguments and evaluation interface. This
-revision has not yet been validated by a new provisioned CPU/GPU run. Experiments
-performed with earlier fixed snapshots do not validate this revised source or
-establish its training quality, speed or cross-framework numerical equivalence.
-The [validation studies](studies/pytorch/README.md) state the necessary checks.
+The code follows the official 0.2.0 arguments and evaluation interface. In a
+pinned provisioned CPU environment, all 84 package tests, 32 mathematical-update
+comparisons and 36 capacity-source checks passed, with no failed or skipped
+conditions. Native GPU, compilation/capture and full-workload validation of this
+upstream-based implementation remain pending. Experiments performed with earlier
+fixed snapshots do not validate this revised source or establish its training
+quality, speed or cross-framework numerical equivalence. The
+[validation studies](studies/pytorch/README.md) state the necessary GPU checks.
 
 ## Environment and training
 
