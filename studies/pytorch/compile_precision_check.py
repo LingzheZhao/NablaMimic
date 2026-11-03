@@ -216,12 +216,9 @@ def main():
             return dict(action=output, parameter_vjp=parameter_grad, history_vjp=history_grad, goal_vjp=goal_grad)
 
         def orientation_primitives(real, quaternion, reference):
-            absolute, abs_backward = torch.func.vjp(abs_real, real)
-            abs_gradient, = abs_backward(torch.ones_like(real))
-            angle, angle_backward = torch.func.vjp(quat_angle_sq, quaternion, reference)
-            quaternion_gradient, reference_gradient = angle_backward(torch.ones_like(angle))
-            return dict(absolute=absolute, abs_gradient=abs_gradient, angle_sq=angle,
-                        quaternion_gradient=quaternion_gradient, reference_gradient=reference_gradient)
+            # Match production: compile the forward, then call autograd outside
+            # Dynamo. Nested torch.func.vjp is a different transformation.
+            return abs_real(real), quat_angle_sq(quaternion, reference)
 
         real = torch.tensor([-1., -1e-6, -0., 0., 1e-6, 1.], device='cuda')
         angles = torch.tensor([0., 1e-7, 1e-4, .3, 1.5707963267948966, 3.141592653589793], device='cuda')
@@ -230,7 +227,7 @@ def main():
         quaternion[-1, 0] = 0.  # Exact pi boundary, rather than rounded cos(pi/2).
         reference = torch.zeros_like(quaternion)
         reference[:, 0] = 1.
-        primitive_inputs = (real, quaternion, reference)
+        primitive_inputs = tuple(value.requires_grad_() for value in (real, quaternion, reference))
         retain(root / 'primitive_inputs.npz', dict(real=real, quaternion=quaternion, reference=reference))
 
         def encode(parameters, frames, reset_frames):
@@ -283,12 +280,17 @@ def main():
                                 action_gradient=gradient, clipped_gradient=clipped, clip_statistics=statistics,
                                 clipped_rows=(norms > 0) & (norms > threshold))
 
-                operations = dict(network=network, window=window, orientation=orientation_gradient,
-                                  orientation_primitives=primitive)
+                def primitive_gradient(real, quaternion, reference):
+                    absolute, angle = primitive(real, quaternion, reference)
+                    abs_gradient, quaternion_gradient, reference_gradient = torch.autograd.grad(
+                        (absolute.sum(), angle.sum()), (real, quaternion, reference))
+                    return dict(absolute=absolute, abs_gradient=abs_gradient, angle_sq=angle,
+                        quaternion_gradient=quaternion_gradient, reference_gradient=reference_gradient)
+
+                operations = dict(network=network, window=window, orientation=orientation_gradient)
                 examples = dict(network=(trainable, cases[0]['history'], cases[0]['goal'], cases[0]['cotangent']),
                     window=cases[0]['window'],
-                    orientation=(cases[0]['window'][0], cases[0]['action'], cases[0]['window'][3][0, 0]),
-                    orientation_primitives=primitive_inputs)
+                    orientation=(cases[0]['window'][0], cases[0]['action'], cases[0]['window'][3][0, 0]))
                 if mode == 'compile-graph':
                     operations = {name: CudaGraphCall(function, examples[name], restore=lambda: None,
                                                      compile_function=False)
@@ -297,10 +299,6 @@ def main():
                 entry['setup_native_diagnostics'] = setup_diagnostics
                 if any(setup_diagnostics.get(key, -1) != 0 for key in BAD_DIAGNOSTICS):
                     record['failures'].append(condition + ':setup_native_invalid')
-                primitive_arrays = retain(folder / 'orientation_primitives.npz',
-                                          operations['orientation_primitives'](*primitive_inputs))
-                entry['real_abs_zero_vjp_contract'] = bool(np.array_equal(
-                    primitive_arrays['abs_gradient'], np.asarray([-1, -1, 1, 1, 1, 1], dtype=np.float32)))
                 for case, fixed in enumerate(cases):
                     network_inputs = (trainable, fixed['history'], fixed['goal'], fixed['cotangent'])
                     retain(folder / f'network_{case}.npz', operations['network'](*network_inputs))
@@ -315,6 +313,22 @@ def main():
                     retain(folder / f'orientation_{case}.npz', operations['orientation'](
                         fixed['window'][0], fixed['action'], fixed['window'][3][0, 0]))
                     del native
+                # A boundary-only diagnostic cannot suppress the main six
+                # conditions. Preserve any failure and continue without fallback.
+                try:
+                    primitive_operation = primitive_gradient
+                    if mode == 'compile-graph':
+                        primitive_operation = CudaGraphCall(primitive_gradient, primitive_inputs,
+                            restore=lambda: None, compile_function=False)
+                        operations['orientation_primitives'] = primitive_operation
+                    primitive_arrays = retain(folder / 'orientation_primitives.npz',
+                                              primitive_operation(*primitive_inputs))
+                    entry['real_abs_zero_vjp_contract'] = bool(np.array_equal(
+                        primitive_arrays['abs_gradient'], np.asarray([-1, -1, 1, 1, 1, 1], dtype=np.float32)))
+                    entry['primitive_status'] = 'completed'
+                except Exception as error:
+                    entry.update(primitive_status='failed', primitive_exception=repr(error))
+                    record['failures'].append(condition + ':orientation_primitives')
                 diagnostics = tf.read_diagnostics(reset=True)
                 entry['native_diagnostics'] = diagnostics
                 if any(diagnostics.get(key, -1) != 0 for key in BAD_DIAGNOSTICS):
@@ -326,7 +340,8 @@ def main():
                                for name, graph in entry['graphs'].items())
                 entry.update(status='completed', elapsed_s=time.monotonic() - condition_started)
                 write(root / 'result.json', record)
-                del operations, window, body, network, encoder, orientation, target, primitive, orientation_gradient
+                del operations, window, body, network, encoder, orientation, target, primitive
+                del orientation_gradient, primitive_gradient, primitive_operation
                 gc.collect()
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
@@ -336,7 +351,14 @@ def main():
         pairs += [('fp32-' + mode, 'tf32-' + mode) for mode in MODES]
         for baseline, candidate in pairs:
             comparison = {}
-            for path in sorted((root / baseline).glob('*.npz')):
+            filenames = sorted({path.name for condition in (baseline, candidate)
+                                for path in (root / condition).glob('*.npz')})
+            for filename in filenames:
+                path = root / baseline / filename
+                if not path.exists() or not (root / candidate / filename).exists():
+                    comparison[filename] = {'coverage': dict(passed=False,
+                        reference_available=path.exists(), candidate_available=(root / candidate / filename).exists())}
+                    continue
                 with np.load(path, allow_pickle=False) as expected, np.load(root / candidate / path.name,
                                                                           allow_pickle=False) as actual:
                     assert set(expected.files) == set(actual.files)
@@ -362,6 +384,9 @@ def main():
         record['scope'] = 'Conditional compiler/precision diagnosis; not evidence for an end-to-end learning gap cause.'
     except BaseException as error:
         record.update(status='failed', exception=repr(error))
+        for entry in record['conditions'].values():
+            if entry.get('status') == 'running':
+                entry.update(status='failed', exception=repr(error))
         raise
     finally:
         record['elapsed_s'] = time.monotonic() - started

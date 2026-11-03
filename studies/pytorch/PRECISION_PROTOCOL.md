@@ -39,6 +39,9 @@ negative zero for the custom real-absolute VJP, and identity, near-identity and
 exact-pi quaternions. It records the intended positive absolute derivative at
 zero separately from pairwise numerical comparisons. A boundary failure is not
 assumed to explain the observed wrist error without support in actual states.
+Like the production window, this check compiles only its forward and calls
+autograd outside Dynamo. Its failure is recorded after the principal measurements
+and cannot suppress later precision/execution conditions; there is no fallback.
 
 The comparator uses the existing rtol 1e-4 and atol 1e-5, finite values, and exact
 integer/Boolean support. It also reports bitwise agreement, maximum absolute
