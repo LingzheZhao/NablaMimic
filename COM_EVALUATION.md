@@ -126,3 +126,85 @@ skipped execution phase. Strict native numerical mismatches remain separate
 diagnostic results. The gate permits a subsequent common-evaluator comparison
 of existing checkpoints; it does not change the measured identity of any older
 score or establish which learner caused a remaining quality difference.
+
+## Existing checkpoints under the common patched evaluator
+
+After the frozen gate passed, five existing update-1500 fits were evaluated
+with this same patched SDK, each EMA/live, in three interleaved rounds. One
+process on another RTX 6000 Ada 48 GB visited the five fits in table order,
+EMA then live, in every round. The original evaluator was compiled once and
+primed once with the original Torch EMA; all thirty measured calls reused that
+executable and native capture. Each call restored the same current public
+snapshot and verified fixed actor/shared argument bytes and storage. Model
+identities were never pooled. The shared reference, full denominator, solver,
+precision and action settings match the preceding validation.
+
+All thirty calls and all ten conditions complete successfully, with no failed
+or unexecuted reading. Summaries reconstruct from the unrounded per-clip
+reductions, including every partial trajectory. Private native workspace is
+still not fully restored; interleaving does not establish its independence from
+call history. This comparison shares one physical GPU internally, but does
+not share the physical GPU or actor-call sequence of the paired SDK experiment.
+Capacity/unknown flags remain zero. One final forward-buffer reading, TF32-repeat
+live in round one, contains 512 plus 1024 for `fightAndSports1_subject1`, which
+records termination at 9.72 s. As in the paired study, this sticky end reading
+cannot place the iteration-limit event within or after valid support.
+
+### EMA policies
+
+| Fit | Three full-reference returns | Mean | Range | References without recorded termination, out of 40 |
+| --- | --- | ---: | ---: | --- |
+| Torch TF32, original | 0.834704755 / 0.822746756 / 0.838472568 | 0.831974693 | 0.015725812 | 39 / 39 / 40 |
+| Torch TF32, repeat | 0.835444105 / 0.836097656 / 0.836012607 | 0.835851456 | 0.000653550 | 40 / 40 / 40 |
+| Torch highest | 0.838622175 / 0.838844303 / 0.838398873 | 0.838621784 | 0.000445429 | 40 / 40 / 40 |
+| JAX, first | 0.829645525 / 0.828592687 / 0.828477568 | 0.828905260 | 0.001167957 | 39 / 39 / 39 |
+| JAX, repeat | 0.839145848 / 0.838496185 / 0.839397533 | 0.839013189 | 0.000901348 | 40 / 40 / 40 |
+
+### Live policies
+
+| Fit | Three full-reference returns | Mean | Range | References without recorded termination, out of 40 |
+| --- | --- | ---: | ---: | --- |
+| Torch TF32, original | 0.749076463 / 0.726988177 / 0.729363815 | 0.735142818 | 0.022088287 | 35 / 34 / 34 |
+| Torch TF32, repeat | 0.761471429 / 0.762023941 / 0.760251321 | 0.761248897 | 0.001772621 | 37 / 37 / 36 |
+| Torch highest | 0.767387634 / 0.745821016 / 0.770006977 | 0.761071876 | 0.024185961 | 34 / 33 / 35 |
+| JAX, first | 0.741904312 / 0.733742818 / 0.754594372 | 0.743413834 | 0.020851554 | 31 / 33 / 34 |
+| JAX, repeat | 0.773077554 / 0.776258301 / 0.767667468 | 0.772334441 | 0.008590833 | 34 / 35 / 34 |
+
+The TF32-repeat EMA mean is .00694620 above the first JAX EMA and .00316173
+below the JAX-repeat EMA. The original Torch EMA mean also lies between those
+JAX means, with a substantially wider observed evaluation range. These are
+separate fits, not a pooled estimate of either framework's quality.
+
+Live ranking depends on the checkpoint: original Torch is below both JAX means;
+Torch TF32 repeat and highest are above JAX first and below JAX repeat. The
+TF32-repeat live mean is .01783506 above JAX first and .01108554 below JAX repeat.
+Thus a single general Torch-versus-JAX live gap is not supported by this panel.
+
+Highest EMA has a .00277033 higher mean than TF32-repeat EMA in these readings;
+highest and TF32-repeat live means are nearly equal, with much greater variation
+for highest live. Highest live has 33–35 references without termination per
+reading versus 36–37 for TF32-repeat live, so the scalar means do not imply
+uniform task improvement. All five fits have higher EMA than live mean returns.
+This adds a fixed-checkpoint quality reading, not an estimate
+across independent training seeds. The previously measured highest fit took
+1.730 times the TF32-repeat complete training process. The measured recipe's
+working choice remains Torch + NablaEngine + TF32/compile/CUDA Graphs + EMA,
+with official JAX v0.2 as the algorithm/configuration reference.
+
+The initial .01208337 range is not an error bar for this panel. Original Torch
+EMA/live ranges reach .01572581/.02208829; highest live reaches .02418596 and
+JAX-first live .02085155. Even the same original-Torch live checkpoint has a
+different range under this interleaved, different-device context. These outcomes
+retain the conclusion that COM is repeatable while the complete evaluator is not.
+No checkpoint has a matched original-SDK three-repeat comparison in this second
+allocation, so differences from historical scores are not that checkpoint's
+isolated causal response to the COM patch. Scores from different SDK conditions
+must not be substituted for the common-evaluator readings above.
+
+The complete reevaluation process takes 1,175.39 s (19.59 min). Compilation is
+12.38 s, full priming 32.67 s, and the thirty synchronized measured calls total
+984.43 s (32.606–33.072 s each). Construction, checks and serialization account
+for additional process time. Peak host RSS is 7.60 GiB; the maximum phase-boundary
+device sample is 2.951 GiB. These are an amortized common-evaluator workload,
+not a comparison of JAX and Torch inference runtimes: both sets of weights run
+through the same JAX network and MuJoCo Warp physics.
