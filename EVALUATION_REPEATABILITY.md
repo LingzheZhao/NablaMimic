@@ -169,8 +169,11 @@ in six worlds; all forty worlds have it by each repetition's end. Solver-
 iteration-limit bits are zero, as are capacity/unknown bits throughout the
 checked boundaries. C likewise retains line-search flags with no capacity or
 unknown bits. Flags are never cleared, so their presence cannot count events
-or prove convergence. Finite fields and valid capacities do not certify exact
-physical derivatives or a fully converged solve.
+or prove convergence. The original rollout keeps stepping inactive rows: a
+terminal flag may first appear after termination or the reference horizon ends.
+Thus 40/40 final flags do not mean that all forty valid trajectories suffered a
+solver failure. Finite fields and valid capacities do not certify exact physical
+derivatives or a fully converged solve.
 
 The bounded investigation is complete. It establishes runtime evaluation
 variation with fixed compilation and localizes variation within an observed
