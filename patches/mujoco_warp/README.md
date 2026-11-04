@@ -49,6 +49,8 @@ build retain that evaluator identity and are not directly comparable with new sc
 build for every checkpoint in a new comparison. Removing this COM atomic accumulation does not promise
 whole-simulator determinism; other reductions and native state may still affect repeatability.
 
+[COM validation results](../../COM_EVALUATION.md) record the formula, repeatability, adjoint-execution and full-evaluator checks with their limits.
+
 The patched files carry a modification notice. MuJoCo Warp is licensed under the Apache License 2.0
 (Copyright 2025 The Newton Developers); the patches are distributed under the same licence. See `THIRD_PARTY_NOTICES.md`
 in the repository root.
