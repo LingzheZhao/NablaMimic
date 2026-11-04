@@ -14,6 +14,9 @@ repository. Each item names where it is used.
 - `patches/mujoco_warp/0001-0004`: modifications of `mujoco_warp/_src/collision_primitive_core.py`,
   `mujoco_warp/_src/forward_adjoint.py` and `mujoco_warp/_src/adjoint.py` (backward-pass switches); each patched file
   carries a modification notice. Distributed under the Apache License 2.0.
+- `patches/mujoco_warp/0005`: COM-only range-sum backport of google-deepmind/mujoco_warp#1872, with
+  the subtree-size metadata from #1730, adapted to preserve the pinned branch's mass rule and adjoint interfaces.
+  Modifies `mujoco_warp/_src/types.py`, `io.py` and `smooth.py`; Apache License 2.0.
 - `src/nablamimic/g1_fast/smooth_gen.py` generates a Warp kernel whose formulas follow `mujoco_warp/_src/smooth.py`.
 - `src/nablamimic/g1_fast/adjoint_patch.py` replaces `smooth_qvel_backward` of `mujoco_warp/_src/forward_adjoint.py` at
   run time with a version that follows it and calls its kernels.
