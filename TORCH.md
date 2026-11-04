@@ -93,6 +93,25 @@ crossing or independent physical-fidelity acceptance. The
 [JAX comparison record](https://github.com/LingzheZhao/NablaMimic/pull/1)
 keeps the two baseline checkpoint identities separate.
 
+## EMA and precision follow-up
+
+A second TF32 fit completes 1,500 updates with EMA .835851 (40/40 references)
+and live .761672 (37/40). A highest-precision intervention reaches EMA .831668
+(39/40) and live .768678 (34/40), taking 1.730 times the complete-process duration
+of that repeat with the same terminal full-state saving. Both retain the same
+31.81/38.24 GiB allocator peaks. These same-seed point readings use different
+physical cards of the same model and do not establish a quality distribution;
+the mixed result does not support changing the TF32 default.
+
+[The diagnostic results](TORCH_DIAGNOSTICS.md) retain all seven checkpoint
+readings, per-clip execution supports, fixed-weight evaluation variation,
+production-size strict numerical failures, a learner update with real late
+Adam state, and the completed precision intervention. Precision differences
+already appear before physics, but they do not uniquely explain the final
+EMA–live gap. Identical weights also vary across evaluations, so the curve's
+last interval does not establish late training deterioration. No schedule
+change is inferred from these bounded observations.
+
 ## Environment and training
 
 Install the optional Torch dependency into a provisioned, pinned environment:
@@ -143,7 +162,10 @@ Training saves NumPy weight checkpoints with `actor`, optional `actor_ema`,
 A terminal full-state artifact also records optimizer, scheduling, RNG and replay
 state for inspection; restoration from it has not been implemented or validated.
 Every run requires a fresh output directory. The measured training clock excludes
-compilation/capture and reports terminal full-state serialization separately.
+compilation/capture and the terminal save. The trainer total includes setup and
+that save, but there is no isolated serialization timer. Their difference must
+not be reported as serialization time; the complete process additionally
+includes imports and reference loading before trainer construction.
 
 ## Official evaluation
 
