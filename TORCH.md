@@ -25,6 +25,20 @@ scopes; they do not establish full-size compiler equivalence or long-training
 quality on this revision. Earlier fixed-snapshot experiments remain separate
 readings. The [validation studies](studies/pytorch/README.md) define the checks.
 
+For the measured action-target recipe on RTX 6000 Ada 48 GB, the selected
+working configuration is **Torch + NablaEngine, TF32-permitted network matmul,
+compile/CUDA Graphs and the EMA policy**. The official JAX v0.2 formulas and
+configuration remain the algorithmic reproduction reference. The evidence below
+supports this engineering choice within that recipe; it does not establish live
+policy equivalence or superiority across tasks and training seeds.
+
+Both learners use NablaEngine for training. Their final weights are scored by
+the same JAX-highest network forward and MuJoCo Warp physics evaluator. The
+[separate COM backport](https://github.com/LingzheZhao/NablaMimic/pull/5) addresses
+that shared evaluator's subtree accumulation. Its effect on repeatability is a
+separate measurement, and quality comparisons must use one common evaluator
+version for every checkpoint. Earlier scores retain their original SDK identity.
+
 ## Fixed 1,500-update comparison
 
 The [tested Torch revision](https://github.com/LingzheZhao/NablaMimic/commit/b13375e22948d505579a627e8fc1bce99cccb31d)
