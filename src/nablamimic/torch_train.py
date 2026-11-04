@@ -580,7 +580,7 @@ def main(argv=None):
             'matmul_precision':args.matmul_precision,'observed_precision':precision,
             'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
             'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
-            'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
+            'clock':'training_s excludes setup/compilation/capture and the terminal save; includes per-update RNG, diagnostics, logging and in-loop weight saves; total_s includes trainer setup and terminal save, without an isolated serialization timer'}
     config['initial_checkpoint']=str(args.initial_checkpoint) if args.initial_checkpoint else None
     config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
     config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
