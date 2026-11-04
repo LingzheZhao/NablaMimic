@@ -1,7 +1,7 @@
 # Patched MuJoCo Warp
 
-Training on MuJoCo Warp (`--physics warp`) and every evaluation use MuJoCo Warp with its analytic adjoint, plus four
-small patches that add backward-pass switches. `scripts/setup_mujoco_warp.sh` builds the tree:
+Training on MuJoCo Warp (`--physics warp`) and every evaluation use MuJoCo Warp with its analytic adjoint, four
+backward-pass patches and a COM-only forward backport. `scripts/setup_mujoco_warp.sh` builds the tree:
 
 1. Base: [`etaoxing/mujoco_warp`](https://github.com/etaoxing/mujoco_warp) at
    `357a75d60a56d67d476942a1b6e54b3045ee8e87` (branch `adjoint`; MuJoCo Warp 3.12 with an analytic adjoint, the code of
@@ -11,8 +11,16 @@ small patches that add backward-pass switches. `scripts/setup_mujoco_warp.sh` bu
    pyramidal contact only when every edge row is satisfied) and `4af093f` (forward adjoint: zero the multiplier on dofs
    whose actuator force is clamped). The script checks out `4af093f` by its full hash.
 3. The patches `0001`-`0004` in this directory, applied in order with `git apply`. Each switch is read from an
-   environment variable when `mujoco_warp` is imported and is off by default (stock behaviour). **The forward pass is
+   environment variable when `mujoco_warp` is imported and is off by default (stock behaviour). **These four patches leave the forward pass
    unchanged in every setting**; only gradients are affected.
+4. Patch `0005` backports only the COM range sums from
+   [google-deepmind/mujoco_warp#1872](https://github.com/google-deepmind/mujoco_warp/pull/1872),
+   with the `body_subtreenum` field and initialization from
+   [#1730](https://github.com/google-deepmind/mujoco_warp/pull/1730). Each non-world body sums its
+   contiguous descendant range in a fixed order, and a separate kernel handles the world. This removes
+   COM sibling atomic additions. RNE, CRB, `_cinert`, `_cdof` and analytic-adjoint interfaces remain unchanged.
+   The old mass rule is preserved: divide only when subtree mass is nonzero, otherwise retain the raw sum.
+   The newer massless-body `xipos` fallback is deliberately excluded from this comparison.
 
 | Patch | Switch | Effect when on |
 |---|---|---|
@@ -29,10 +37,17 @@ gradient conventions as NablaEngine (the sphere / capsule self-contact normal he
 segment parameters of near-parallel capsules held constant, the actuator damping of clamped dofs kept in the qvel VJP),
 plus the scaled right-hand side of patch `0004` in the adjoint's IFT solve. The two simulators' forward passes are
 separate implementations, so the results of runs on them can differ (see "Expected results" in the repository's
-README). Evaluation runs the forward only.
+README). Evaluation rollouts run forward only, but their unchanged `WarpPhysics` constructor also warms up the backward.
 
-`tree.sha256` holds the hash of the patched package sources (`mujoco_warp/**/*.py`); the setup script checks it.
-MuJoCo Warp is not bitwise reproducible from run to run on the GPU (float atomics), with or without the patches.
+The setup script applies all five patches. It reconstructs the pinned base and patched package in temporary
+storage, then compares file contents directly, including package resources and unexpected extra source files.
+It accepts an already matching installation and refuses other modified trees; use a fresh destination for
+a different build. Runtime bytecode caches are excluded from this comparison.
+
+Patch `0005` changes forward floating-point summation order. Published measurements from the earlier four-patch
+build retain that evaluator identity and are not directly comparable with new scores. Use the same evaluator
+build for every checkpoint in a new comparison. Removing this COM atomic accumulation does not promise
+whole-simulator determinism; other reductions and native state may still affect repeatability.
 
 The patched files carry a modification notice. MuJoCo Warp is licensed under the Apache License 2.0
 (Copyright 2025 The Newton Developers); the patches are distributed under the same licence. See `THIRD_PARTY_NOTICES.md`
