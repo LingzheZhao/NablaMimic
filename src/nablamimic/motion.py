@@ -38,6 +38,11 @@ TRACKED_BODIES = (
 )
 FOOT_GEOMS = tuple(f"{side}_foot{i}_collision" for side in ("left", "right") for i in (1, 2, 3))
 CACHE_DIR = Path(os.environ.get("MOTION_CACHE_DIR") or ROOT / "data/cache")
+CACHE_KEYS = ("qpos", "qvel", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel")  # arrays of one cached clip
+REFERENCE_FPS = 50.0  # the control rate the references are resampled to
+# The download identity of the CSVs (scripts/download_lafan1.sh fetches g1/<clip>.csv of this dataset revision).
+LAFAN1_DATASET = "lvhaidong/LAFAN1_Retargeting_Dataset"
+LAFAN1_REVISION = "07ff8845a94d59d4195a8ac04fe918d4e6338239"
 
 
 @dataclass
@@ -141,21 +146,26 @@ def process_clip(m, raw, fps_out=50.0, fps_in=30.0, bodies=TRACKED_BODIES):
     return qpos, qvel, body_pos, body_quat, body_vel[..., 3:], body_vel[..., :3]
 
 
-def load_library(names, fps_out=50.0, model=None, bodies=TRACKED_BODIES):
+def cache_file_name(name, fps_out=REFERENCE_FPS, bodies=TRACKED_BODIES):
+    """The file name under CACHE_DIR of one processed clip: the clip name, the frame rate and a tag of the body list."""
+    tag = f"{fps_out:g}hz_" + hashlib.md5(",".join(bodies).encode()).hexdigest()[:8]
+    return f"{name}_{tag}.npz"
+
+
+def load_library(names, fps_out=REFERENCE_FPS, model=None, bodies=TRACKED_BODIES):
     """Load and concatenate clips; per-clip results are cached under CACHE_DIR."""
     m = model or mujoco.MjModel.from_xml_path(str(SCENE))
-    tag = f"{fps_out:g}hz_" + hashlib.md5(",".join(bodies).encode()).hexdigest()[:8]
     parts, starts, last, offset = [], [], [], 0
     for name in names:
-        cache = CACHE_DIR / f"{name}_{tag}.npz" if model is None else None
+        cache = CACHE_DIR / cache_file_name(name, fps_out, bodies) if model is None else None
         if cache is not None and cache.exists():
             z = np.load(cache)
-            part = tuple(z[k] for k in ("qpos", "qvel", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel"))
+            part = tuple(z[k] for k in CACHE_KEYS)
         else:
             part = load_clip(m, LAFAN1_DIR / f"{name}.csv", fps_out, bodies=bodies)
             if cache is not None:
                 cache.parent.mkdir(parents=True, exist_ok=True)
-                np.savez(cache, **dict(zip(("qpos", "qvel", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel"), part)))
+                np.savez(cache, **dict(zip(CACHE_KEYS, part)))
         parts.append(part)
         starts.append(offset)
         last.append(np.full(len(part[0]), offset + len(part[0]) - 1))
