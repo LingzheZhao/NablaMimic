@@ -133,6 +133,41 @@ accumulation. Its scope and failed closure comparisons remain explicit; it
 provides no basis for changing the training defaults or attributing the complete
 live-return gap to one kernel.
 
+## Common evaluation after the COM backport
+
+A separate comparison uses the COM-only MuJoCo Warp backport in
+[PR #5](https://github.com/LingzheZhao/NablaMimic/pull/5), preserving the official
+JAX-highest evaluator and all forty reference horizons. Five existing
+update-1500 fits, EMA/live each, run in three interleaved rounds through one
+compiled executable on one RTX 6000 Ada 48 GB. No weights are retrained. These
+are common patched-evaluator readings, separate from the original-SDK scores above.
+
+| Fit | EMA mean full-reference return | Live mean full-reference return |
+| --- | ---: | ---: |
+| Torch TF32, original | .831975 | .735143 |
+| Torch TF32, repeat | .835851 | .761249 |
+| Torch highest | .838622 | .761072 |
+| JAX, first | .828905 | .743414 |
+| JAX, repeat | .839013 | .772334 |
+
+All thirty calls complete with unchanged inputs/capture and valid capacities.
+TF32-repeat EMA has 40/40 references without termination in every reading and
+its mean lies between the two JAX EMA means. Live ordering depends on the fit:
+original Torch is below both JAX means; TF32 repeat/highest are above JAX first
+and below JAX repeat. Highest EMA is .002770 higher than TF32-repeat EMA here,
+while their live means are nearly equal and highest completes fewer references.
+The earlier 1.730-times complete training cost of highest remains a separate
+measurement.
+
+Full-evaluator variation remains: original Torch EMA/live ranges are
+.015726/.022088, and highest live reaches .024186. Three readings are not
+confidence intervals or independent training seeds, and the paired COM study's
+smaller range cannot be reused as an error bound. The
+[complete report](https://github.com/LingzheZhao/NablaMimic/blob/codex/mujoco-warp-com-range-sum/COM_EVALUATION.md)
+keeps all thirty values, per-fit supports, native numerical mismatches, solver
+flags, source versions and state-restoration limits. No framework-wide quality
+ordering or unique cause of the historical live gap is established.
+
 ## Environment and training
 
 Install the optional Torch dependency into a provisioned, pinned environment:
