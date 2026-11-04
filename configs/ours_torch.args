@@ -1,0 +1,3 @@
+# Official current recipe; Torch compiled control/updates and explicit CUDA graphs.
+@ours.args
+--execution compile-graph
