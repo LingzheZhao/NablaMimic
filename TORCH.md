@@ -51,8 +51,22 @@ seconds. Torch checkpoint auditing ran separately (2.26 seconds); the JAX
 training processes include their final checkpoint/backend audit. Additional
 wall-time saves and terminal replay-state serialization were disabled for Torch
 (`--save-wall-minutes 6001 --no-full-state-at-end`), preserving only numbered
-checkpoints every 250 updates. These are fixed-workload timings, not times to a
-quality threshold.
+checkpoints every 250 updates. These are fixed-update-count timings, not times
+to a quality threshold. The ratio compares the implementations as executed:
+JAX additionally computes actor setpoint-output-change RMS/quantiles and
+pre/post full-window critic-fit diagnostics every update; this Torch run omits
+them. Their cost, reset/restore differences and compilation/graph contributions
+have not been isolated. Neither all of the gain nor all of the gap can be
+assigned to any one of these differences without profiling.
+
+The checkpoint clocks also include different compilation boundaries. JAX first
+compiles critic/statistics and EMA after that clock starts; Torch compiles and
+captures those operations beforehand. In the later 1000-to-1250 update interval,
+checkpoint-clock differences are 142.045 seconds for Torch and 268.502/268.217
+seconds for the two JAX readings. From 1250 to 1500 they are 142.462 seconds and
+268.359/269.367 seconds, respectively. These later intervals retain a 1.884–1.891
+time ratio, including each implementation's diagnostics, logging and saves;
+they do not isolate equal-computation kernel speed.
 
 All 1,500 logged updates were finite, all nine native invalidity counters were
 zero, and optimizer, native-work and five graph replay counts matched. Seven
@@ -71,7 +85,9 @@ or randomization and full-reference normalization for all forty clips. The EMA p
 lies between the two JAX readings; live return is lower than both. Torch EMA
 has one tilt termination in `walk2_subject3` at 200.34 seconds. Live has five
 height terminations, including `fallAndGetUp1_subject4` at 7.42 seconds; partial
-supports remain in the recorded outcomes. This one Torch fit establishes no
+supports remain in the recorded outcomes. Height/tilt labels are reference-relative
+tracking termination criteria. A height label means root-height error exceeds
+0.25 metres; it does not by itself establish a mechanical fall. This one Torch fit establishes no
 statistical quality equivalence, general backend superiority, eight-minute
 crossing or independent physical-fidelity acceptance. The
 [JAX comparison record](https://github.com/LingzheZhao/NablaMimic/pull/1)
