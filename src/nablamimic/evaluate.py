@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import jax_cache, sim
-from .env import BM_BODIES, W, EnvConfig, TrackingEnv, _gravity_b
+from .env import BM_BODIES, W, EnvConfig, TrackingEnv, _gravity_b, position_feedback_enabled, validate_feedback
 from .motion import all_clip_names, load_library
 from .nets import actor_apply
 from .sim import vmapped
@@ -138,6 +138,7 @@ def main(argv=None):
     lib = load_library(names, bodies=BM_BODIES)
     env = TrackingEnv(lib, EnvConfig(solver_iterations=args.solver_iterations, dr=False, obs_noise=False,
                                      reset_noise=False, residual_action=bool(cfg.get("residual_action", False)),
+                                     decoder_position_feedback=position_feedback_enabled(cfg),
                                      action_rate_space="setpoint"))
     nclip = len(env.starts)
     env.warp = sim.make_warp(env, [nclip], train=False)
@@ -155,6 +156,7 @@ def main(argv=None):
             continue
         with open(run / "ckpt" / f"it_{it:06d}.pkl", "rb") as f:
             ck = pickle.load(f)
+        validate_feedback(ck, cfg)
         akey = args.actor_key or ("actor_ema" if "actor_ema" in ck else "actor")
         actor = jax.tree_util.tree_map(jnp.asarray, ck[akey])
         t0 = time.time()

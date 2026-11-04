@@ -73,6 +73,7 @@ class EnvConfig:
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions
+    decoder_position_feedback: bool = False
 
 
 class Xi(NamedTuple):
@@ -90,6 +91,56 @@ class State(NamedTuple):
     prev_a: jnp.ndarray     # (29,)
     xi: Xi
     key: jnp.ndarray
+
+
+def position_feedback_enabled(cfg):
+    """Resolve the explicit current observation mode, with optional CLI-record consistency."""
+    mode = cfg["obs_mode"]
+    if mode not in ("anchor_ori", "anchor_pos_ori"):
+        raise ValueError(f"Unsupported observation mode: {mode}")
+    enabled = mode == "anchor_pos_ori"
+    if "anchor_to_decoder" in cfg and type(cfg["anchor_to_decoder"]) is not bool:
+        raise ValueError("anchor_to_decoder must be boolean when declared")
+    if enabled and ("anchor_to_decoder" not in cfg or cfg["anchor_to_decoder"] is not True):
+        raise ValueError("anchor_pos_ori requires anchor_to_decoder enabled")
+    if "decoder_position_feedback" in cfg:
+        declared = cfg["decoder_position_feedback"]
+        if type(declared) is not bool or declared != enabled:
+            raise ValueError("Position feedback CLI record differs from obs_mode")
+    return enabled
+
+
+def validate_feedback(checkpoint, cfg):
+    """Check opted-in decoder feedback, preserving other current upstream actors."""
+    enabled = position_feedback_enabled(cfg)
+    if "anchor_to_decoder" not in cfg:
+        # The current PPO producer declares algo/arch and exports one of these
+        # two actor kinds; it has no anchor_to_decoder or actor_latent field.
+        if "algo" not in cfg or cfg["algo"] != "ppo" or cfg["arch"] not in ("mlp", "supermimic"):
+            raise ValueError("A non-PPO run must declare anchor_to_decoder")
+        fields = {"net", "obs_norm"} if cfg["arch"] == "mlp" else {"enc", "dec"}
+        if "actor" not in checkpoint or set(checkpoint["actor"]) != fields:
+            raise ValueError("PPO evaluation actor differs from its declared arch")
+        return
+    if not cfg["anchor_to_decoder"]:
+        # Non-anchor SHAC/default training actors retain their existing path.
+        return
+    width = 9 if enabled else 6
+    latent = cfg["actor_latent"]
+    if type(latent) is not int or latent <= 0:
+        raise ValueError("actor_latent must be a positive integer")
+    expected_input = latent + HIST * PROPRIO_DIM + width
+    if "actor" not in checkpoint:
+        raise ValueError("Checkpoint must contain its live actor")
+    for name in ("actor", "actor_ema"):
+        if name not in checkpoint:
+            continue
+        actor = checkpoint[name]
+        if "anchor_dec" not in actor or np.shape(actor["anchor_dec"]) != (width,):
+            raise ValueError(f"{name} feedback width differs from obs_mode")
+        first = np.shape(actor["dec"][0][0])
+        if len(first) != 2 or first[0] != expected_input:
+            raise ValueError(f"{name} decoder input width differs from the current observation layout")
 
 
 def _yaw_quat(q):
@@ -172,9 +223,11 @@ class TrackingEnv:
 
         self.set_library(lib)
         self.goal_dim = FUTURE * GOAL_FRAME_DIM + (GOAL_ANCHOR.stop - GOAL_ANCHOR.start)
+        critic_goal_dim = self.goal_dim
+        self.goal_dim += 3 if cfg.decoder_position_feedback else 0
         self.hist_dim = HIST * PROPRIO_DIM
         self.xi_dim = 1 + m.nu + 3
-        self.critic_dim = PROPRIO_DIM + ANCHOR_DIM + self.goal_dim + 1 + 3 + self.xi_dim
+        self.critic_dim = PROPRIO_DIM + ANCHOR_DIM + critic_goal_dim + 1 + 3 + self.xi_dim
 
     TABLES = ("ref_qpos", "ref_qvel", "ref_body_pos", "ref_body_quat", "ref_body_lin", "ref_body_ang",
               "ref_last", "goal_feat")
@@ -271,6 +324,12 @@ class TrackingEnv:
         if key is not None and self.cfg.obs_noise:
             lim = jnp.concatenate([jnp.full(3, 0.25), jnp.full(6, 0.05)])[sl]
             a = a + jax.random.uniform(key, a.shape, minval=-1.0, maxval=1.0) * lim
+        if self.cfg.decoder_position_feedback:
+            pos = self._anchor_rel(state.dx, state.frame)[:3]
+            if key is not None and self.cfg.obs_noise:
+                pos = pos + 0.25 * jax.random.uniform(
+                    jax.random.fold_in(key, 7143), (3,), minval=-1.0, maxval=1.0)
+            a = jnp.concatenate([pos, a])
         return jnp.concatenate([g, a])
 
     def policy_obs(self, state, key):

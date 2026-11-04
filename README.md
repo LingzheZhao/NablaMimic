@@ -94,6 +94,10 @@ Options after `--config` override the file (for example `--seed 1` or `--hours 1
 
 ## 📊 Evaluate
 
+Optional [decoder position feedback](POSITION_FEEDBACK.md) adds measured
+reference-position error beside the decoder's orientation feedback.
+`configs/ours_position_feedback.args` inherits the current `ours.args` recipe.
+
 ```bash
 bash scripts/evaluate_run.sh runs/ours_s0    # every LAFAN1 clip once, on MuJoCo Warp -> runs/ours_s0/eval_nominal.json
 ```
