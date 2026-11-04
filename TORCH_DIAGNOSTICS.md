@@ -231,6 +231,14 @@ fixed-query policy outputs are bitwise identical across conditions. Actual
 policy movement is smaller than the approximately .02955 rad RMS target schedule;
 target displacement and realized weight-update effect must remain separate.
 
+The approximately 21.96% value below compares the vectors of fixed-query output
+changes caused by the optimizer update. It is neither parameter-vector change
+nor a 21.96% increase in update magnitude or executed trajectory error. Highest
+changes the output-change RMS by only -0.394% relative to graph TF32: the overall
+scale is similar while direction and allocation over inputs/joints differ.
+The preceding network-only and actual-replay probes use different inputs and
+quantities; their percentages must not be divided into an amplification factor.
+
 Compiled versus graph TF32 has target relative L2 .0001354 and actual policy-change
 relative L2 .0016199, with no support split. Graph TF32 versus highest has
 .2864832 target relative L2 and .2195937 actual policy-change relative L2; its
@@ -260,7 +268,7 @@ training comparison; it does not already establish precision as the cause of
 the EMA–live gap. The intervention retains the official schedule and changes
 training matmul precision; the code's default remains TF32.
 
-## Complete highest-precision intervention
+## Network matmul highest intervention
 
 A new 1,500-update fit changes only network matmul precision to `highest`,
 with CUDA matmul TF32 disabled before compilation/capture. The same fixed source,
@@ -277,9 +285,12 @@ audits and complete terminal-state audits.
 | TF32 repeat | 815.154 | 997.608 | .835851 / 40 | .761672 / 37 |
 | Highest | 1541.432 | 1725.746 | .831668 / 39 | .768678 / 34 |
 
-Highest improves this live point reading by .007006 but reduces EMA by .004183;
+The highest fit has a live point reading .007006 higher and an EMA reading .004183 lower;
 EMA/live completion decreases by one/three clips. The gap narrows from .074178
-to .062990 without closing the live gap to either JAX reading. Highest EMA has
+to .062990 without closing the live gap to either JAX reading. About 37.4% of
+this gap reduction is the decrease in the EMA point reading; the remainder is
+the live increase. This is endpoint accounting, not a causal decomposition:
+a smaller EMA-live gap does not by itself mean a better EMA policy. Highest EMA has
 a height termination in `fallAndGetUp3_subject1` at 70.30 s. Live height
 terminations occur in `fallAndGetUp1_subject1` at 78.70 s,
 `fallAndGetUp1_subject5` at 78.68 s, `fallAndGetUp2_subject2` at 15.06 s,
@@ -340,3 +351,14 @@ boundary, so this does not identify the decoder alone or a particular layer.
 The eager-TF32 mismatch cannot be transferred to production gradients. No
 first-action result establishes a local physical VJP error or explains the full
 training quality difference by itself.
+
+## Fixed-executable evaluation follow-up
+
+[The evaluation repeatability study](EVALUATION_REPEATABILITY.md) reuses one
+original evaluator executable and its native captured graph with identical
+weights and restored public native arrays. Its three returns span .00913809,
+so separate compilation cannot explain all evaluation variation. A separately
+observed rollout first diverges at the raw physics output with identical inputs;
+a bounded component probe localizes one numerical variation to the subtree
+atomic-accumulation stage. Cross-executable and cross-process closure failures
+remain explicit, so this does not uniquely attribute the Torch/JAX live gap.
