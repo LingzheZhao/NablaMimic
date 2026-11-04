@@ -35,23 +35,23 @@ def _sub(a: wp.array2d(dtype=float), out: wp.array2d(dtype=float)):
 
 
 def clamp_kv_fix():
-    """Whether this MuJoCo Warp drops the actuator damping of clamped dofs from the qvel VJP: patch 0001 calls
+    """Whether this MuJoCo Warp drops the actuator damping of clamped dofs from the qvel VJP: the SDK calls
     forward_adjoint.clamped_actuator_qvel_backward when forward_adjoint.CLAMP_KV_FIX (MJW_CLAMP_KV_FIX=1 at import);
     without the function the damping stays. The fused path here (_clamped_kv) follows the same test."""
     return hasattr(_fa, "clamped_actuator_qvel_backward") and bool(getattr(_fa, "CLAMP_KV_FIX", True))
 
 
 def clamp_soft():
-    """Patch 0003's soft clamp: forward_adjoint.CLAMP_SOFT, delta > 0 from MJW_CLAMP_SOFT at import, 0.0 when off or
-    without the patch. With it forward_adjoint.actuator_lam scales the clamped dofs' multiplier by w instead of zeroing
+    """The SDK's soft-clamp option: forward_adjoint.CLAMP_SOFT, delta > 0 from MJW_CLAMP_SOFT at import,
+    0.0 when off or absent. With it forward_adjoint.actuator_lam scales the clamped dofs' multiplier by w instead of zeroing
     it (the qpos and ctrl paths here call it too) and smooth_qvel_backward applies the qvel correction with it whatever
     MJW_CLAMP_KV_FIX says (_clamped_kv here as well)."""
     return float(getattr(_fa, "CLAMP_SOFT", 0.0))
 
 
 def _clamped_kv(m, d_out, lam, adj_qvel, bc):
-    """As the patched smooth_qvel_backward: drop the actuator damping of clamped dofs from adj_qvel when
-    MJW_CLAMP_KV_FIX=1 (patch 0001), or keep kv w lam with the soft clamp (MJW_CLAMP_SOFT > 0, patch 0003);
+    """As the SDK's smooth_qvel_backward: drop the actuator damping of clamped dofs from adj_qvel when
+    MJW_CLAMP_KV_FIX=1, or keep kv w lam with the soft clamp (MJW_CLAMP_SOFT > 0);
     otherwise nothing changes."""
     if clamp_kv_fix() or clamp_soft() > 0.0:
         _fa.clamped_actuator_qvel_backward(m, d_out, lam, adj_qvel, bc)

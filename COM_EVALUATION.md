@@ -13,6 +13,11 @@ comparison. The 50% range-reduction gate below was a predeclared trigger for
 one follow-up experiment, not a permanent adoption requirement or a general
 uncertainty bound.
 
+Current installations obtain the same validated `mujoco_warp` package sources from the
+[SDK fork](https://github.com/LingzheZhao/mujoco_warp/tree/d39d6ad691e63ce94e66df69d509eff42047c2d9), at the commit selected by
+[the dependency installer](scripts/setup_mujoco_warp.sh). Moving delivery from local diffs to the SDK fork
+does not change the historical build identities, checkpoints or measurements reported below.
+
 ## Implementation and fixed conditions
 
 The [tested patch revision](https://github.com/LingzheZhao/NablaMimic/commit/1cde4106d1a2e932e4adb6d96e0e432398e79bdb)

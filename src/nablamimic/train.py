@@ -237,7 +237,7 @@ def build_parser():
     ap.add_argument("--max-episode-steps", type=int, default=500)
     ap.add_argument("--physics", default="engine", choices=["engine", "warp"],
                     help="engine: NablaEngine, the fused differentiable engine (installed separately); warp: MuJoCo "
-                         "Warp with its analytic adjoint (patched, scripts/setup_mujoco_warp.sh)")
+                         "Warp with its analytic adjoint (SDK fork pinned by scripts/setup_mujoco_warp.sh)")
     ap.add_argument("--solver-iterations", type=int, default=10, help="Newton iterations of the training physics")
     ap.add_argument("--no-remat", action="store_true",
                     help="keep every step's residuals instead of rematerializing the window in the backward")
@@ -247,7 +247,7 @@ def build_parser():
     ap.add_argument("--mjw-adj-parallel", type=int, default=0, choices=[0, 1],
                     help="warp: near-parallel capsule pairs keep their segment parameters in the backward")
     ap.add_argument("--mjw-ift-solve", type=int, default=0, choices=[0, 1, 2],
-                    help="warp: IFT solve of patch 0004 (1: scaled right-hand side, 2: no augmented border)")
+                    help="warp: adjoint IFT solve (1: scaled right-hand side, 2: no augmented border)")
     ap.add_argument("--actor-obs-norm", action="store_true",
                     help="normalize the actor input [history, goal] by running statistics (EMA 0.01 per update)")
     ap.add_argument("--anchor-to-decoder", action="store_true",

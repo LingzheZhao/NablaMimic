@@ -8,15 +8,19 @@ repository. Each item names where it is used.
 
 ### MuJoCo Warp (Apache License 2.0, Copyright 2025 The Newton Developers)
 
-<https://github.com/google-deepmind/mujoco_warp>; the analytic-adjoint fork <https://github.com/etaoxing/mujoco_warp>
-(commit `357a75d`, pull request #1 at `4af093f`) is fetched by `scripts/setup_mujoco_warp.sh`, not shipped.
+Uses <https://github.com/google-deepmind/mujoco_warp> through the
+[NablaMimic SDK fork](https://github.com/LingzheZhao/mujoco_warp/tree/d39d6ad691e63ce94e66df69d509eff42047c2d9), fetched at the commit
+pinned by `scripts/setup_mujoco_warp.sh` and installed as an external dependency. The SDK sources and diffs
+are not shipped in this repository. The fork retains the analytic-adjoint history from
+<https://github.com/etaoxing/mujoco_warp> (commit `357a75d`, pull request #1 at `4af093f`).
 
-- `patches/mujoco_warp/0001-0004`: modifications of `mujoco_warp/_src/collision_primitive_core.py`,
-  `mujoco_warp/_src/forward_adjoint.py` and `mujoco_warp/_src/adjoint.py` (backward-pass switches); each patched file
-  carries a modification notice. Distributed under the Apache License 2.0.
-- `patches/mujoco_warp/0005`: COM-only range-sum backport of google-deepmind/mujoco_warp#1872, with
-  the subtree-size metadata from #1730, adapted to preserve the pinned branch's mass rule and adjoint interfaces.
-  Modifies `mujoco_warp/_src/types.py`, `io.py` and `smooth.py`; Apache License 2.0.
+The SDK incorporates the backward-pass switches originally distributed with NablaMimic as patches
+`0001`–`0004`, modifying `collision_primitive_core.py`, `forward_adjoint.py` and `adjoint.py`, and the
+COM-only range-sum backport formerly distributed as `0005`. The latter draws from
+google-deepmind/mujoco_warp#1872 and the subtree-size metadata of #1730, preserving the pinned branch's
+mass rule and adjoint interfaces in `types.py`, `io.py` and `smooth.py`. These changes remain under the
+Apache License 2.0; the modified SDK files retain their modification notices.
+
 - `src/nablamimic/g1_fast/smooth_gen.py` generates a Warp kernel whose formulas follow `mujoco_warp/_src/smooth.py`.
 - `src/nablamimic/g1_fast/adjoint_patch.py` replaces `smooth_qvel_backward` of `mujoco_warp/_src/forward_adjoint.py` at
   run time with a version that follows it and calls its kernels.

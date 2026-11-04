@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Python environment: a venv with the tested versions (requirements-lock.txt), the CUDA 12 build of warp-lang 1.18.0,
-# the patched MuJoCo Warp (scripts/setup_mujoco_warp.sh), MuJoCo Menagerie's G1 (scripts/setup_menagerie.sh),
+# the MuJoCo Warp SDK fork pinned by scripts/setup_mujoco_warp.sh, MuJoCo Menagerie's G1 (scripts/setup_menagerie.sh),
 # NablaEngine at the tested revision and this package (editable). Needs Python 3.12 ($PYTHON, default python3.12),
 # git and network access. NablaEngine builds its CUDA library on first use and then needs the nvcc of a CUDA 12.x
 # toolkit (12.8 or newer for sm_120) and a host C++ compiler, which this script does not install (the
