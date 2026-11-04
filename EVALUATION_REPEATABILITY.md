@@ -154,6 +154,44 @@ first native-output difference, or the Torch/JAX live gap. Contact ordering,
 other reductions and unobserved native workspaces remain outside that causal
 claim. No atomic kernel or whole evaluator is rewritten.
 
+## CPU enumeration of the saved accumulation layer
+
+An offline check uses the sixteen already saved layer-entry and layer-exit
+arrays, each FP32 with shape `[40, 31, 3]`. The entry is the copy after depth 3;
+the exit is the copy after depth 2. Starting from parent 1's existing value,
+it enumerates all six orders of children 2, 8 and 14, rounding after every FP32
+addition and comparing exact bits separately for each coordinate.
+[Warp 1.18 vector atomics](https://github.com/NVIDIA/warp/blob/v1.18.0/warp/native/vec.h#L1830-L1838)
+call scalar atomics per coordinate, so x, y and z need not share one order.
+
+All **1,920/1,920 coordinate readings** (16 repetitions × 40 worlds × 3 axes)
+match at least one candidate order. All sixteen complete entry arrays are
+bitwise identical; all bodies other than parent 1 are unchanged across the
+layer. Inputs and candidate intermediates pass finite-value checks, with no
+subnormals detected. Three of the 120 parent coordinates vary across repetitions.
+Among 640 world/repetition readings, three have valid coordinate-wise matches
+but no single order matching all three axes together. All matching orders are
+retained, including ambiguous ones; no actual thread schedule is inferred.
+These repeated coordinates are not independent samples or a failure-rate estimate.
+
+The [public CPU entry and usage](studies/evaluation/README.md) run at
+[the fixed analysis revision](https://github.com/LingzheZhao/NablaMimic/commit/4ac55f16144df7b5ab348ffb40467d8bde06d1cf)
+with NumPy 2.5.4 and no GPU allocation. Both fresh arithmetic tests pass, covering
+per-add rounding, coordinate-dependent orders and rejection of an impossible
+sum. There are no failed or skipped readings in this analysis. It initializes
+no simulator and changes no kernel, solver or training setting. Raw inputs and
+JSON remain outside the repository. This entry checks saved arithmetic only;
+it does not expose or reproduce the earlier native-state restoration, capture
+or evaluator instrumentation.
+
+The observed layer outputs are therefore consistent with scalar FP32
+serialization of the three sibling additions. This supplies no unique
+explanation of downstream native outputs, full returns or the Torch/JAX gap.
+The component itself initializes the full accumulation buffer and reads neither
+solver warmstart nor private contact-solver workspace; the incomplete restoration
+of those workspaces limits full-physics attribution more than this local sum
+check. The investigation remains complete without a new GPU intervention.
+
 ## Validity flags and interpretation
 
 The first diagnostic attempt stopped before any full-evaluator priming or measured evaluation:
