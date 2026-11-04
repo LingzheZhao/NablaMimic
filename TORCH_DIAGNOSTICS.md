@@ -1,12 +1,22 @@
 # Torch EMA and precision diagnostics
 
-The Torch repeat retains competitive EMA return and lower live-policy return
-than the two JAX point readings. The highest-precision fit has a small live-return
-increase in this comparison, but fewer completed clips, lower EMA return and
-1.73 times the complete training-process duration; it does not support changing the default. Precision
-sensitivity is measured before physics and through an actual late optimizer
-update, but the EMA–live gap still has no unique causal explanation. An apparent
-late curve decline is also confounded by evaluation variation with identical weights.
+The evaluation readings below use the historical four-patch MuJoCo Warp SDK.
+Their tables and numerical analyses retain that evaluator identity. For the
+current checkpoint comparison, see the
+[common five-patch evaluation](https://github.com/LingzheZhao/NablaMimic/blob/main/COM_EVALUATION.md#existing-checkpoints-under-the-common-patched-evaluator),
+which keeps the five fixed fits and their EMA/live policies separate.
+
+In that panel, Torch TF32-repeat live lies between the two JAX means; highest
+EMA exceeds TF32-repeat EMA by .002770. Their live means are nearly equal, with
+fewer completed clips for highest, while highest training took 1.73 times as
+long. TF32 remains the working default for this recipe on cost-benefit grounds.
+All five fits have higher EMA than live means, so this separation is not
+specific to Torch and does not by itself diagnose a Torch implementation defect.
+
+Precision sensitivity is measured before physics and through an actual late
+optimizer update, but it does not uniquely explain individual checkpoints'
+EMA–live separation. An apparent late curve decline in the historical readings
+is also confounded by evaluation variation with identical weights.
 
 ## Conditions and original-condition repetition
 
