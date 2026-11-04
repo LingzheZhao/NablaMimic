@@ -18,8 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# The tested versions (requirements-lock.txt). MuJoCo Warp is the patched editable tree of scripts/setup_mujoco_warp.sh
-# and warp-lang the CUDA 12 build of the NVIDIA/warp release (scripts/setup_env.sh installs both).
+# Tested versions are in requirements-lock.txt. scripts/setup_mujoco_warp.sh pins and installs the SDK fork separately.
+# scripts/setup_env.sh also installs the CUDA 12 build of warp-lang from the NVIDIA/warp release.
 dependencies = [
     "jax[cuda12]==0.12.0.1",
     "mujoco==3.17.0",

@@ -1,19 +1,19 @@
-"""Backward-pass switches of the patched MuJoCo Warp (patches/mujoco_warp, applied by scripts/setup_mujoco_warp.sh).
+"""Backward-pass switches in the MuJoCo Warp SDK fork pinned by scripts/setup_mujoco_warp.sh.
 
 All are read by MuJoCo Warp at import, so configure() must run before mujoco_warp is imported (sim.make_warp calls it
 before building the physics; standalone tools can set the environment variables instead). configure() always exports
 all six, so nothing is inherited from the shell:
-  MJW_CLAMP_KV_FIX=1   0001: no actuator damping in the qvel VJP of dofs whose actuator force is clamped by
+  MJW_CLAMP_KV_FIX=1   no actuator damping in the qvel VJP of dofs whose actuator force is clamped by
                        actuatorfrcrange (the forward does not depend on qvel there);
-  MJW_ADJ_NORMAL=k     0001: derivative of the sphere / capsule self-contact normal n = v / |v|: 0 exact (MuJoCo Warp),
+  MJW_ADJ_NORMAL=k     derivative of the sphere / capsule self-contact normal n = v / |v|: 0 exact (MuJoCo Warp),
                        1 n constant, 2 (I - n n') / max(|v|, eps), 3 n constant where |v| < eps (NablaEngine's
                        gradient convention);
   MJW_ADJ_NORMAL_EPS   eps in m (default 1e-3);
-  MJW_ADJ_PARALLEL=1   0002: near-parallel capsule pairs (sin^2 of the axis angle < MJW_ADJ_PARALLEL_EPS, default 1.2e-3)
+  MJW_ADJ_PARALLEL=1   near-parallel capsule pairs (sin^2 of the axis angle < MJW_ADJ_PARALLEL_EPS, default 1.2e-3)
                        keep their segment parameters constant in the backward (as NablaEngine);
-  MJW_CLAMP_SOFT=d     0003: soft actuator clamp with width d > 0 in the backward (overrides MJW_CLAMP_KV_FIX);
+  MJW_CLAMP_SOFT=d     soft actuator clamp with width d > 0 in the backward (overrides MJW_CLAMP_KV_FIX);
                        g1_fast.adjoint_patch follows it on the training path;
-  MJW_IFT_SOLVE=k      0004: 1 scales the IFT solve's right-hand side by a power of two (the 1e30-border corner pivot
+  MJW_IFT_SOLVE=k      1 scales the IFT solve's right-hand side by a power of two (the 1e30-border corner pivot
                        then does not become NaN for large right-hand sides), 2 solves without the augmented border;
                        finite gradients unchanged beyond float32 rounding.
 The forward is the same with every setting.

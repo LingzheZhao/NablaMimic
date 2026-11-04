@@ -1,4 +1,4 @@
-"""Batched physics for TrackingEnv: NablaEngine (the fused differentiable engine) or patched MuJoCo Warp, between
+"""Batched physics for TrackingEnv: NablaEngine (the fused differentiable engine) or the pinned MuJoCo Warp SDK, between
 vmapped per-env pre- and post-step functions, and the per-step reset select."""
 
 import jax
@@ -78,7 +78,7 @@ def engine_info(phys):
 def make_warp(env, sizes, train=True, adj_normal=0, adj_parallel=0, ift_solve=0):
     """{batch size: warp_physics.WarpPhysics}. train: the training setting (64 contacts and 192 constraint rows per
     world, reverse-mode RNE VJP in the adjoint, warm-started recompute, sensors disabled) with the backward switches of
-    patches/mujoco_warp (mjw_options); otherwise the forward-only evaluation setting (capacity from MJX's padding)."""
+    the pinned SDK fork (mjw_options); otherwise the forward-only evaluation setting (capacity from MJX's padding)."""
     from . import mjw_options
     mjw_options.configure(False, adj_normal, 1e-3, adj_parallel, 0.0, ift_solve)
     from .warp_physics import WarpPhysics

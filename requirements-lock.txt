@@ -1,6 +1,6 @@
 # The tested environment: Python 3.12, Linux x86_64, NVIDIA driver with CUDA 12. Installed by scripts/setup_env.sh,
 # which adds the CUDA 12 build of warp-lang 1.18.0 from the NVIDIA/warp GitHub release (the PyPI wheel targets CUDA 13),
-# the patched MuJoCo Warp (scripts/setup_mujoco_warp.sh), NablaEngine (without dependencies: they are listed here)
+# the MuJoCo Warp SDK fork pinned by scripts/setup_mujoco_warp.sh, NablaEngine (without dependencies: they are listed here)
 # and this package:
 #   nablaengine[jax] @ git+https://github.com/OamIcs/NablaEngine.git@c61a6fe7f5ec47c7f4f9b0a4c055d60cbe40807c
 absl-py==2.5.1

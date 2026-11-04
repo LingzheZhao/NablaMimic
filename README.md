@@ -53,10 +53,16 @@ Linux x86_64, an NVIDIA GPU with a CUDA 12 driver, Python 3.12, and the `nvcc` o
 for Blackwell GPUs) for the engine's one-time build.
 
 ```bash
-git clone https://github.com/OamIcs/NablaMimic && cd NablaMimic
-bash scripts/setup_env.sh    # .venv with pinned versions, the patched MuJoCo Warp, Menagerie's G1, NablaEngine, nablamimic
+git clone https://github.com/LingzheZhao/NablaMimic && cd NablaMimic
+bash scripts/setup_env.sh    # .venv with pinned versions, the MuJoCo Warp SDK fork, Menagerie's G1, NablaEngine, nablamimic
 source .venv/bin/activate
 ```
+
+The [MuJoCo Warp SDK fork](https://github.com/LingzheZhao/mujoco_warp/tree/d39d6ad691e63ce94e66df69d509eff42047c2d9) contains the analytic adjoint,
+NablaMimic backward options and COM range-sum backport.
+[`scripts/setup_mujoco_warp.sh`](scripts/setup_mujoco_warp.sh) pins the SDK commit and installs its checkout without
+changing the locked dependencies. SDK source and component checks are maintained in that repository; this repository
+does not apply SDK diffs.
 
 The configurations in `configs/` use about 50 GB of GPU memory (tested on an RTX PRO 6000 and an H100). On a smaller
 GPU, lower `--replay-steps` / `--collect-envs` (the replay buffer) and `--num-envs` (BPTT windows per update) as needed;

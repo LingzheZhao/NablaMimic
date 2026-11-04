@@ -12,7 +12,7 @@ Both FFI callbacks are captured as CUDA graphs (JaxCallableGraphMode.WARP_STAGED
 WarpPhysics before tracing anything that calls it: that loads every Warp module and runs the
 callbacks once outside any capture. One instance per batch size; one process per GPU.
 
-The patched MuJoCo Warp of scripts/setup_mujoco_warp.sh is required (the base adjoint plus patches/mujoco_warp); its
+The MuJoCo Warp SDK fork pinned by scripts/setup_mujoco_warp.sh is required; its
 backward switches are read when mujoco_warp is imported, so import this module only after mjw_options.configure().
 Contact / constraint capacity defaults to MJX's static padding (x2), sized so that it did not overflow
 in any reported run; `stats()` reports the high-water marks of the last call.

@@ -1,7 +1,7 @@
-# NablaMimic on MuJoCo Warp (patched, see patches/mujoco_warp) with residual actions, the method of configs/ours.args on
+# NablaMimic on the pinned MuJoCo Warp SDK fork (scripts/setup_mujoco_warp.sh) with residual actions, configs/ours.args on
 # the other simulator, 3 h of training. The backward uses the same gradient conventions as NablaEngine (self-contact
 # normal held constant below 1 mm, segment parameters of near-parallel capsules held constant), plus the
-# scaled right-hand side of patch 0004 in the adjoint's IFT solve; the two simulators' forward passes are separate
+# scaled right-hand side in the SDK adjoint's IFT solve; the two simulators' forward passes are separate
 # implementations. The absolute-action recipe of the reported comparisons: configs/reported/ours_absolute_mjw.args.
 # the v0.1.0 recipe (base/ours_v1.args)
 @base/ours_v1.args
