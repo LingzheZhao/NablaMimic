@@ -4,7 +4,14 @@ The COM-only upstream backport removes the measured component's run-to-run bit
 variation. In the paired full-evaluator experiment, the three-return range falls
 from .02563164 to .01208337. Native physics and full returns still vary. This is
 a bounded improvement under the stated conditions, not whole-simulator
-determinism or a unique explanation of the Torch/JAX live-return gap.
+determinism or a unique explanation of differences between specific live checkpoints.
+
+Use the five-patch SDK for subsequent common evaluations. Adoption rests on
+removing the measured local atomic-accumulation variation, agreement with the
+COM formula and compatibility checks, with no observed time penalty in this
+comparison. The 50% range-reduction gate below was a predeclared trigger for
+one follow-up experiment, not a permanent adoption requirement or a general
+uncertainty bound.
 
 ## Implementation and fixed conditions
 
@@ -116,7 +123,9 @@ interval nor a general error bound.
 
 These are host wall times around execution plus device synchronization, excluding
 state restoration, readback, compilation and priming; they are not GPU-event
-kernel timings. Full-evaluator time is about 2.1% lower in this ordered comparison.
+kernel timings. This ordered comparison shows no observed time penalty and a
+slightly lower full-evaluator mean (about 2.1%); it does not establish a stable
+full-evaluator speedup ratio.
 Complete worker processes take 221.28/218.93 s but include different validation
 work, so their ratio is not a throughput estimate. Peak host RSS is 7.12/7.08 GiB;
 maximum phase-boundary device samples are 1.977/1.971 GiB, not continuous peaks.

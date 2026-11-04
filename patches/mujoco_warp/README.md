@@ -49,6 +49,11 @@ build retain that evaluator identity and are not directly comparable with new sc
 build for every checkpoint in a new comparison. Removing this COM atomic accumulation does not promise
 whole-simulator determinism; other reductions and native state may still affect repeatability.
 
+The five-patch build is the default for subsequent common evaluations. Patch `0005` changes the shared SDK,
+so training with `--physics warp` also uses the new COM calculation. The reported checks cover its formula
+and old-adjoint execution compatibility, not complete training of every Warp recipe. The selected
+Torch + NablaEngine training path does not use this MuJoCo Warp calculation.
+
 [COM validation results](../../COM_EVALUATION.md) record the formula, repeatability, adjoint-execution and full-evaluator checks with their limits.
 
 The patched files carry a modification notice. MuJoCo Warp is licensed under the Apache License 2.0
