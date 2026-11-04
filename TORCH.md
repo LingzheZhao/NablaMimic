@@ -112,6 +112,13 @@ EMA–live gap. Identical weights also vary across evaluations, so the curve's
 last interval does not establish late training deterioration. No schedule
 change is inferred from these bounded observations.
 
+A [fixed-executable evaluation follow-up](EVALUATION_REPEATABILITY.md) confirms
+runtime variation with unchanged weights and compilation, and localizes a
+numerical variation in a separately observed physics component to atomic
+accumulation. Its scope and failed closure comparisons remain explicit; it
+provides no basis for changing the training defaults or attributing the complete
+live-return gap to one kernel.
+
 ## Environment and training
 
 Install the optional Torch dependency into a provisioned, pinned environment:
