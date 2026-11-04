@@ -25,6 +25,58 @@ scopes; they do not establish full-size compiler equivalence or long-training
 quality on this revision. Earlier fixed-snapshot experiments remain separate
 readings. The [validation studies](studies/pytorch/README.md) define the checks.
 
+## Fixed 1,500-update comparison
+
+The [tested Torch revision](https://github.com/LingzheZhao/NablaMimic/commit/b13375e22948d505579a627e8fc1bce99cccb31d)
+completed 1,500 updates on an RTX 6000 Ada 48 GB with `compile-graph` and
+`nets_tf32`. The official JAX comparisons use
+[the same v0.2 recipe](https://github.com/OamIcs/NablaMimic/commit/bfbb2a6773b4776c17402a34a93ec7589d9c7c18).
+All three executions used the same physical GPU at different times, the same
+96-contact/416-row Engine and forty-clip reference collection. The fifty shared
+configuration settings matched: 4,096 environments, horizon 64, replay 1,000,
+eight regression minibatches, 100-update warmup and EMA 0.999. Initial actor,
+EMA, critic, normalizer and reset-bin state matched; subsequent random streams
+remain framework-specific. The two JAX readings are same-seed technical repeats,
+not two independent training seeds.
+
+| Condition | Checkpoint clock (min) | Complete training process (min) | EMA return / completed | Live return / completed |
+| --- | ---: | ---: | ---: | ---: |
+| Torch | 14.185 | 16.744 | 0.835171 / 39 of 40 | 0.745769 / 35 of 40 |
+| Official JAX, first | 26.838 | 28.693 | 0.828801 / 39 of 40 | 0.793606 / 37 of 40 |
+| Official JAX, repeat | 26.929 | 28.806 | 0.839127 / 40 of 40 | 0.785574 / 35 of 40 |
+
+The complete Torch training process was 1.71–1.72 times faster, including cold
+imports, compilation/capture and weight saves. Its setup/capture took 133.48
+seconds. Torch checkpoint auditing ran separately (2.26 seconds); the JAX
+training processes include their final checkpoint/backend audit. Additional
+wall-time saves and terminal replay-state serialization were disabled for Torch
+(`--save-wall-minutes 6001 --no-full-state-at-end`), preserving only numbered
+checkpoints every 250 updates. These are fixed-workload timings, not times to a
+quality threshold.
+
+All 1,500 logged updates were finite, all nine native invalidity counters were
+zero, and optimizer, native-work and five graph replay counts matched. Seven
+numbered checkpoints passed their audits. Peak Torch allocated/reserved memory
+was 31.81/38.24 GiB without growth across the logged updates; JAX allocator peaks
+were 45.78 GiB. These framework allocator definitions differ and exclude some
+native/Warp allocations, so they are not total-device peak measurements.
+Device-wide samples at fifteen-second intervals reached 38.88 GiB for Torch
+and 46.79–46.83 GiB for JAX. Those samples miss the first 309 seconds of Torch
+and the first 62/68 seconds of the JAX training processes. Torch has the lower
+sampled maximum; these observations do not bound either full-process peak.
+
+Each policy was evaluated in a separate process by the original official
+MuJoCo Warp evaluator with highest FP32 matmul, ten solver iterations, no noise
+or randomization and full-reference normalization for all forty clips. The EMA point reading
+lies between the two JAX readings; live return is lower than both. Torch EMA
+has one tilt termination in `walk2_subject3` at 200.34 seconds. Live has five
+height terminations, including `fallAndGetUp1_subject4` at 7.42 seconds; partial
+supports remain in the recorded outcomes. This one Torch fit establishes no
+statistical quality equivalence, general backend superiority, eight-minute
+crossing or independent physical-fidelity acceptance. The
+[JAX comparison record](https://github.com/LingzheZhao/NablaMimic/pull/1)
+keeps the two baseline checkpoint identities separate.
+
 ## Environment and training
 
 Install the optional Torch dependency into a provisioned, pinned environment:
