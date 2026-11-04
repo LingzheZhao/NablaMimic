@@ -78,7 +78,13 @@ margin. This checks execution compatibility, not an independent derivative oracl
 Forward and all five backward buffers have zero capacity/unknown bits, including
 after priming and before restoration. Sticky solver/line-search flags remain
 recorded; inactive rows continue stepping, so final flags are not counts of
-failures within valid trajectory supports.
+failures within valid trajectory supports. The final forward buffer of the third
+patched full rollout also contains an `ITERATIONS` bit (512) for
+`fallAndGetUp1_subject4`, alongside its line-search bit; the original condition
+has no observed 512 bit. This clip records a height-tracking termination at 7.40 s,
+but the sticky final flag does not locate the iteration-limit event before or
+after that termination. It remains a retained solver diagnostic, not a capacity
+failure or evidence that the valid segment failed to solve.
 
 ## Full-reference repeatability and time
 
@@ -98,7 +104,9 @@ The observed return range decreases by 52.86%; mean per-clip range changes from
 .02706995 to .01747683. Support dispersion, defined as the sum of per-clip
 alive-length ranges divided by summed full lengths, changes from .03089916 to
 .02148590. All gates pass without using higher mean return as a selection rule.
-Three repeats give neither a confidence interval nor a general error bound.
+Mean return changes from .74001951 to .73659967; this repeatability result is
+not a quality gain for the fixed policy. Three repeats give neither a confidence
+interval nor a general error bound.
 
 | Mean synchronized call time | Original | COM backport |
 | --- | ---: | ---: |
