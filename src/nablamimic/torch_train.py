@@ -556,6 +556,8 @@ def build_parser():
 
 
 def validate_args(args):
+    if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
+        raise ValueError("Source perceptive task requires its scene-bound sharded library")
     if sum(bool(value) for value in (args.actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
         raise ValueError("Actor initialization, matched initialization and full resume are mutually exclusive")
     if bool(args.actor_checkpoint) != bool(args.actor_weights):
@@ -614,6 +616,8 @@ def build_environment(args):
         if args.terrain_model_contract is None:
             raise ValueError("Prepared terrain model requires its physical contract")
         model_contract = json.loads(args.terrain_model_contract.read_text())
+        if source_task and source.index['scene_artifact_id'] != model_contract['artifact_id']:
+            raise ValueError('Source reference library is bound to a different physical scene')
         model = (mujoco.MjModel.from_binary_path(str(args.terrain_model))
                  if args.terrain_model.suffix == '.mjb' else
                  mujoco.MjModel.from_xml_path(str(args.terrain_model)))
