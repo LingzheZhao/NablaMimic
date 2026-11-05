@@ -31,20 +31,24 @@ def readings(chain, states):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--panel', type=Path, required=True)
-    parser.add_argument('--torso-index', type=int, required=True)
+    parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     panel = json.loads(args.panel.read_text())
     identity = panel['identity']
+    config = json.loads(args.config.read_text())
+    torso_index = config['physical_model']['tracked_body_names'].index('torso_link')
     groups = {}
     for report in panel['reports']:
         if report['checkpoint_path'] != identity['checkpoint_path'] or report['completed_updates'] != identity['completed_updates']:
             raise ValueError('Panel mixes checkpoint identities')
+        if report['perception'] != config['perception']:
+            raise ValueError('Panel sensor and physical frame binding differs from training configuration')
         key = (report['weights'], report['start'])
         condition = report['sensor_intervention']
         if condition not in ('measured', 'constant') or condition in groups.setdefault(key, {}):
             raise ValueError('Duplicate or undeclared sensor condition')
-        groups[key][condition] = read_chain(args.panel.parent, report, args.torso_index)
+        groups[key][condition] = read_chain(args.panel.parent, report, torso_index)
     pairs = []
     for (weights, start), group in sorted(groups.items()):
         if set(group) != {'measured', 'constant'}:
@@ -64,7 +68,7 @@ def main():
         pairs.append(dict(weights=weights, start=start, full_support=full, common_support=common,
                           measured_minus_constant_common=difference))
     args.output.mkdir(parents=True, exist_ok=False)
-    (args.output/'result.json').write_text(json.dumps(dict(identity=identity, torso_index=args.torso_index,
+    (args.output/'result.json').write_text(json.dumps(dict(identity=identity, torso_index=torso_index,
         definition='Per-pair full and common prefix state supports include each recorded terminal state. Stop and posture labels refer to each full observed chain.',
         pairs=pairs), indent=2))
 
