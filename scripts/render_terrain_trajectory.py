@@ -32,7 +32,7 @@ def write_png(path, pixels):
 
 
 def caption(pixels, text, left, color):
-    """Draw the two fixed comparison labels without a font dependency."""
+    """Draw comparison labels and elapsed seconds without a font dependency."""
     glyphs = {
         'A': ('01110', '10001', '10001', '11111', '10001', '10001', '10001'),
         'C': ('01111', '10000', '10000', '10000', '10000', '10000', '01111'),
@@ -43,6 +43,19 @@ def caption(pixels, text, left, color):
         'E': ('11111', '10000', '10000', '11110', '10000', '10000', '11111'),
         'F': ('11111', '10000', '10000', '11110', '10000', '10000', '10000'),
         'N': ('10001', '11001', '11001', '10101', '10011', '10011', '10001'),
+        'S': ('01111', '10000', '10000', '01110', '00001', '00001', '11110'),
+        '0': ('01110', '10001', '10011', '10101', '11001', '10001', '01110'),
+        '1': ('00100', '01100', '00100', '00100', '00100', '00100', '01110'),
+        '2': ('01110', '10001', '00001', '00010', '00100', '01000', '11111'),
+        '3': ('11110', '00001', '00001', '01110', '00001', '00001', '11110'),
+        '4': ('00010', '00110', '01010', '10010', '11111', '00010', '00010'),
+        '5': ('11111', '10000', '10000', '11110', '00001', '00001', '11110'),
+        '6': ('01110', '10000', '10000', '11110', '10001', '10001', '01110'),
+        '7': ('11111', '00001', '00010', '00100', '01000', '01000', '01000'),
+        '8': ('01110', '10001', '10001', '01110', '10001', '10001', '01110'),
+        '9': ('01110', '10001', '10001', '01111', '00001', '00001', '01110'),
+        '.': ('00000', '00000', '00000', '00000', '00000', '00100', '00100'),
+        ' ': ('00000',)*7,
     }
     scale = 2
     for letter in text:
@@ -52,6 +65,115 @@ def caption(pixels, text, left, color):
                     pixels[8 + row*scale:8 + (row+1)*scale,
                            left + column*scale:left + (column+1)*scale] = color
         left += 6*scale
+
+
+def render_poses(model, poses, reference_poses, args, control_hz, *, follow_body=None, geom_groups=None, show_elapsed=False):
+    """Render one saved state chain and its aligned reference using a shared camera."""
+    import mujoco
+    import numpy as np
+
+    model.vis.global_.offwidth = args.width
+    model.vis.global_.offheight = args.height
+    # The physical fixture contains collision geoms. Give the body and terrain
+    # distinct display colours while using their recorded compiled shapes.
+    robot_geoms = model.geom_bodyid != 0
+    model.geom_rgba[robot_geoms] = [.18, .45, .80, 1.0]
+    model.geom_matid[robot_geoms] = -1
+    model.geom_rgba[~robot_geoms] = [.62, .66, .51, 1.0]
+    data = mujoco.MjData(model)
+    reference_data = mujoco.MjData(model) if reference_poses is not None else None
+    reference_option = mujoco.MjvOption()
+    if geom_groups is not None:
+        reference_option.geomgroup[:] = 0
+        reference_option.geomgroup[list(geom_groups)] = 1
+        reference_option.sitegroup[:] = 0
+    root_id = model.body(follow_body).id if follow_body is not None else None
+    reference_perturb = mujoco.MjvPerturb()
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.azimuth, camera.elevation = args.azimuth, args.elevation
+    camera.distance = args.distance
+    robot_bodies = np.flatnonzero(model.body_rootid != 0)
+    if args.camera == 'fixed':
+        centers = []
+        framing_poses = poses if reference_poses is None else np.concatenate((poses, reference_poses))
+        for pose in framing_poses:
+            data.qpos[:] = pose
+            mujoco.mj_kinematics(model, data)
+            centers.append((data.xpos[robot_bodies].min(0) + data.xpos[robot_bodies].max(0)) / 2)
+        centers = np.asarray(centers)
+        camera.lookat[:] = (centers.min(0) + centers.max(0)) / 2
+        camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(centers, axis=0))) + 3)
+    if args.ffmpeg is not None and not (args.ffmpeg.is_file() and os.access(args.ffmpeg, os.X_OK)):
+        raise ValueError('The explicitly selected ffmpeg must be an executable file')
+    ffmpeg = str(args.ffmpeg) if args.ffmpeg is not None else shutil.which('ffmpeg')
+    process = None
+    frames = args.output / 'frames'
+    if not ffmpeg:
+        frames.mkdir()
+    with (args.output / 'ffmpeg.log').open('wb') as encoder_log:
+        if ffmpeg:
+            process = subprocess.Popen([
+                ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'warning', '-n',
+                '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', f'{args.width}x{args.height}',
+                '-framerate', str(control_hz), '-i', 'pipe:0', '-an',
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                str(args.output / 'policy.mp4')], stdin=subprocess.PIPE, stderr=encoder_log)
+        try:
+            with mujoco.Renderer(model, height=args.height, width=args.width) as renderer:
+                for index, pose in enumerate(poses):
+                    data.qpos[:] = pose
+                    mujoco.mj_kinematics(model, data)
+                    mujoco.mj_camlight(model, data)
+                    body_positions = data.xpos[robot_bodies]
+                    if reference_data is not None:
+                        reference_data.qpos[:] = reference_poses[index]
+                        mujoco.mj_kinematics(model, reference_data)
+                        body_positions = np.concatenate((body_positions, reference_data.xpos[robot_bodies]))
+                    if args.camera == 'follow':
+                        if root_id is None:
+                            camera.lookat[:] = (body_positions.min(0) + body_positions.max(0)) / 2
+                        else:
+                            camera.lookat[:] = data.xpos[root_id]
+                        if reference_data is not None:
+                            if root_id is None:
+                                camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(body_positions, axis=0)))+1)
+                            else:
+                                extent = float(np.max(np.linalg.norm(body_positions-camera.lookat, axis=1)))
+                                camera.distance = max(args.distance, extent*2+1)
+                    renderer.update_scene(data, camera=camera, scene_option=reference_option)
+                    if reference_data is not None:
+                        actual_geoms = renderer.scene.ngeom
+                        mujoco.mjv_addGeoms(model, reference_data, reference_option, reference_perturb,
+                                           mujoco.mjtCatBit.mjCAT_DYNAMIC, renderer.scene)
+                        for geom in renderer.scene.geoms[actual_geoms:renderer.scene.ngeom]:
+                            geom.rgba[:] = [.95, .88, .68, .45]
+                    pixels = renderer.render()
+                    if reference_data is not None:
+                        pixels[:30] = [20, 24, 30]
+                        caption(pixels, 'ACTUAL', 10, [70, 150, 255])
+                        caption(pixels, 'REFERENCE', 120, [245, 225, 175])
+                        if show_elapsed:
+                            caption(pixels, f'T {index/control_hz:.2f}S', 260, [235, 235, 235])
+                    if process:
+                        process.stdin.write(pixels.tobytes())
+                    else:
+                        write_png(frames / f'{index:06d}.png', pixels)
+        finally:
+            if process:
+                try:
+                    process.stdin.close()
+                finally:
+                    returncode = process.wait()
+        if process and returncode:
+            raise RuntimeError(f'ffmpeg exited with {returncode}; see ffmpeg.log')
+    result = dict(format='mp4' if ffmpeg else 'png_frames', ffmpeg=ffmpeg,
+                  video=str(args.output/'policy.mp4') if ffmpeg else None,
+                  frames_directory=str(frames) if not ffmpeg else None,
+                  mujoco_version=mujoco.__version__, mujoco_gl=os.environ['MUJOCO_GL'])
+    if not ffmpeg:
+        result['encoding_dependency'] = 'ffmpeg with libx264 is required to encode the saved PNG frames to MP4'
+    return result
 
 
 def main():
@@ -141,99 +263,14 @@ def main():
         reference_poses = reference_qpos[reference_frames]
         if args.width < 300 or args.height < 30:
             raise ValueError('Reference comparison captions require at least 300 by 30 pixels')
-    model.vis.global_.offwidth = args.width
-    model.vis.global_.offheight = args.height
-    # The physical fixture contains collision geoms. Give the body and terrain
-    # distinct display colours while using their recorded compiled shapes.
-    robot_geoms = model.geom_bodyid != 0
-    model.geom_rgba[robot_geoms] = [.18, .45, .80, 1.0]
-    model.geom_rgba[~robot_geoms] = [.62, .66, .51, 1.0]
-    data = mujoco.MjData(model)
-    reference_data = mujoco.MjData(model) if reference_poses is not None else None
-    reference_option = mujoco.MjvOption()
-    reference_perturb = mujoco.MjvPerturb()
-    camera = mujoco.MjvCamera()
-    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.azimuth, camera.elevation = args.azimuth, args.elevation
-    camera.distance = args.distance
-    robot_bodies = np.flatnonzero(model.body_rootid != 0)
-    if args.camera == 'fixed':
-        centers = []
-        framing_poses = poses if reference_poses is None else np.concatenate((poses, reference_poses))
-        for pose in framing_poses:
-            data.qpos[:] = pose
-            mujoco.mj_kinematics(model, data)
-            centers.append((data.xpos[robot_bodies].min(0) + data.xpos[robot_bodies].max(0)) / 2)
-        centers = np.asarray(centers)
-        camera.lookat[:] = (centers.min(0) + centers.max(0)) / 2
-        camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(centers, axis=0))) + 3)
-    if args.ffmpeg is not None and not (args.ffmpeg.is_file() and os.access(args.ffmpeg, os.X_OK)):
-        raise ValueError('The explicitly selected ffmpeg must be an executable file')
-    ffmpeg = str(args.ffmpeg) if args.ffmpeg is not None else shutil.which('ffmpeg')
     status.update(control_hz=control_hz, states=len(poses), reference_frames=reference_frames.tolist(),
                   stop_reason=result['stop_reason'], posture_fall=result['posture_fall'],
-                  mujoco_version=mujoco.__version__, mujoco_gl=os.environ['MUJOCO_GL'],
-                  geometry='Compiled physical collision geometry; robot blue and terrain olive',
-                  ffmpeg=ffmpeg, format='mp4' if ffmpeg else 'png_frames',
+                  geometry='Compiled physical geometry; robot blue and terrain olive',
                   terminal_state_included=True, physics_steps=0,
-                  comparison='Actual blue, reference translucent cream, one physical terrain' if reference_poses is not None else None,
                   reference_artifact_id=screening['artifact_id'] if reference_poses is not None else None)
     write_status()
-    process = None
-    frames = args.output / 'frames'
-    if not ffmpeg:
-        frames.mkdir()
-    with (args.output / 'ffmpeg.log').open('wb') as encoder_log:
-        if ffmpeg:
-            process = subprocess.Popen([
-                ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'warning', '-n',
-                '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', f'{args.width}x{args.height}',
-                '-framerate', str(control_hz), '-i', 'pipe:0', '-an',
-                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                str(args.output / 'policy.mp4')], stdin=subprocess.PIPE, stderr=encoder_log)
-        try:
-            with mujoco.Renderer(model, height=args.height, width=args.width) as renderer:
-                for index, pose in enumerate(poses):
-                    data.qpos[:] = pose
-                    mujoco.mj_kinematics(model, data)
-                    mujoco.mj_camlight(model, data)
-                    body_positions = data.xpos[robot_bodies]
-                    if reference_data is not None:
-                        reference_data.qpos[:] = reference_poses[index]
-                        mujoco.mj_kinematics(model, reference_data)
-                        body_positions = np.concatenate((body_positions, reference_data.xpos[robot_bodies]))
-                    if args.camera == 'follow':
-                        camera.lookat[:] = (body_positions.min(0) + body_positions.max(0)) / 2
-                        if reference_data is not None:
-                            camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(body_positions, axis=0))) + 1)
-                    renderer.update_scene(data, camera=camera)
-                    if reference_data is not None:
-                        actual_geoms = renderer.scene.ngeom
-                        mujoco.mjv_addGeoms(model, reference_data, reference_option, reference_perturb,
-                                           mujoco.mjtCatBit.mjCAT_DYNAMIC, renderer.scene)
-                        for geom in renderer.scene.geoms[actual_geoms:renderer.scene.ngeom]:
-                            geom.rgba[:] = [.95, .88, .68, .45]
-                    pixels = renderer.render()
-                    if reference_data is not None:
-                        pixels[:30] = [20, 24, 30]
-                        caption(pixels, 'ACTUAL', 10, [70, 150, 255])
-                        caption(pixels, 'REFERENCE', 120, [245, 225, 175])
-                    if process:
-                        process.stdin.write(pixels.tobytes())
-                    else:
-                        write_png(frames / f'{index:06d}.png', pixels)
-        finally:
-            if process:
-                try:
-                    process.stdin.close()
-                finally:
-                    returncode = process.wait()
-        if process and returncode:
-            raise RuntimeError(f'ffmpeg exited with {returncode}; see ffmpeg.log')
-    status.update(state='completed', video=str(args.output / 'policy.mp4') if ffmpeg else None,
-                  frames_directory=str(frames) if not ffmpeg else None)
-    if not ffmpeg:
-        status['encoding_dependency'] = 'ffmpeg with libx264 is required to encode the saved PNG frames to MP4'
+    rendered = render_poses(model, poses, reference_poses, args, control_hz)
+    status.update(state='completed', **rendered)
     write_status()
     print(json.dumps(dict(output=str(args.output), format=status['format'], states=len(poses),
                           control_hz=control_hz)))
