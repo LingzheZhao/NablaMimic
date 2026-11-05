@@ -110,8 +110,27 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     critic_layout='native privileged proprioception+source_goal+anchor+rootvelocity+domainparameters')
 
     def reset(self, frame, noise=None):
-        state = super().reset(frame, noise)
-        state['hist'] = state['hist'][:, -8:].clone()
+        """Write the reference plus declared source noise without soft-limit clipping."""
+        if self.cfg.dr:
+            raise ValueError('Source physical randomization requires its own explicit model binding')
+        if (self.cfg.reset_noise or self.cfg.obs_noise) and noise is None:
+            raise ValueError('Source reset requires explicit noise samples')
+        frame=frame.to(dtype=torch.int32)
+        qpos=self.ref_qpos[frame].clone()
+        qvel=self.ref_qvel[frame].clone()
+        if self.cfg.reset_noise:
+            qpos=torch.cat((qpos[:,:3]+noise['position']*self.reset_position_limits,
+                            qpos[:,3:7],qpos[:,7:]+.1*noise['joints']),-1)
+        batch=len(frame)
+        com=torch.zeros_like(qpos[:,:3])
+        qn,xpos,xquat,cvel,subtree_com=self.engine_kinematics(qpos.contiguous(),qvel.contiguous(),com.contiguous())
+        state=dict(qpos=qn,qvel=qvel,warm=torch.zeros_like(qvel),xpos=xpos,xquat=xquat,cvel=cvel,
+            subtree_com=subtree_com,frame=frame,ep=torch.zeros_like(frame),prev_a=torch.zeros_like(qpos[:,7:]),
+            friction=torch.ones(batch,device=self.device,dtype=qpos.dtype),enc_bias=torch.zeros_like(qpos[:,7:]),com=com)
+        proprio=self.proprio(state)
+        if self.cfg.obs_noise:
+            proprio=proprio+noise['proprio']*self.noise_limits
+        state['hist']=proprio[:,None].expand(-1,8,-1).clone()
         return self.empty_transition_measurements(state)
 
     def critic_obs(self, state):

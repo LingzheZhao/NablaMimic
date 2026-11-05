@@ -662,6 +662,8 @@ def build_environment(args):
         env.perception_contract['physical_frame'] = model_contract['frame']
     config['perception'] = env.perception_contract
     config['observation'] = env.observation_contract
+    if source_task:
+        config['reset'] = dict(profile=args.source_reset_profile, definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
     if args.terrain_sensor or source_task:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)

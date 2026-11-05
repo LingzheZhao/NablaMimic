@@ -57,6 +57,29 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
 
 
 class TorchEnvironmentTest(unittest.TestCase):
+    def test_source_zero_noise_reset_preserves_reference_and_does_not_clip_joint_noise(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture(reset_noise=True)
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.reset_position_limits=torch.tensor([.15,.15,0.])
+        env.ref_qpos[0,:3]=torch.tensor([3.,4.,.8])
+        env.ref_qpos[0,7:]=2.
+        env.ref_qvel[0]=torch.arange(35).float()*.01
+        frame=torch.tensor([0])
+        noise={name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
+        state=env.reset(frame,noise)
+        torch.testing.assert_close(state['qpos'],env.ref_qpos[frame],rtol=0,atol=0)
+        torch.testing.assert_close(state['qvel'],env.ref_qvel[frame],rtol=0,atol=0)
+        torch.testing.assert_close(state['prev_a'],torch.zeros(1,29))
+        self.assertEqual(state['hist'].shape,(1,8,93))
+        for direction in (-1.,1.):
+            noise['joints'].fill_(direction)
+            state=env.reset(frame,noise)
+            torch.testing.assert_close(state['qpos'][:,7:],env.ref_qpos[frame,7:]+.1*direction)
+            torch.testing.assert_close(state['qvel'],env.ref_qvel[frame],rtol=0,atol=0)
+
     def test_root_position_weight_and_maximum_reward_use_the_same_value(self):
         baseline, _ = fixture(root_position_weight=.5)
         weighted, _ = fixture(root_position_weight=2.)
