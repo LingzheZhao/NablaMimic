@@ -17,6 +17,32 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         image = source_depth_image(raw[None], rays)
         torch.testing.assert_close(image, torch.full((1,1,18,32), .5))
 
+    def test_source_empirical_normalizer_matches_population_moments(self):
+        from nablamimic.perceptive_task_inputs import update_source_normalizer
+        actor = source_actor_init('cpu')
+        history = torch.arange(3*1320).reshape(3,1320).float()/1000
+        goal = torch.arange(3*670).reshape(3,670).float()/1000
+        update_source_normalizer(actor, history[:2], goal[:2])
+        update_source_normalizer(actor, history[2:], goal[2:])
+        packed = torch.cat((goal, history[:,744:], history[:,:744]), -1)
+        torch.testing.assert_close(actor['source_norm']['mean'], packed.mean(0))
+        torch.testing.assert_close(actor['source_norm']['variance'], packed.var(0,unbiased=False))
+        self.assertEqual(int(actor['source_norm']['count']), 3)
+
+    def test_source_depth_noise_is_finite_and_seed_repeatable(self):
+        from nablamimic.source_depth_noise import SourceDepthNoise
+        pipeline = SourceDepthNoise('cpu')
+        meters = torch.ones(3,27,48,1)
+        meters[0,:,:,0] = .05
+        torch.manual_seed(3)
+        first = pipeline.noised(meters)
+        torch.manual_seed(3)
+        second = pipeline.noised(meters)
+        torch.testing.assert_close(first, second)
+        self.assertEqual(first.shape, (3,1,18,32))
+        self.assertTrue(bool(torch.isfinite(first).all()))
+        self.assertTrue(bool(((first>=0)&(first<=1)).all()))
+
     def test_term_major_history_and_actor_encoder_gradient(self):
         goal = torch.zeros(2,670)
         depth = torch.ones(2,1,18,32)*.5
