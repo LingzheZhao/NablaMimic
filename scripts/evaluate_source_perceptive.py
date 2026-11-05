@@ -9,6 +9,7 @@ import torch
 
 from nablamimic.torch_train import build_environment
 from nablamimic import torch_nets as nets
+from nablamimic.source_evaluation_metrics import summarize_source_chain
 
 
 def main():
@@ -16,10 +17,12 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--weights', choices=('ema','live'), required=True)
-    parser.add_argument('--maximum-controls', type=int, required=True)
+    parser.add_argument('--maximum-controls', type=int, help='Default is each complete reference length')
+    parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
+    parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    if args.maximum_controls < 1:
+    if args.maximum_controls is not None and args.maximum_controls < 1:
         raise ValueError("Requested source rollout must contain at least one control")
     args.output.mkdir(parents=True, exist_ok=False)
     config = json.loads(args.config.read_text())
@@ -31,15 +34,35 @@ def main():
     if checkpoint['observation'] != env.observation_contract or checkpoint['perception'] != env.perception_contract:
         raise ValueError('Source actor observation or physical geometry binding differs')
     actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if args.sensor_noise == 'on' and env.camera_noise is None:
+        raise ValueError('Noise-on evaluation requires the declared source camera noise pipeline')
+    if args.sensor_noise == 'off':
+        env.camera_noise = None
     reports = []
+    body_names = config['physical_model']['tracked_body_names']
+    torso_index = body_names.index('torso_link')
     with torch.no_grad():
         for clip, start in enumerate(env.starts):
             frame = torch.tensor([int(start)],device=env.device,dtype=torch.int32)
             noise = {name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
             state = env.reset(frame,noise)
             rows=[]
+            world_errors=[]
+            terminations=[]
+            body_positions=[]
+            up_dots=[]
+            requested = int(env.lengths[clip])-1 if args.maximum_controls is None else args.maximum_controls
             reason='requested_controls'
-            for control in range(args.maximum_controls):
+            for control in range(requested):
+                actual = state['xpos'][:,env.body_ids]
+                reference = env.ref_body_pos[state['frame']]
+                world_errors.append(torch.linalg.vector_norm(actual-reference,dim=-1)[0].cpu().numpy())
+                body_positions.append(actual[0].cpu().numpy())
+                terminations.append(bool(env.terminated(state).item()))
+                quaternion = state['xquat'][0,env.torso_id]
+                up_dots.append(float((1-2*(quaternion[1]**2+quaternion[2]**2)).item()))
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
                 history,goal = env.policy_obs(state,observation_noise['goal'])
                 action = nets.actor_apply(actor,history,goal)
@@ -53,13 +76,28 @@ def main():
                 if done or ended:
                     reason='tracking_termination' if done else 'reference_complete'
                     break
-            output=args.output/f'clip_{clip:02d}'
+            actual = state['xpos'][:,env.body_ids]
+            reference = env.ref_body_pos[state['frame']]
+            world_errors.append(torch.linalg.vector_norm(actual-reference,dim=-1)[0].cpu().numpy())
+            body_positions.append(actual[0].cpu().numpy())
+            terminations.append(bool(env.terminated(state).item()))
+            quaternion = state['xquat'][0,env.torso_id]
+            up_dots.append(float((1-2*(quaternion[1]**2+quaternion[2]**2)).item()))
+            reading = summarize_source_chain(world_errors,torso_index,terminations,
+                reason=='reference_complete',len(rows),requested)
+            output=args.output/f'clip_{clip:02d}' 
             output.mkdir()
             np.savez(output/'trajectory.npz',**{key:np.asarray([row[key] for row in rows]) for key in rows[0]},
-                final_qpos=state['qpos'].cpu().numpy(),final_qvel=state['qvel'].cpu().numpy())
-            reports.append(dict(clip=clip,start_frame=int(start),controls=len(rows),stop_reason=reason))
+                final_qpos=state['qpos'].cpu().numpy(),final_qvel=state['qvel'].cpu().numpy(),
+                final_frame=state['frame'].cpu().numpy(),world_body_error_m=np.asarray(world_errors),
+                torso_error_m=np.asarray(world_errors)[:,torso_index],body_world_position=np.asarray(body_positions),
+                torso_updot=np.asarray(up_dots),state_tracking_terminated=np.asarray(terminations))
+            reports.append(dict(clip=clip,start_frame=int(start),stop_reason=reason,**reading))
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
-        completed_updates=checkpoint['completed_updates'],perception=env.perception_contract,
+        completed_updates=checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
+        reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
+        tracked_body_names=body_names,strict_passes=sum(row['strict_pass'] for row in reports),
+        perception=env.perception_contract,
         observation=env.observation_contract,reports=reports),indent=2))
 
 
