@@ -23,6 +23,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         self.hist_dim, self.goal_dim = 744+576, 670
         self.critic_dim = 93+670+9+6+1+29+3
         self.future_offsets = 5*torch.arange(10, device=self.device, dtype=torch.int32)
+        self.source_goal_noise_limits = torch.tensor([0.]*580+[.25]*30+[.05]*60, device=self.device)
 
     def source_goal(self, state):
         frame = state['frame']
@@ -56,7 +57,16 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         history = state['hist'][:, -8:]
         terms = [history[..., start:end].flatten(1) for start, end in
                  ((0,3), (3,6), (6,35), (35,64), (64,93))]
-        return torch.cat((*terms, self.depth_image(state).flatten(1)), -1), self.source_goal(state)
+        goal = self.source_goal(state)
+        if self.cfg.obs_noise:
+            if goal_noise is None:
+                raise ValueError('Explicit source reference-goal noise required')
+            goal = goal+goal_noise*self.source_goal_noise_limits
+        return torch.cat((*terms, self.depth_image(state).flatten(1)), -1), goal
+
+    def sample_observation_noise(self, batch, generator=None):
+        return dict(proprio=2*torch.rand((batch,93),device=self.device,generator=generator)-1,
+                    goal=2*torch.rand((batch,670),device=self.device,generator=generator)-1)
 
     def proprio(self, state, prev_a=None):
         return torch.cat((gravity_b(state['xquat'][:, self.torso_id]),
