@@ -135,6 +135,7 @@ def main():
     parser.add_argument('--artifact-id', required=True)
     parser.add_argument('--world-translation', nargs=3, type=float, required=True)
     parser.add_argument('--fps', type=float, default=50.)
+    parser.add_argument('--motion-index', type=int, action='append', help='Zero-based metadata entry, repeatable. Default selects all ten.')
     parser.add_argument('--fk-position-tolerance', type=float, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -145,6 +146,9 @@ def main():
     metadata = yaml.safe_load((args.dataset/'metadata.yaml').read_text())
     if len(metadata['motion_files']) != 10 or len(metadata['terrains']) != 6:
         raise ValueError('Expected the declared ten-motion, six-terrain release selection')
+    selected_indices = list(range(10)) if args.motion_index is None else args.motion_index
+    if len(set(selected_indices)) != len(selected_indices) or any(i not in range(10) for i in selected_indices):
+        raise ValueError('Motion indices must be distinct metadata entries from 0 through 9')
     source_path = args.upstream/'src/instinct_mj/assets/resources/unitree_g1/xml/g1_29dof_torsobase_popsicle.xml'
     source = mujoco.MjModel.from_xml_path(str(source_path))
     target = mujoco.MjModel.from_binary_path(str(args.target_model))
@@ -153,6 +157,8 @@ def main():
     index = dict(fps=args.fps, bodies=BODIES, clips={})
     reports = []
     for i, entry in enumerate(metadata['motion_files']):
+        if i not in selected_indices:
+            continue
         name = f'motion_{i:02d}'
         with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
             arrays, report = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
@@ -182,7 +188,9 @@ def main():
     contract = dict(artifact_id=args.artifact_id, upstream_revision=args.upstream_revision,
                     source_dataset=str(args.dataset), source_artifact_id=args.source_artifact_id, source_model=str(source_path), target_model=str(args.target_model),
                     target_artifact_id=args.target_artifact_id, mujoco_version=mujoco.__version__, binding=binding,
-                    selected_motion_count=10, selected_terrain_count=6, terrains=metadata['terrains'], motions=reports)
+                    metadata_motion_count=10, metadata_terrain_count=6, selected_motion_count=len(reports),
+                    selected_motion_indices=selected_indices, selected_terrain_count=len({r['terrain_id'] for r in reports}),
+                    terrains=metadata['terrains'], motions=reports)
     (args.output/'index.json').write_text(json.dumps(index, indent=2))
     (args.output/'screening.json').write_text(json.dumps(contract, indent=2))
     print(json.dumps(dict(output=str(args.output), motions=len(reports), max_fk_position_m=max(max(r['fk_position_max_m'].values()) for r in reports))))
