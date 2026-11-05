@@ -15,6 +15,14 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         from nablaengine.depth_geometry import DepthGeometry
         from .source_depth_noise import SourceDepthNoise
         self.camera_noise = SourceDepthNoise(self.device) if self.cfg.source_depth_noise else None
+        self.source_kp = torch.tensor(self.m.actuator_gainprm[:,0].copy(),device=self.device,dtype=torch.float32)
+        self.source_kd = torch.tensor(-self.m.actuator_biasprm[:,2].copy(),device=self.device,dtype=torch.float32)
+        joint_ids = self.m.actuator_trnid[:,0]
+        self.source_effort = torch.tensor(self.m.jnt_actfrcrange[joint_ids,1].copy(),device=self.device,dtype=torch.float32)
+        self.torque_reward_indices = [i for i,joint in enumerate(joint_ids) if any(
+            name in self.m.joint(int(joint)).name for name in ('ankle','wrist'))]
+        self.contact_reward_body_ids = [i for i in range(1,self.m.nbody) if self.m.body(i).name not in (
+            'left_ankle_roll_link','right_ankle_roll_link','left_wrist_yaw_link','right_wrist_yaw_link')]
         self.depth_geometry = DepthGeometry.from_model(self.m, device=self.device, dtype=torch.float32, groups=(0, 2))
         self.camera_rays = source_raw_camera_rays(self.device)
         self.camera_position = torch.tensor(SOURCE_CAMERA_POSITION, device=self.device)
@@ -102,7 +110,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
     def reset(self, frame, noise=None):
         state = super().reset(frame, noise)
         state['hist'] = state['hist'][:, -8:].clone()
-        return state
+        return self.empty_transition_measurements(state)
 
     def critic_obs(self, state):
         # The native trainer keeps its explicit privileged critic rather than
@@ -127,9 +135,47 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         return ((torso_height-reference_height).abs() > .25) | (gravity_error > .8) | (
             (actual-reference).abs().amax(-1) > .25) | nonfinite
 
+    def empty_transition_measurements(self, state):
+        batch = state['qpos'].shape[0]
+        state['source_contact_forces'] = torch.zeros(batch,3,self.m.nbody,3,device=self.device)
+        state['source_actual_torque'] = torch.zeros(batch,self.nu,device=self.device)
+        state['source_reward_torque'] = torch.zeros(batch,self.nu,device=self.device)
+        return state
+
+    def restore(self, compact):
+        return self.empty_transition_measurements(super().restore(compact))
+
+    def step(self, state, action, proprio_noise=None):
+        action = self.bound_action(action)
+        control = self.ctrl_of(action,state['frame']).contiguous()
+        first = self.engine_step(state['qpos'].contiguous(),state['qvel'].contiguous(),
+            state['warm'].contiguous(),control,state['friction'].contiguous(),state['com'].contiguous(),
+            iterations=self.cfg.solver_iterations,substeps=3,clamp_kv=0,normal=3,clamp_soft=None,
+            grad_decay=1.,kinematics=False,measurements=True)
+        qpos,qvel,warm,first_measurements = first
+        raw_torque = self.source_kp*(control-qpos[:,7:])-self.source_kd*qvel[:,6:]
+        reward_torque = torch.clamp(raw_torque,-self.source_effort,self.source_effort)
+        last = self.engine_step(qpos.contiguous(),qvel.contiguous(),warm.contiguous(),control,
+            state['friction'].contiguous(),state['com'].contiguous(),iterations=self.cfg.solver_iterations,
+            substeps=1,clamp_kv=0,normal=3,clamp_soft=None,grad_decay=1.,kinematics=True,measurements=True)
+        last_measurements = last[-1]
+        result = self.finish_physics_kin(state,action,last[:-1],proprio_noise)
+        result['source_contact_forces'] = torch.cat((
+            first_measurements['all_contact_wrench'][:,-2:,:,:3],
+            last_measurements['all_contact_wrench'][:,:,:,:3]),1)
+        result['source_actual_torque'] = last_measurements['actuator_torque'][:,0]
+        result['source_reward_torque'] = reward_torque
+        return result
+
     def reward(self, state, action, prev_action, prev=None):
         _, terms = super().reward(state, action, prev_action, prev=prev)
         joints = state['qpos'][:, 7:]
         terms['joint_limit'] = -.02*10.*(
             torch.relu(self.soft_lo-joints)+torch.relu(joints-self.soft_hi)).sum(-1)
+        body_force = state['source_contact_forces'][:,:,self.contact_reward_body_ids]
+        violations = torch.linalg.vector_norm(body_force,dim=-1).amax(1)>1.
+        terms['undesired_contacts'] = -.02*.1*violations.to(joints.dtype).sum(-1)
+        torque = state['source_reward_torque'][:,self.torque_reward_indices]
+        threshold = .8*self.source_effort[self.torque_reward_indices]
+        terms['applied_torque_limits_by_ratio'] = -.02*.05*torch.relu(torque.abs()-threshold).square().sum(-1)
         return sum(terms.values()), terms
