@@ -71,6 +71,7 @@ class ProfileUpdateTest(unittest.TestCase):
             trainer.collector = {'qpos': torch.zeros(2, 36), 'qvel': torch.zeros(2, 35)}
             trainer.training_data = dict(r=torch.ones(2, 4), term=torch.zeros(2, 4, dtype=torch.bool),
                 done=torch.zeros(2, 4, dtype=torch.bool), v2=torch.ones(2, 4),
+                v2_raw=torch.ones(2, 4), window_value_raw=torch.ones(4), window_value_used=torch.ones(4),
                 a_pi=torch.ones(2, 4, 2), hist=torch.ones(2, 4, 3), cobs_pre=torch.ones(2, 4, 3),
                 terms={'track': torch.ones(2, 4)})
             trainer.target_data = dict(targets=torch.ones(2, 4, 2), weights=torch.ones(2, 4),
