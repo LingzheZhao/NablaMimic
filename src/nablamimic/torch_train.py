@@ -513,6 +513,16 @@ def build_environment(args):
         names=all_clip_names() if args.clips==['all'] else args.clips
         if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
         library=load_library(names,bodies=BM_BODIES)
+    declared_bodies = tuple(library.bodies)
+    if len(declared_bodies) != len(BM_BODIES) or set(declared_bodies) != set(BM_BODIES):
+        raise ValueError('Reference tracked-body names do not bind the physical tracking task')
+    body_indices = [declared_bodies.index(name) for name in BM_BODIES]
+    from dataclasses import replace
+    library = replace(library, bodies=BM_BODIES, **{
+        name: getattr(library, name)[:, body_indices]
+        for name in ('body_pos', 'body_quat', 'body_lin_vel', 'body_ang_vel')})
+    config['reference_body_binding'] = dict(declared_order=list(declared_bodies),
+        canonical_order=list(BM_BODIES), source_indices=body_indices)
     model = None
     if args.terrain_sensor:
         if args.terrain_model is None:
