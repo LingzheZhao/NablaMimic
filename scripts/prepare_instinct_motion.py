@@ -1,7 +1,7 @@
 """Prepare the selected InstinctMJ references for NablaMimic's sharded library.
 
 Uses the upstream torso-root kinematics to bind the released NPZ motion to the
-pelvis-root engine fixture. No floor alignment, clip filtering or joint clipping
+declared torso-root or pelvis-root engine model. No floor alignment, clip filtering or joint clipping
 is applied. Outputs and the numerical binding report belong beside run data.
 """
 import argparse
@@ -107,7 +107,7 @@ def physical_properties(model):
     return dict(joints=joints, feet=feet)
 
 
-def prepare(source, target, raw, fps_out, translation, position_tolerance):
+def prepare(source, target, raw, fps_out, translation, position_tolerance, target_root):
     names = raw['joint_names'].tolist()
     if len(names) != 29 or len(set(names)) != 29 or set(names) != set(JOINTS):
         raise ValueError("Source joint_names must bind all 29 unique G1 joints")
@@ -122,7 +122,11 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance):
         raise ValueError("Source WXYZ quaternions are not normalized")
     times, p, q, joint = resample(pos, quat, joints, fps_in, fps_out)
     source_names = validate_model(source, 'torso_link')
-    target_names = validate_model(target, 'pelvis')
+    target_names = validate_model(target, target_root)
+    if target_root not in ('torso_link', 'pelvis'):
+        raise ValueError('Target root must be torso_link or pelvis')
+    if target_root == 'torso_link' and position_tolerance > 1e-6:
+        raise ValueError('Torso-root source binding requires an FK position tolerance at most 1e-6 metres')
     source_ids = [source.body(b).id for b in BODIES]
     target_ids = [target.body(b).id for b in BODIES]
     sd, td = mujoco.MjData(source), mujoco.MjData(target)
@@ -134,10 +138,13 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance):
         for j, name in enumerate(source_names, 1):
             sd.qpos[source.jnt_qposadr[j]] = joint[i, names.index(name)]
         mujoco.mj_kinematics(source, sd)
-        qpos[i, :3], qpos[i, 3:7] = sd.xpos[source.body('pelvis').id], sd.xquat[source.body('pelvis').id]
+        if target_root == 'torso_link':
+            qpos[i, :3], qpos[i, 3:7] = p[i]+translation, q[i]
+        else:
+            qpos[i, :3], qpos[i, 3:7] = sd.xpos[source.body('pelvis').id], sd.xquat[source.body('pelvis').id]
         for j, name in enumerate(target_names, 1):
-            # Reversing the waist chain reverses its three scalar rotations.
-            qpos[i, target.jnt_qposadr[j]] = joint[i, names.index(name)] * (-1 if name.startswith('waist_') else 1)
+            # The pelvis-root model reverses the source's three waist rotations.
+            qpos[i, target.jnt_qposadr[j]] = joint[i, names.index(name)] * (-1 if target_root == 'pelvis' and name.startswith('waist_') else 1)
         source_body_pos[i], source_body_quat[i] = sd.xpos[source_ids], sd.xquat[source_ids]
     qvel = np.empty((len(times), target.nv))
     body_pos = np.empty_like(source_body_pos)
@@ -197,6 +204,7 @@ def main():
     parser.add_argument('--source-artifact-id', required=True)
     parser.add_argument('--upstream-revision', required=True)
     parser.add_argument('--target-model', type=Path, required=True)
+    parser.add_argument('--target-root', required=True, choices=['torso_link', 'pelvis'])
     parser.add_argument('--target-artifact-id', required=True)
     parser.add_argument('--artifact-id', required=True)
     parser.add_argument('--world-translation', nargs=3, type=float, required=True)
@@ -218,7 +226,7 @@ def main():
     actuator_joints = target.actuator_trnid[:, 0]
     if target.nu != 29 or not np.array_equal(target.jnt_qposadr[actuator_joints], np.arange(7, 36)) or not np.array_equal(target.jnt_dofadr[actuator_joints], np.arange(6, 35)):
         raise ValueError('Target actuator order must bind qpos[7:36] and qvel[6:35] in joint order')
-    source_names, target_names = validate_model(source,'torso_link'), validate_model(target,'pelvis')
+    source_names, target_names = validate_model(source,'torso_link'), validate_model(target, args.target_root)
     args.output.mkdir(parents=True, exist_ok=False)
     index = dict(fps=args.fps, bodies=BODIES, clips={})
     reports, failed_conditions = [], []
@@ -226,7 +234,7 @@ def main():
         name = f'motion_{i:02d}'
         try:
             with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
-                arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
+                arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance, args.target_root)
         except (ValueError, KeyError, OSError) as error:
             failed_conditions.append(dict(name=name, **entry, terrain_file=terrain['terrain_file'], error=str(error)))
             continue
@@ -239,10 +247,11 @@ def main():
                    target_joint_and_foot_properties=physical_properties(target),
                    source_physical_scope='Unshod popsicle XML selected by Perceptive G1. XML passive damping/frictionloss are preserved by the selected BeyondMimic actuators. XML armature is replaced by actuator group armature in the source task.',
                    source_actuator_configuration='src/instinct_mj/assets/unitree_g1.py:beyondmimic_g1_29dof_actuator_cfgs; selected by tasks/shadowing/perceptive/config/g1/perceptive_shadowing_cfg.py',
-                   source_root='torso_link', target_root='pelvis', quaternion='WXYZ',
+                   source_root='torso_link', target_root=args.target_root, quaternion='WXYZ',
                    source_model_joint_order=source_names, target_joint_order=target_names,
-                   joint_mapping=[dict(target=n, source=n, sign=-1 if n.startswith('waist_') else 1) for n in target_names],
-                   root_mapping='MuJoCo source FK pelvis world pose',
+                   joint_mapping=[dict(target=n, source=n, sign=-1 if args.target_root == 'pelvis' and n.startswith('waist_') else 1) for n in target_names],
+                   root_mapping=('Source torso world pose directly' if args.target_root == 'torso_link'
+                                 else 'MuJoCo source FK pelvis world pose'),
                    body_linear_velocity='World velocity of xpos body origin, mj_objectVelocity(mjOBJ_XBODY)', position_tolerance_m=args.fk_position_tolerance,
                    orientation_tolerance_rad=1e-6,
                    world_translation_m=args.world_translation,
