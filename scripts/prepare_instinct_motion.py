@@ -40,6 +40,8 @@ def validate_model(model, root):
 def resample(pos, quat, joints, fps_in, fps_out):
     # The final retained sample is the last control tick inside source support.
     times = np.arange(int(np.floor((len(pos) - 1) * fps_out / fps_in)) + 1) / fps_out
+    if len(times) < 2:
+        raise ValueError("Output rate must retain at least two frames for velocity estimation")
     x = times * fps_in
     lo = np.minimum(x.astype(int), len(pos) - 2)
     w = (x - lo)[:, None]
@@ -54,6 +56,55 @@ def resample(pos, quat, joints, fps_in, fps_out):
     q = wa * qa + wb * qb
     q /= np.linalg.norm(q, axis=-1, keepdims=True)
     return times, (1-w)*pos[lo]+w*pos[lo+1], q, (1-w)*joints[lo]+w*joints[lo+1]
+
+
+
+def joint_limit_reading(names, positions, ranges):
+    excess = np.maximum(ranges[:, 0]-positions, positions-ranges[:, 1]).clip(0)
+    return excess, dict(
+        frames_with_excess=int((excess > 0).any(axis=1).sum()),
+        frames_with_excess_over_1e_6_rad=int((excess > 1e-6).any(axis=1).sum()),
+        max_excess_rad=dict(zip(names, excess.max(axis=0).tolist())),
+        frames_with_excess_by_joint=dict(zip(names, (excess > 0).sum(axis=0).tolist())))
+
+
+def selected_metadata(dataset, metadata, indices):
+    if len(metadata['motion_files']) != 10 or len(metadata['terrains']) != 6:
+        raise ValueError('Expected the declared ten-motion, six-terrain release selection')
+    if len(set(indices)) != len(indices) or any(i not in range(10) for i in indices):
+        raise ValueError('Motion indices must be distinct metadata entries from 0 through 9')
+    terrain_by_id = {entry['terrain_id']: entry for entry in metadata['terrains']}
+    if len(terrain_by_id) != 6:
+        raise ValueError('Terrain IDs must be unique')
+    selected = []
+    for index in indices:
+        entry = metadata['motion_files'][index]
+        terrain = terrain_by_id[entry['terrain_id']]
+        for field, path in [('motion_file', entry['motion_file']), ('terrain_file', terrain['terrain_file'])]:
+            resolved = (dataset/path).resolve()
+            if not resolved.is_relative_to(dataset.resolve()) or not resolved.is_file():
+                raise ValueError(f'Invalid selected {field}: {path}')
+        selected.append((index, entry, terrain))
+    return selected
+
+
+def physical_properties(model):
+    joints = {}
+    for j in range(1, model.njnt):
+        dof = model.jnt_dofadr[j]
+        joints[model.joint(j).name] = dict(
+            axis=model.jnt_axis[j].tolist(), limits_rad=model.jnt_range[j].tolist(),
+            passive_damping=float(model.dof_damping[dof]),
+            frictionloss=float(model.dof_frictionloss[dof]), armature=float(model.dof_armature[dof]))
+    feet = {}
+    for side in ('left', 'right'):
+        body = model.body(f'{side}_ankle_roll_link').id
+        ids = [i for i in range(model.ngeom) if model.geom_bodyid[i] == body
+               and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_CAPSULE]
+        feet[side] = [dict(name=model.geom(i).name, size_m=model.geom_size[i].tolist(),
+                           position_m=model.geom_pos[i].tolist(), quaternion_wxyz=model.geom_quat[i].tolist())
+                      for i in ids]
+    return dict(joints=joints, feet=feet)
 
 
 def prepare(source, target, raw, fps_out, translation, position_tolerance):
@@ -106,13 +157,24 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance):
     ori_error = 2*np.arccos(np.clip(np.abs((body_quat*source_body_quat).sum(-1)), 0, 1)).max(axis=0)
     if pos_error.max() > position_tolerance or ori_error.max() > 1e-6:
         raise ValueError(f"Source/target FK binding exceeds declared tolerances: {pos_error.max()}m {ori_error.max()}rad")
-    ranges = target.jnt_range[1:]
     target_joint = qpos[:, target.jnt_qposadr[1:]]
-    violation = np.maximum(ranges[:, 0]-target_joint, target_joint-ranges[:, 1]).clip(0)
+    violation, target_limits = joint_limit_reading(target_names, target_joint, target.jnt_range[1:])
+    raw_source_joint = joints[:, [names.index(name) for name in source_names]]
+    source_violation, source_limits = joint_limit_reading(source_names, raw_source_joint, source.jnt_range[1:])
+    fk_position_error = np.linalg.norm(body_pos-source_body_pos, axis=-1)
     speed = np.linalg.norm(np.gradient(pos, 1/fps_in, axis=0), axis=1)
     up = 1-2*(quat[:, 1]**2+quat[:, 2]**2)
     report = dict(source_joint_order=names, source_frames=n, source_fps=fps_in, source_duration_s=(n-1)/fps_in,
-                  output_frames=len(times), output_duration_s=float(times[-1]), source_start_xyz=pos[0].tolist(),
+                  output_frames=len(times), output_duration_s=float(times[-1]),
+                  source_frame_range_inclusive=[0, n-1], source_start_time_s=0.,
+                  source_end_time_s=float((n-1)/fps_in), output_start_time_s=float(times[0]),
+                  output_end_time_s=float(times[-1]),
+                  unsampled_tail_duration_s=float((n-1)/fps_in-times[-1]),
+                  excluded_source_frames=0, excluded_conditions=[],
+                  source_joint_limits=source_limits, target_joint_limits=target_limits,
+                  fk_position_frames_over_10mm=int((fk_position_error > .01).any(axis=1).sum()),
+                  fk_position_frames_over_declared_tolerance=int((fk_position_error > position_tolerance).any(axis=1).sum()),
+                  source_start_xyz=pos[0].tolist(),
                   source_end_xyz=pos[-1].tolist(), source_root_displacement_xyz=(pos[-1]-pos[0]).tolist(),
                   source_root_height_range_m=[float(pos[:,2].min()), float(pos[:,2].max())],
                   source_peak_root_speed_m_s=float(speed.max()), source_min_torso_up_dot=float(up.min()),
@@ -121,7 +183,11 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance):
                   profile=[dict(time_s=float(times[i]), torso_xyz=source_body_pos[i,1].tolist(),
                                 pelvis_xyz=body_pos[i,0].tolist()) for i in range(0,len(times),max(1,int(fps_out)))])
     arrays = (qpos, qvel, body_pos, body_quat, body_vel[...,3:], body_vel[...,:3])
-    return {k: v.astype(np.float32) for k,v in zip(KEYS,arrays)}, report
+    diagnostics = dict(output_time_s=times, source_fractional_frame=times*fps_in,
+                       fk_body_position_error_m=fk_position_error,
+                       source_joint_limit_excess_rad=source_violation,
+                       target_joint_limit_excess_rad=violation)
+    return {k: v.astype(np.float32) for k,v in zip(KEYS,arrays)}, report, diagnostics
 
 
 def main():
@@ -144,29 +210,32 @@ def main():
     if not np.isfinite(args.world_translation).all() or not np.isfinite(args.fk_position_tolerance) or args.fk_position_tolerance <= 0:
         raise ValueError('Translation and positive FK tolerance must be finite')
     metadata = yaml.safe_load((args.dataset/'metadata.yaml').read_text())
-    if len(metadata['motion_files']) != 10 or len(metadata['terrains']) != 6:
-        raise ValueError('Expected the declared ten-motion, six-terrain release selection')
     selected_indices = list(range(10)) if args.motion_index is None else args.motion_index
-    if len(set(selected_indices)) != len(selected_indices) or any(i not in range(10) for i in selected_indices):
-        raise ValueError('Motion indices must be distinct metadata entries from 0 through 9')
+    selection = selected_metadata(args.dataset, metadata, selected_indices)
     source_path = args.upstream/'src/instinct_mj/assets/resources/unitree_g1/xml/g1_29dof_torsobase_popsicle.xml'
     source = mujoco.MjModel.from_xml_path(str(source_path))
     target = mujoco.MjModel.from_binary_path(str(args.target_model))
+    actuator_joints = target.actuator_trnid[:, 0]
+    if target.nu != 29 or not np.array_equal(target.jnt_qposadr[actuator_joints], np.arange(7, 36)) or not np.array_equal(target.jnt_dofadr[actuator_joints], np.arange(6, 35)):
+        raise ValueError('Target actuator order must bind qpos[7:36] and qvel[6:35] in joint order')
     source_names, target_names = validate_model(source,'torso_link'), validate_model(target,'pelvis')
     args.output.mkdir(parents=True, exist_ok=False)
     index = dict(fps=args.fps, bodies=BODIES, clips={})
     reports = []
-    for i, entry in enumerate(metadata['motion_files']):
-        if i not in selected_indices:
-            continue
+    for i, entry, terrain in selection:
         name = f'motion_{i:02d}'
         with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
-            arrays, report = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
+            arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
         length = len(arrays['qpos'])
         np.savez(args.output/f'{name}.npz', **arrays, names=np.array([name]), starts=np.array([0]), lengths=np.array([length]))
+        np.savez(args.output/f'{name}_diagnostics.npz', **diagnostics)
         index['clips'][name] = dict(shard=name, length=length, motion_file=entry['motion_file'], terrain_id=entry['terrain_id'])
-        reports.append(dict(name=name, **entry, **report))
-    binding = dict(source_root='torso_link', target_root='pelvis', quaternion='WXYZ',
+        reports.append(dict(name=name, terrain_file=terrain['terrain_file'], diagnostics_file=f'{name}_diagnostics.npz', **entry, **report))
+    binding = dict(source_nominal_joint_and_foot_properties=physical_properties(source),
+                   target_joint_and_foot_properties=physical_properties(target),
+                   source_physical_scope='Unshod popsicle XML selected by Perceptive G1. XML passive damping/frictionloss are preserved by the selected BeyondMimic actuators. XML armature is replaced by actuator group armature in the source task.',
+                   source_actuator_configuration='src/instinct_mj/assets/unitree_g1.py:beyondmimic_g1_29dof_actuator_cfgs; selected by tasks/shadowing/perceptive/config/g1/perceptive_shadowing_cfg.py',
+                   source_root='torso_link', target_root='pelvis', quaternion='WXYZ',
                    source_model_joint_order=source_names, target_joint_order=target_names,
                    joint_mapping=[dict(target=n, source=n, sign=-1 if n.startswith('waist_') else 1) for n in target_names],
                    root_mapping='MuJoCo source FK pelvis world pose',
