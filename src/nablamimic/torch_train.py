@@ -428,8 +428,12 @@ class TorchTrainer:
                         peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved()))
         def numerical_range(value):
             value = value.detach()
-            return dict(minimum=float(value.amin()), maximum=float(value.amax()),
-                        absolute_max=float(value.abs().amax()))
+            def json_number(number):
+                number = float(number)
+                return number if math.isfinite(number) else str(number)
+            return dict(minimum=json_number(value.amin()), maximum=json_number(value.amax()),
+                        absolute_max=json_number(value.abs().amax()),
+                        nonfinite=int((~torch.isfinite(value)).sum()))
         metrics['numerical_ranges'] = dict(
             reward_terms={name: numerical_range(value) for name, value in self.training_data['terms'].items()},
             critic_observation=numerical_range(self.training_data['cobs_pre']),
