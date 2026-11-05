@@ -47,7 +47,11 @@ def main():
     gradient_errors=[float((a-b).abs().max()) for a,b in zip(*gradients)]
     matches=max(value_errors+gradient_errors+[torque_error])<=args.absolute_tolerance
     (args.output/'result.json').write_text(json.dumps(dict(frames=args.frames,value_absolute_errors=value_errors,
-        gradient_absolute_errors=gradient_errors,actual_analytic_torque_absolute_error=torque_error,
+        gradient_absolute_errors=gradient_errors,
+        action_vjp_absolute_max=[float(value[-1].abs().max()) for value in gradients],
+        model_actuator_ctrllimited=env.m.actuator_ctrllimited.tolist(),
+        model_actuator_ctrlrange=env.m.actuator_ctrlrange.tolist(),
+        actual_analytic_torque_absolute_error=torque_error,
         absolute_tolerance=args.absolute_tolerance,matches=matches),indent=2))
     if not matches:
         raise SystemExit(1)
