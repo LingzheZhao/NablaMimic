@@ -113,7 +113,7 @@ def main(argv=None):
         training_args = training_args[1:]
     if options.profile_update < 3:
         parser.error('--profile-update requires at least two completed warmup updates')
-    original = torch_train.Trainer.update
+    original = torch_train.TorchTrainer.update
     measured = False
 
     def update(trainer):
@@ -124,11 +124,11 @@ def main(argv=None):
         measured = True
         return result
 
-    torch_train.Trainer.update = update
+    torch_train.TorchTrainer.update = update
     try:
         torch_train.main(training_args)
     finally:
-        torch_train.Trainer.update = original
+        torch_train.TorchTrainer.update = original
     if not measured:
         raise RuntimeError(f'Training did not execute profiling update {options.profile_update}')
 
