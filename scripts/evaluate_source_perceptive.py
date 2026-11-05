@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
-    parser.add_argument('--weights', choices=('ema','live'), required=True)
+    parser.add_argument('--weights', choices=('ema','live','official'), required=True)
     parser.add_argument('--maximum-controls', type=int, help='Default is each complete reference length')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
     parser.add_argument('--seed', type=int, required=True)
@@ -30,11 +30,22 @@ def main():
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
     env, bindings = build_environment(argparse.Namespace(**config))
-    with args.checkpoint.open('rb') as handle:
-        checkpoint = pickle.load(handle)
-    if checkpoint['observation'] != env.observation_contract or checkpoint['perception'] != env.perception_contract:
-        raise ValueError('Source actor observation or physical geometry binding differs')
-    actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
+    if args.weights == 'official':
+        from nablamimic.official_source_policy import OfficialSourcePolicy
+        if env.observation_contract['task'] != 'instinct_perceptive_native':
+            raise ValueError('Official source policy requires the source perceptive task')
+        if env.cfg.residual_action:
+            raise ValueError('Official source policy requires absolute actions')
+        checkpoint = torch.load(args.checkpoint, map_location=env.device, weights_only=True)
+        actor = OfficialSourcePolicy(checkpoint).to(env.device)
+    else:
+        actor = None
+    if args.weights != 'official':
+        with args.checkpoint.open('rb') as handle:
+            checkpoint = pickle.load(handle)
+        if checkpoint['observation'] != env.observation_contract or checkpoint['perception'] != env.perception_contract:
+            raise ValueError('Source actor observation or physical geometry binding differs')
+        actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if args.sensor_noise == 'on' and env.camera_noise is None:
@@ -72,7 +83,7 @@ def main():
                 up_dots.append(float((1-2*(quaternion[1]**2+quaternion[2]**2)).item()))
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
                 history,goal = env.policy_obs(state,observation_noise['goal'])
-                action = nets.actor_apply(actor,history,goal)
+                action = actor(history,goal) if args.weights == 'official' else nets.actor_apply(actor,history,goal)
                 if args.record_substeps:
                     stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'])
                     substep_rows.append({name:value[0].cpu().numpy() for name,value in substeps.items()})
@@ -81,7 +92,7 @@ def main():
                 done = bool(env.terminated(stepped).item())
                 ended = bool(env.clip_ended(stepped).item())
                 rows.append(dict(qpos=state['qpos'][0].cpu().numpy(),qvel=state['qvel'][0].cpu().numpy(),
-                    action=stepped['prev_a'][0].cpu().numpy(),depth=history[0,744:].cpu().numpy(),
+                    action=stepped['prev_a'][0].cpu().numpy(),policy_action=action[0].cpu().numpy(),depth=history[0,744:].cpu().numpy(),
                     frame=int(state['frame'][0].item()),tracking_terminated=done,clip_ended=ended))
                 state=stepped
                 if done or ended:
@@ -108,9 +119,11 @@ def main():
                 final_frame=state['frame'].cpu().numpy(),world_body_error_m=np.asarray(world_errors),
                 torso_error_m=np.asarray(world_errors)[:,torso_index],body_world_position=np.asarray(body_positions),
                 torso_updot=np.asarray(up_dots),state_tracking_terminated=np.asarray(terminations))
-            reports.append(dict(clip=clip,start_frame=int(start),stop_reason=reason,initial_state_error=initial_state_error,**reading))
+            reports.append(dict(action_clipped_components=sum(int(np.count_nonzero(row['policy_action'] != row['action'])) for row in rows),clip=clip,start_frame=int(start),stop_reason=reason,initial_state_error=initial_state_error,**reading))
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
-        completed_updates=checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
+        policy_implementation='official release actor with stored std' if args.weights == 'official' else 'native actor',
+        action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
+        completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
         tracked_body_names=body_names,
         substep_recording=dict(enabled=args.record_substeps,sampling_hz=1/env.m.opt.timestep,

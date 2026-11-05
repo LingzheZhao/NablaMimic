@@ -47,6 +47,26 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         torch.testing.assert_close(env.ctrl_of(zero,frames),env.q0.expand(2,-1))
         self.assertEqual(env.action_contract['mode'],'source_absolute')
 
+    def test_source_actor_uses_history_before_nonnegative_depth_feature(self):
+        from nablamimic.perceptive_task_inputs import SourceDepthEncoder
+        encoder=SourceDepthEncoder()
+        self.assertIsInstance(encoder.head[-1],torch.nn.ReLU)
+        actor=source_actor_init('cpu')
+        # Only the first history coordinate reaches output zero.
+        for parameter in actor['enc'].values():
+            parameter.zero_()
+        actor['enc']['head.2.bias'].fill_(-1.)
+        for weight,bias in actor['dec']:
+            weight.zero_()
+            bias.zero_()
+        actor['dec'][0][0][670,0]=1.
+        for weight,bias in actor['dec'][1:]:
+            weight[0,0]=1.
+        history=torch.zeros(1,1320)
+        history[0,0]=2.02
+        output=source_actor_apply(actor,history,torch.zeros(1,670))
+        self.assertAlmostEqual(float(output[0,0]),2.,places=5)
+
     def test_camera_optical_distance_and_constant_image(self):
         rays = source_raw_camera_rays('cpu')
         torch.testing.assert_close(torch.linalg.vector_norm(rays, dim=-1), torch.ones(27,48))

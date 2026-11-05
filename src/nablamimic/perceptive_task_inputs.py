@@ -59,7 +59,7 @@ class SourceDepthEncoder(torch.nn.Module):
             torch.nn.Conv2d(1, 32, 3, padding=1), torch.nn.ReLU(),
             torch.nn.Conv2d(32, 32, 3, padding=1), torch.nn.ReLU())
         self.head = torch.nn.Sequential(torch.nn.Linear(32*18*32, 32),
-                                        torch.nn.ReLU(), torch.nn.Linear(32, 32))
+                                        torch.nn.ReLU(), torch.nn.Linear(32, 32), torch.nn.ReLU())
 
     def forward(self, depth):
         return self.head(self.convolutions(depth).flatten(1))
@@ -104,8 +104,8 @@ def source_actor_apply(actor, history_and_depth, goal):
         depth = F.relu(F.conv2d(depth, parameters[f'convolutions.{index}.weight'],
                                 parameters[f'convolutions.{index}.bias'], padding=1))
     feature = F.relu(F.linear(depth.flatten(1), parameters['head.0.weight'], parameters['head.0.bias']))
-    feature = F.linear(feature, parameters['head.2.weight'], parameters['head.2.bias'])
-    value = torch.cat((goal, feature, history), -1)
+    feature = F.relu(F.linear(feature, parameters['head.2.weight'], parameters['head.2.bias']))
+    value = torch.cat((goal, history, feature), -1)
     for weight, bias in actor['dec'][:-1]:
         value = F.elu(value@weight+bias)
     weight, bias = actor['dec'][-1]

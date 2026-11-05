@@ -101,6 +101,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     reference_time_offsets_s=[i*.1 for i in range(10)],
                     policy_history_order='term-major gravity/angular/joints/joint_velocity/last_action',
                     depth_shape=[1,18,32], depth_feature_dim=32,
+                    actor_architecture='source_cnn_relu_output_goal_history_depth_v2',
                     actor_relative_position=False, normalized_action_limit=self.cfg.action_limit,
                     actuator_control_limits='Apply prepared model actuator_ctrllimited mask; unlimited channels retain the PD target',
                     encoder_learning='native action-target regression gradient',
