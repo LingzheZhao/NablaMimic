@@ -94,7 +94,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
 
     @property
     def observation_contract(self):
-        return dict(task='instinct_perceptive_native', free_root_body='torso_link',
+        return dict(task='instinct_perceptive_native', action=self.action_contract, free_root_body='torso_link',
                     free_root_linear_velocity='world', free_root_angular_velocity='torso body frame', history_frames=8,
                     proprioception_frame_dim=93, history_dim=self.hist_dim,
                     goal_dim=670, critic_dim=self.critic_dim,
@@ -166,8 +166,24 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
     def restore(self, compact):
         return self.empty_transition_measurements(super().restore(compact))
 
+    @property
+    def action_contract(self):
+        return dict(mode='current_reference_residual' if self.cfg.residual_action else 'source_absolute',
+            base='current reference joint positions at frame f' if self.cfg.residual_action else 'source default joint positions',
+            setpoint='base + action_scale * bounded normalized action, respecting actuator_ctrllimited',
+            last_action='previous executed bounded normalized residual' if self.cfg.residual_action else 'previous executed bounded normalized absolute action',
+            action_rate='squared difference of consecutive executed bounded normalized actions')
+
+    def action_base(self,frame):
+        if self.cfg.residual_action:
+            return self.ref_qpos[frame,7:]
+        return self.q0.expand(frame.shape[0],-1)
+
+    def action_change(self,action,prev_action,prev=None):
+        return action-prev_action
+
     def ctrl_of(self, action, frame):
-        target = self.q0+self.action_scale*action
+        target = self.action_base(frame)+self.action_scale*action
         bounded = torch.clamp(target,self.ctrl_lo,self.ctrl_hi)
         return torch.where(self.source_ctrl_limited,bounded,target)
 

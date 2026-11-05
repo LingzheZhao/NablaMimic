@@ -13,6 +13,8 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
     def test_source_unlimited_position_targets_retain_action_effect_and_gradient(self):
         from nablamimic.source_perceptive_env import SourcePerceptiveEnv
         env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        from types import SimpleNamespace
+        env.cfg=SimpleNamespace(residual_action=False)
         env.q0=torch.tensor([.1,.2])
         env.action_scale=torch.tensor([.5,.25])
         env.ctrl_lo=torch.tensor([0.,-1.])
@@ -23,6 +25,27 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         torch.testing.assert_close(target,torch.tensor([[1.1,1.]]))
         gradient=torch.autograd.grad(target.sum(),action)[0]
         torch.testing.assert_close(gradient,torch.tensor([[.5,0.]]))
+
+    def test_source_residual_zero_tracks_the_current_reference_without_changing_action_rate(self):
+        from types import SimpleNamespace
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.cfg=SimpleNamespace(residual_action=True)
+        env.q0=torch.tensor([.1,.2])
+        env.action_scale=torch.tensor([.5,.25])
+        env.ctrl_lo=torch.zeros(2)
+        env.ctrl_hi=torch.zeros(2)
+        env.source_ctrl_limited=torch.zeros(2,dtype=torch.bool)
+        env.ref_qpos=torch.zeros(2,9)
+        env.ref_qpos[:,7:]=torch.tensor([[.7,-.3],[.9,.4]])
+        frames=torch.tensor([0,1])
+        zero=torch.zeros(2,2)
+        torch.testing.assert_close(env.ctrl_of(zero,frames),env.ref_qpos[:,7:])
+        torch.testing.assert_close(env.action_change(zero,zero),zero)
+        self.assertEqual(env.action_contract['mode'],'current_reference_residual')
+        env.cfg.residual_action=False
+        torch.testing.assert_close(env.ctrl_of(zero,frames),env.q0.expand(2,-1))
+        self.assertEqual(env.action_contract['mode'],'source_absolute')
 
     def test_camera_optical_distance_and_constant_image(self):
         rays = source_raw_camera_rays('cpu')

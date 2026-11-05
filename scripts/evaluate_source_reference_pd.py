@@ -74,7 +74,8 @@ def main():
         state='started', baseline='reference-joint-PD', code_revision=args.code_revision,
         configuration=str(args.config), reference_directory=str(config['motion_lib']),
         control_dt_s=4*float(env.m.opt.timestep), solver_iterations=env.cfg.solver_iterations,
-        controller='At each control use only the current reference joint positions: (reference-default)/action_scale',
+        controller='At each control use the current reference joint positions and the environment-owned action base',
+        action=bindings['action'],
         termination='SourcePerceptiveEnv.terminated at every physical state, including the terminal state',
         substep_recording=dict(enabled=args.record_substeps, sampling_hz=1/float(env.m.opt.timestep),
             time_support='Physics input t_k before implicitfast integration',
@@ -126,7 +127,7 @@ def main():
                         reason = 'tracking_termination'
                         break
                     target = env.ref_qpos[state['frame'], 7:]
-                    action = (target-env.q0)/env.action_scale
+                    action = (target-env.action_base(state['frame']))/env.action_scale
                     bounded_action = env.bound_action(action)
                     actual_target = env.ctrl_of(bounded_action, state['frame'])
                     observation_noise = torch.zeros((1, 93), device=env.device)
