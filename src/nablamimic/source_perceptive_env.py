@@ -126,3 +126,10 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         nonfinite = ~torch.isfinite(state['qpos']).all(-1) | ~torch.isfinite(state['qvel']).all(-1)
         return ((torso_height-reference_height).abs() > .25) | (gravity_error > .8) | (
             (actual-reference).abs().amax(-1) > .25) | nonfinite
+
+    def reward(self, state, action, prev_action, prev=None):
+        _, terms = super().reward(state, action, prev_action, prev=prev)
+        joints = state['qpos'][:, 7:]
+        terms['joint_limit'] = -.02*10.*(
+            torch.relu(self.soft_lo-joints)+torch.relu(joints-self.soft_hi)).sum(-1)
+        return sum(terms.values()), terms
