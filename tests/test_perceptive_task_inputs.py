@@ -10,6 +10,20 @@ from nablamimic import torch_nets as nets
 
 
 class PerceptiveTaskInputsTest(unittest.TestCase):
+    def test_source_unlimited_position_targets_retain_action_effect_and_gradient(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.q0=torch.tensor([.1,.2])
+        env.action_scale=torch.tensor([.5,.25])
+        env.ctrl_lo=torch.tensor([0.,-1.])
+        env.ctrl_hi=torch.tensor([0.,1.])
+        env.source_ctrl_limited=torch.tensor([False,True])
+        action=torch.tensor([[2.,8.]],requires_grad=True)
+        target=env.ctrl_of(action,torch.tensor([0]))
+        torch.testing.assert_close(target,torch.tensor([[1.1,1.]]))
+        gradient=torch.autograd.grad(target.sum(),action)[0]
+        torch.testing.assert_close(gradient,torch.tensor([[.5,0.]]))
+
     def test_camera_optical_distance_and_constant_image(self):
         rays = source_raw_camera_rays('cpu')
         torch.testing.assert_close(torch.linalg.vector_norm(rays, dim=-1), torch.ones(27,48))

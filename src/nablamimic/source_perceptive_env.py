@@ -15,6 +15,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         from nablaengine.depth_geometry import DepthGeometry
         from .source_depth_noise import SourceDepthNoise
         self.camera_noise = SourceDepthNoise(self.device) if self.cfg.source_depth_noise else None
+        self.source_ctrl_limited = torch.tensor(self.m.actuator_ctrllimited.copy(),device=self.device,dtype=torch.bool)
         self.source_kp = torch.tensor(self.m.actuator_gainprm[:,0].copy(),device=self.device,dtype=torch.float32)
         self.source_kd = torch.tensor(-self.m.actuator_biasprm[:,2].copy(),device=self.device,dtype=torch.float32)
         joint_ids = self.m.actuator_trnid[:,0]
@@ -101,6 +102,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     policy_history_order='term-major gravity/angular/joints/joint_velocity/last_action',
                     depth_shape=[1,18,32], depth_feature_dim=32,
                     actor_relative_position=False, normalized_action_limit=self.cfg.action_limit,
+                    actuator_control_limits='Apply prepared model actuator_ctrllimited mask; unlimited channels retain the PD target',
                     encoder_learning='native action-target regression gradient',
                     reset_profile=self.cfg.source_reset_profile, physical_randomization='nominal prepared model',
                     policy_normalization='empirical population moments, cumulative sample count, epsilon .01, collection updates',
@@ -144,6 +146,11 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
 
     def restore(self, compact):
         return self.empty_transition_measurements(super().restore(compact))
+
+    def ctrl_of(self, action, frame):
+        target = self.q0+self.action_scale*action
+        bounded = torch.clamp(target,self.ctrl_lo,self.ctrl_hi)
+        return torch.where(self.source_ctrl_limited,bounded,target)
 
     def step(self, state, action, proprio_noise=None):
         action = self.bound_action(action)
