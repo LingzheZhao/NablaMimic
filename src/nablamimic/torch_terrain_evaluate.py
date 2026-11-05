@@ -16,6 +16,9 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
     """
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    if not hasattr(env, 'perception_body_names'):
+        from .env import BM_BODIES
+        env.perception_body_names = BM_BODIES
     if env.terrain is None:
         raise ValueError("Terrain evaluation requires the bound physical sensor")
     frame = torch.tensor([start_frame], device=env.device, dtype=torch.int32)
@@ -26,6 +29,9 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
         reset_noise['rotation'][:] = reset_pose['rotation_rad'] / env.reset_rotation_limits
     state = env.reset(frame, reset_noise)
     rows = []
+    posture_run = 0
+    posture_observed = False
+    posture_pending = False
     reason = 'requested_controls'
     with torch.no_grad():
         for control in range(maximum_controls):
@@ -40,7 +46,17 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
             physical_body = state['xpos'][:, env.body_ids]
             reference_body = env.ref_body_pos[state['frame']]
             world_error = torch.linalg.vector_norm(physical_body-reference_body, dim=-1)
-            rows.append(dict(world_body_error_m=world_error[0].cpu().numpy(),
+            q = state['qpos'][0]
+            updot = 1 - 2*(q[4]**2 + q[5]**2)
+            posture_pending = bool((updot < .5) | (q[2] < .25))
+            posture_run = posture_run + 1 if posture_pending else 0
+            posture_observed = posture_observed or posture_run >= 10
+            pelvis_index = 0
+            ankle_indices = [i for i, name in enumerate(env.perception_body_names) if 'ankle_roll' in name]
+            rows.append(dict(pelvis_updot=float(updot.item()), pelvis_height_m=float(q[2].item()),
+                pelvis_error_m=float(world_error[0, pelvis_index].item()),
+                ankle_height_m=physical_body[0, ankle_indices, 2].cpu().numpy(),
+                world_body_error_m=world_error[0].cpu().numpy(),
                 torso_error_m=float(world_error[0, env.anchor_k].item()), qpos=state['qpos'][0].cpu().numpy(),
                 qvel=state['qvel'][0].cpu().numpy(), action=action[0].cpu().numpy(),
                 scan=scan[0].cpu().numpy(), frame=int(state['frame'][0].item()),
@@ -54,7 +70,22 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
                  final_qpos=state['qpos'].cpu().numpy(), final_qvel=state['qvel'].cpu().numpy())
     report = dict(controls=len(rows), requested_controls=maximum_controls,
                   start_frame=start_frame, stop_reason=reason, perception=env.perception_contract,
-                  control_hz=50, stochastic_action_noise=0, physical_fall='unavailable_without_force_classifier')
+                  control_hz=50, stochastic_action_noise=0, posture_fall='unobserved')
+    if posture_observed:
+        report['posture_fall'] = True
+    elif reason == 'tracking_termination' and (posture_pending or len(rows) < 10):
+        report['posture_fall'] = 'unavailable_truncated_before_0.2s'
+    else:
+        report['posture_fall'] = False
+    if rows:
+        report['mean_world_body_error_m'] = float(np.mean([row['world_body_error_m'].mean() for row in rows]))
+        report['mean_torso_error_m'] = float(np.mean([row['torso_error_m'] for row in rows]))
+        report['passing_trial'] = (reason == 'reference_complete' and
+            report['mean_world_body_error_m'] <= .10 and report['mean_torso_error_m'] <= .10)
+        seated = [row for row in rows if 4.5 <= row['frame']/50 <= 5.5]
+        report['seat_interval'] = dict(requested_s=[4.5, 5.5], controls=len(seated))
+        for key in ('torso_error_m', 'pelvis_error_m', 'ankle_height_m'):
+            report['seat_interval'][key] = np.mean([row[key] for row in seated], axis=0).tolist() if seated else None
     (output/'result.json').write_text(json.dumps(report, indent=2))
     return report
 
@@ -95,3 +126,24 @@ def evaluate_checkpoint(env, checkpoint_path, output):
         env.sensor_ablation = original
     (output/'panel.json').write_text(json.dumps(dict(identity=identity, reports=reports), indent=2))
     return reports
+
+
+def main():
+    import argparse
+    from .torch_train import build_environment
+    from .env import BM_BODIES
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=Path, required=True, help='Resolved training config.json')
+    parser.add_argument('--checkpoint', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    config = json.loads(args.config.read_text())
+    for key in ('terrain_model', 'terrain_model_contract', 'terrain_sensor'):
+        config[key] = Path(config[key])
+    env, bindings = build_environment(argparse.Namespace(**config))
+    env.perception_body_names = BM_BODIES
+    evaluate_checkpoint(env, args.checkpoint, args.output)
+
+
+if __name__ == '__main__':
+    main()

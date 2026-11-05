@@ -496,32 +496,12 @@ def validate_args(args):
         raise ValueError('Three termination-penalty parameters required')
 
 
-def main(argv=None):
+def build_environment(args):
+    """Construct the one physical scene and its checked input bindings."""
     from .env import BM_BODIES, EnvConfig
-    from .motion import all_clip_names,load_library
-    from .params import resolve_params,git_state
-    from .training_options import FIXED
+    from .motion import all_clip_names, load_library
     from nablaengine import torch_ffi
-    resolved, info = resolve_params(sys.argv[1:] if argv is None else argv)
-    args=build_parser().parse_args(resolved);validate_args(args)
-    output=Path(args.out)
-    if output.exists() and any(output.iterdir()):raise ValueError('Fresh output root required')
-    (output/'ckpt').mkdir(parents=True,exist_ok=True)
-    if not torch.cuda.is_available() or torch.cuda.device_count()!=1:raise RuntimeError('Exactly one provisioned CUDA device required')
-    torch.set_num_threads(8)
-    torch.backends.cuda.matmul.allow_tf32=True
-    torch.backends.cudnn.allow_tf32=False
-    torch.manual_seed(args.seed);np.random.seed(args.seed);random.seed(args.seed)
-    code=os.environ.get('NABLA_SOURCE_REVISION') or git_state()[0]
-    if not code:raise ValueError('Declared committed source revision required')
-    config={**vars(args),**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
-            'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
-            'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
-            'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
-    config['initial_checkpoint']=str(args.initial_checkpoint) if args.initial_checkpoint else None
-    config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
-    config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
-    write_json(output/'config.json',config)
+    config = {}
     if args.motion_lib:
         from .motion_lib import ShardedLibrary
         source = ShardedLibrary(args.motion_lib, filtered=False)
@@ -571,7 +551,39 @@ def main(argv=None):
             raise ValueError('Prepared foot-pair contract differs from compiled foot/static terrain pairs')
         env.foot_pairs = expected
     engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
-    config['engine']=engine;write_json(output/'config.json',config)
+    config['engine'] = engine
+    return env, config
+
+
+def main(argv=None):
+    from .env import BM_BODIES, EnvConfig
+    from .motion import all_clip_names,load_library
+    from .params import resolve_params,git_state
+    from .training_options import FIXED
+    from nablaengine import torch_ffi
+    resolved, info = resolve_params(sys.argv[1:] if argv is None else argv)
+    args=build_parser().parse_args(resolved);validate_args(args)
+    output=Path(args.out)
+    if output.exists() and any(output.iterdir()):raise ValueError('Fresh output root required')
+    (output/'ckpt').mkdir(parents=True,exist_ok=True)
+    if not torch.cuda.is_available() or torch.cuda.device_count()!=1:raise RuntimeError('Exactly one provisioned CUDA device required')
+    torch.set_num_threads(8)
+    torch.backends.cuda.matmul.allow_tf32=True
+    torch.backends.cudnn.allow_tf32=False
+    torch.manual_seed(args.seed);np.random.seed(args.seed);random.seed(args.seed)
+    code=os.environ.get('NABLA_SOURCE_REVISION') or git_state()[0]
+    if not code:raise ValueError('Declared committed source revision required')
+    config={**vars(args),**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
+            'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
+            'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
+            'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
+    config['initial_checkpoint']=str(args.initial_checkpoint) if args.initial_checkpoint else None
+    config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
+    config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
+    write_json(output/'config.json',config)
+    env, bindings = build_environment(args)
+    config.update(bindings)
+    write_json(output/'config.json', config)
     if args.initial_checkpoint:
         with args.initial_checkpoint.open('rb') as handle:initial=pickle.load(handle)
         if initial['completed_updates']!=0 or initial['ema_updates']!=0:raise ValueError('Matched initial checkpoint must contain zero completed updates')

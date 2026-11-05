@@ -18,10 +18,14 @@ reference, requesting 536 transitions and allowing at least 600 controls.
 
 For this pilot, a working checkpoint requires at least 18 of 20 complete references,
 mean world tracked-body origin error at most 0.10 m and mean torso world-position
-error at most 0.10 m on each complete reference. Partial trials retain their actual
-time support and errors. Tracking termination and force-supported physical fall
-measurements are separate fields. A physical-fall result requires force sampling
-and an explicit classifier before that field can be accepted.
+error at most 0.10 m within each passing trial. Each trial receives its own decision
+before counting the eighteen required passing trials. Partial trials retain their actual
+time support and errors. Tracking termination and the task-specific posture-fall reading are separate.
+A posture fall is pelvis up-dot below 0.5 or world pelvis height below 0.25 m
+for at least 0.2 seconds continuously. Tracking termination that truncates this
+support leaves the posture-fall result unavailable. This upright jumpsit rule
+measures posture. The seat interval from 4.5 to 5.5 seconds reports torso/pelvis
+world errors and ankle world heights without additional passing thresholds.
 
 Each measured scan read has a paired constant-scan read with the same weights,
 initial physical state and requested horizon. The checkpoint's training-time sensor
