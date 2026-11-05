@@ -113,14 +113,14 @@ class TorchTrackingEnv:
     max_reward = DT * sum(W[key] for key in ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel",
                                             "root_pos", "root_ori"))
 
-    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None):
+    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, model=None):
         # These routines construct CPU model constants / NumPy reference features.
         # They do not construct TrackingEnv or an MJX runtime state.
         import mujoco
         from .env import ANCHOR, BM_BODIES, Q0, TrackingEnv, build_model
         if tuple(lib.bodies) != BM_BODIES:
             raise ValueError("Reference body order must be the current G1 tracking body order")
-        model, kp = build_model(cfg)
+        model, kp = build_model(cfg, model=model)
         model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_SENSOR)
         q0 = np.zeros(model.nu)
         for i in range(model.nu):
@@ -156,6 +156,8 @@ class TorchTrackingEnv:
         self.cfg = reference.cfg
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
             raise ValueError("action_rate_space must be setpoint or raw")
+        self.perception_contract = {"sensor": "none", "width": 0}
+        self.terrain = None
         self.m = reference.m
         self.device = torch.device(device)
         self.nu = int(reference.nu)
@@ -244,8 +246,43 @@ class TorchTrackingEnv:
             anchor = anchor + 0.05*noise
         return torch.cat((self.goal_ref(state["frame"]), anchor), -1)
 
+    def bind_terrain_sensor(self, directory, ablation="measured"):
+        import json
+        from pathlib import Path
+        from .terrain_observation import ConvexTerrain
+        directory = Path(directory)
+        contract = json.loads((directory / "contract.json").read_text())
+        if contract["format"] != "nablamimic-convex-terrain-v1":
+            raise ValueError("Convex terrain producer contract required")
+        with np.load(directory / "terrain.npz") as arrays:
+            self.terrain = ConvexTerrain(*[
+                torch.as_tensor(arrays[name].copy(), device=self.device)
+                for name in ("normals", "offsets", "valid_faces")])
+        x = torch.linspace(-0.8, 1.2, 11, device=self.device)
+        y = torch.linspace(-0.5, 0.5, 7, device=self.device)
+        self.scan_offsets = torch.cartesian_prod(x, y)
+        self.sensor_ablation = ablation
+        self.hist_dim += len(self.scan_offsets)
+        self.critic_dim += len(self.scan_offsets)
+        self.perception_contract = dict(sensor="yaw_heightscan", width=len(self.scan_offsets),
+            placement="current scan appended after proprioception history and critic inputs",
+            offset_x_m=[-0.8, 1.2, 11], offset_y_m=[-0.5, 0.5, 7],
+            sensor_height_m=1.0, maximum_distance_m=3.0, ablation=ablation,
+            terrain=contract, units="distance divided by maximum_distance")
+
+    def terrain_scan(self, state):
+        from .terrain_observation import height_scan
+        q = state["qpos"]
+        scan = height_scan(self.terrain, q[:, :3], q[:, 3:7], self.scan_offsets) / 3.0
+        if self.sensor_ablation == "constant":
+            scan = torch.ones_like(scan)
+        return scan
+
     def policy_obs(self, state, goal_noise=None):
-        return state["hist"].flatten(1), self.goal(state, goal_noise)
+        history = state["hist"].flatten(1)
+        if self.terrain is not None:
+            history = torch.cat((history, self.terrain_scan(state)), -1)
+        return history, self.goal(state, goal_noise)
 
     def critic_obs(self, state):
         q, frame = state["qpos"], state["frame"]
@@ -255,7 +292,10 @@ class TorchTrackingEnv:
                         state["com"]/0.05), -1)
         anchor = self.anchor_rel(state)
         goal = torch.cat((self.goal_ref(frame), anchor[:, 3:9]), -1)
-        return torch.cat((self.proprio(state), goal, root_error, anchor, xi), -1)
+        observation = torch.cat((self.proprio(state), goal, root_error, anchor, xi), -1)
+        if self.terrain is not None:
+            observation = torch.cat((observation, self.terrain_scan(state)), -1)
+        return observation
 
     def reset(self, frame, noise=None):
         if (self.cfg.dr or self.cfg.reset_noise or self.cfg.obs_noise) and noise is None:

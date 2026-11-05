@@ -120,8 +120,8 @@ def _np_rotate_inv(q, v):
     return np.einsum("...ji,...j->...i", r, v)
 
 
-def build_model(cfg: EnvConfig):
-    m = robot.build(SCENE)
+def build_model(cfg: EnvConfig, model=None):
+    m = robot.build(SCENE) if model is None else model
     m.opt.iterations = cfg.solver_iterations
     m.opt.timestep = TIMESTEP
     kp = np.empty(m.nu)

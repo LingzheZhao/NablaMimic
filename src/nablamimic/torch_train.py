@@ -438,7 +438,7 @@ class TorchTrainer:
             cnorm=as_numpy(self.cnorm), bin_q=as_numpy(self.sampler.bin_q), iter=iteration,
             completed_updates=iteration, ema_updates=int(self.ema_count), evaluation_policy='ema',
             wall_s=elapsed, env_steps=iteration*self.n*self.h,
-            training_framework='torch', execution=self.args.execution)
+            training_framework='torch', execution=self.args.execution, perception=self.env.perception_contract)
         destination = output/'ckpt'/f'it_{iteration:06d}.pkl'
         if not destination.exists():
             temporary = destination.with_suffix('.tmp')
@@ -469,13 +469,17 @@ def build_parser():
     parser.add_argument('--initial-checkpoint',type=Path,help='Current-format initial weights for a matched comparison; update count must be zero')
     parser.add_argument('--save-wall-minutes',type=float,nargs='+',default=[8,20,60,90,180])
     parser.add_argument('--full-state-at-end',action=argparse.BooleanOptionalAction,default=True)
+    parser.add_argument("--terrain-model", type=Path, help="Prepared physical terrain MJCF or MJB model")
+    parser.add_argument("--terrain-model-contract", type=Path)
+    parser.add_argument("--terrain-sensor", type=Path)
+    parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
     return parser
 
 
 def validate_args(args):
     if args.physics!='engine' or not args.policy_ema or args.mask_after_done or not args.no_remat:
         raise ValueError('Torch path currently implements the unmasked, no-rematerialization EMA Engine recipe')
-    if args.motion_lib or args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
+    if args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
         raise ValueError('Unsupported recipe variant')
     if not args.anchor_to_decoder or args.enc_hoist!='on' or not args.critic_pre_state:
         raise ValueError('Current-paper anchor/encoder-hoist/pre-state-critic settings required')
@@ -517,11 +521,43 @@ def main(argv=None):
     config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
     config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
     write_json(output/'config.json',config)
-    names=all_clip_names() if args.clips==['all'] else args.clips
-    if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
-    library=load_library(names,bodies=BM_BODIES)
+    if args.motion_lib:
+        from .motion_lib import ShardedLibrary
+        source = ShardedLibrary(args.motion_lib, filtered=False)
+        if args.clips != ['all']:
+            source.clips = {name: source.clips[name] for name in args.clips}
+        shards = sorted({clip['shard'] for clip in source.clips.values()})
+        library = source.working_set(shards, sum(clip['length'] for clip in source.clips.values()))
+    else:
+        names=all_clip_names() if args.clips==['all'] else args.clips
+        if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
+        library=load_library(names,bodies=BM_BODIES)
+    model = None
+    if args.terrain_sensor:
+        if args.terrain_model is None:
+            raise ValueError("Terrain sensor requires the matching physical terrain model")
+        import mujoco
+        if args.terrain_model_contract is None:
+            raise ValueError("Prepared terrain model requires its physical contract")
+        model_contract = json.loads(args.terrain_model_contract.read_text())
+        model = (mujoco.MjModel.from_binary_path(str(args.terrain_model))
+                 if args.terrain_model.suffix == '.mjb' else
+                 mujoco.MjModel.from_xml_path(str(args.terrain_model)))
+        if model.body(model.jnt_bodyid[0]).name != 'pelvis':
+            raise ValueError("Terrain training requires the validated pelvis-root model")
+        actual_order = [model.joint(model.actuator_trnid[i, 0]).name for i in range(model.nu)]
+        if actual_order != model_contract['actuator_joint_names']:
+            raise ValueError("Constructed actuator binding differs from physical contract")
+        if list(BM_BODIES) != model_contract['tracked_body_names']:
+            raise ValueError("Constructed tracking body order differs from physical contract")
+        if model_contract['terrain_artifact_id'] != json.loads((args.terrain_sensor/'contract.json').read_text())['artifact_id']:
+            raise ValueError("Sensor and physical terrain artifact bindings differ")
+        config['physical_model'] = model_contract
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
-        residual_action=args.residual_action,action_rate_space=args.action_rate_space))
+        residual_action=args.residual_action,action_rate_space=args.action_rate_space), model=model)
+    if args.terrain_sensor:
+        env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
+    config['perception'] = env.perception_contract
     engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
     config['engine']=engine;write_json(output/'config.json',config)
     if args.initial_checkpoint:
