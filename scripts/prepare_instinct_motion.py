@@ -264,7 +264,7 @@ def main():
                     target_artifact_id=args.target_artifact_id, mujoco_version=mujoco.__version__, binding=binding,
                     metadata_motion_count=10, metadata_terrain_count=6, selected_motion_count=len(selection),
                     completed_motion_count=len(reports), failed_conditions=failed_conditions,
-                    selected_motion_indices=selected_indices, selected_terrain_count=len({r['terrain_id'] for r in reports}),
+                    selected_motion_indices=selected_indices, selected_terrain_count=len({entry['terrain_id'] for _, entry, _ in selection}),
                     terrains=metadata['terrains'], motions=reports)
     (args.output/'screening.json').write_text(json.dumps(contract, indent=2))
     if failed_conditions:
