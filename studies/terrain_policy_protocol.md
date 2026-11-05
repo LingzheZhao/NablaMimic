@@ -62,3 +62,15 @@ fixed zero-input 128-step network recurrence reached a maximum action magnitude
 of 4.616 in both compared conditions and never activated its command limit. That
 diagnostic did not demonstrate divergence. A completed training run and bounded
 inputs do not establish the working-policy criterion above.
+
+## Actor target-relative position condition
+
+The independent condition in `configs/terrain_heightscan_anchor_position.args`
+appends three target-relative torso-position coordinates to the actor history
+input, after its current height scan. It uses the simulator's current physical
+torso pose and the reference torso position, expressed in the physical torso's
+full orientation frame. The goal encoder and its final six rotation coordinates
+retain their layout. The critic already observes this position and receives no
+additional copy. With the scan, actor history width is 1010, goal width 716 and
+critic width 932. This condition adds simulator-based target-relative feedback
+to the height-scan controller. It uses N64 H32 with explicit compiled CUDA graphs.

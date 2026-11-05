@@ -195,7 +195,7 @@ class TorchTrackingEnv:
             raise ValueError("Exactly 14 current tracking body IDs are required")
         self.valid = torch.arange(self.n_frames, device=self.device) < self.ref_last
         frame_dim = GOAL_FRAME_DIM + 3*int(self.cfg.reference_root_displacement)
-        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM, FUTURE*frame_dim+6, 1+self.nu+3
+        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM+3*int(self.cfg.actor_anchor_position), FUTURE*frame_dim+6, 1+self.nu+3
         self.critic_dim = PROPRIO_DIM + 9 + self.goal_dim + 4 + self.xi_dim
         self.future_offsets = self.cfg.future_stride*torch.arange(FUTURE, dtype=torch.int32, device=self.device)
         self.noise_limits = torch.tensor([0.01]*self.nu + [0.5/5.0]*self.nu + [0.2/2.0]*3
@@ -243,7 +243,9 @@ class TorchTrackingEnv:
 
     @property
     def observation_contract(self):
-        return dict(control_dt_s=DT, history_frames=HIST, proprioception_frame_dim=PROPRIO_DIM,
+        return dict(actor_anchor_position=self.cfg.actor_anchor_position,
+                    actor_anchor_position_definition="Simulator-based reference torso position minus physical torso position in the current physical torso full rotation frame, appended after history and scan",
+                    control_dt_s=DT, history_frames=HIST, proprioception_frame_dim=PROPRIO_DIM,
                     history_dim=self.hist_dim, goal_dim=self.goal_dim, critic_dim=self.critic_dim,
                     reference_frames=FUTURE, future_stride=self.cfg.future_stride,
                     reference_time_offsets_s=[i*self.cfg.future_stride*DT for i in range(FUTURE)],
@@ -325,6 +327,8 @@ class TorchTrackingEnv:
         history = state["hist"].flatten(1)
         if self.terrain is not None:
             history = torch.cat((history, self.terrain_scan(state)), -1)
+        if self.cfg.actor_anchor_position:
+            history = torch.cat((history, self.anchor_rel(state)[:, :3]), -1)
         return history, self.goal(state, goal_noise)
 
     def critic_obs(self, state):

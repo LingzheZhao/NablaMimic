@@ -15,7 +15,7 @@ from nablamimic.torch_env import (COMPACT_KEYS, STATE_KEYS, TorchTrackingEnv, ab
 
 
 def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
-            future_stride=1, reference_root_displacement=False, action_limit=None, frames=12):
+            future_stride=1, reference_root_displacement=False, action_limit=None, actor_anchor_position=False, frames=12):
     bodies = 14
     qpos = np.zeros((frames, 36), np.float32)
     qpos[:, 2], qpos[:, 3] = 1, 1
@@ -25,7 +25,7 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
     positions = qpos[:, None, :3] + offsets.numpy()[None]
     quaternions = np.zeros((frames, bodies, 4), np.float32)
     quaternions[..., 0] = 1
-    cfg = SimpleNamespace(action_limit=action_limit, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
+    cfg = SimpleNamespace(actor_anchor_position=actor_anchor_position, action_limit=action_limit, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
                           dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8,
                           future_stride=future_stride, reference_root_displacement=reference_root_displacement)
     reference = SimpleNamespace(m=SimpleNamespace(nq=36, nv=35, nu=29), cfg=cfg, nu=29,
@@ -57,6 +57,24 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
 
 
 class TorchEnvironmentTest(unittest.TestCase):
+    def test_actor_anchor_position_observes_rigid_physical_xy_translation(self):
+        env, _ = fixture(actor_anchor_position=True)
+        state = env.reset(torch.tensor([0]))
+        before, goal_before = env.policy_obs(state)
+        critic_before = env.critic_obs(state)
+        shifted = {key: value.clone() for key, value in state.items()}
+        translation = torch.tensor([[.3, -.2, 0.]])
+        shifted['qpos'][:, :3] += translation
+        shifted['xpos'] += translation[:, None]
+        shifted['subtree_com'] += translation[:, None]
+        after, goal_after = env.policy_obs(shifted)
+        self.assertEqual(env.hist_dim, 933)
+        self.assertEqual(before.shape[-1], env.hist_dim)
+        torch.testing.assert_close(before[:, :-3], after[:, :-3])
+        torch.testing.assert_close(after[:, -3:]-before[:, -3:], -translation)
+        torch.testing.assert_close(goal_before, goal_after)
+        self.assertEqual(env.critic_obs(shifted).shape, critic_before.shape)
+
     def test_source_action_domain_is_shared_by_physics_and_history(self):
         env, calls = fixture(residual=True, action_limit=20.)
         state = env.reset(torch.tensor([0]))

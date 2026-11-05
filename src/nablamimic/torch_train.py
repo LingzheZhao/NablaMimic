@@ -536,6 +536,7 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--actor-anchor-position", action="store_true")
     parser.add_argument("--action-limit", type=float, default=None)
     parser.add_argument("--future-stride", type=int, default=1)
     parser.add_argument("--reference-root-displacement", action="store_true")
@@ -612,7 +613,7 @@ def build_environment(args):
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
-        action_limit=args.action_limit), model=model)
+        action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position), model=model)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
