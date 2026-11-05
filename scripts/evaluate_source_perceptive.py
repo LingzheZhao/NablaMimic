@@ -8,6 +8,17 @@ import numpy as np
 from nablamimic.source_evaluation_metrics import summarize_source_chain
 
 
+def select_motion_indices(indices, motion_count):
+    """Select original clip IDs in the complete library's traversal order."""
+    if indices is None:
+        return list(range(motion_count))
+    if not indices or len(set(indices)) != len(indices):
+        raise ValueError('Motion selection must contain distinct clip indices')
+    if any(index < 0 or index >= motion_count for index in indices):
+        raise ValueError('Motion index is outside the complete reference library')
+    return sorted(indices)
+
+
 def source_window(length, start_fraction, maximum_controls):
     """Select one supported control interval within a reference clip."""
     if not np.isfinite(start_fraction) or not 0 <= start_fraction < 1:
@@ -47,6 +58,8 @@ def main():
     parser.add_argument('--weights', choices=('ema','live','official'), required=True)
     parser.add_argument('--maximum-controls', type=int, help='Default is all controls remaining after the selected start')
     parser.add_argument('--start-fraction', type=float, default=0., help='Fraction of each clip control span at reset')
+    parser.add_argument('--motion-index', type=int, action='append',
+                        help='Original clip ID to evaluate, repeat to select several, default all in library order')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
@@ -70,6 +83,7 @@ def main():
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
     env, bindings = build_environment(argparse.Namespace(**config))
+    selected_motion_indices = select_motion_indices(args.motion_index,len(env.starts))
     if args.weights == 'official':
         from nablamimic.official_source_policy import OfficialSourcePolicy
         if env.observation_contract['task'] != 'instinct_perceptive_native':
@@ -96,7 +110,8 @@ def main():
     body_names = config['physical_model']['tracked_body_names']
     torso_index = body_names.index('torso_link')
     with torch.no_grad():
-        for clip, start in enumerate(env.starts):
+        for clip in selected_motion_indices:
+            start = env.starts[clip]
             window = source_window(int(env.lengths[clip]), args.start_fraction, args.maximum_controls)
             actual_start = int(start)+window['start_offset']
             reference_activity = reference_window_activity(env.ref_body_pos[
@@ -173,6 +188,7 @@ def main():
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
+        selected_motion_indices=selected_motion_indices,
         start_fraction=args.start_fraction, maximum_controls=args.maximum_controls,
         window_protocol=dict(start_offset='floor((clip_length-1)*start_fraction)',
             requested_controls='min(maximum_controls or remaining_controls, remaining_controls)',

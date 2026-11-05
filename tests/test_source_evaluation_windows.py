@@ -8,12 +8,24 @@ import numpy as np
 
 SCRIPTS = Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-from evaluate_source_perceptive import reference_window_activity, source_window, summarize_window
+from evaluate_source_perceptive import reference_window_activity, select_motion_indices, source_window, summarize_window
 from render_source_trajectory import reference_frame_indices
 sys.path.pop(0)
 
 
 class SourceEvaluationWindowTest(unittest.TestCase):
+    def test_motion_selection_defaults_to_all_original_indices(self):
+        self.assertEqual(select_motion_indices(None,10),list(range(10)))
+
+    def test_motion_selection_retains_library_order_and_original_clip_ids(self):
+        self.assertEqual(select_motion_indices([9,0,4],10),[0,4,9])
+        self.assertEqual(select_motion_indices([9],10),[9])
+
+    def test_motion_selection_rejects_duplicates_and_out_of_range(self):
+        for indices in ([0,0],[-1],[10],[]):
+            with self.assertRaises(ValueError):
+                select_motion_indices(indices,10)
+
     def test_fraction_floor_and_remaining_cap(self):
         self.assertEqual(source_window(10,.25,100),
             dict(start_offset=2,remaining_controls=7,requested_controls=7))
