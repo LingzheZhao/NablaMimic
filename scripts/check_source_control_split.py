@@ -62,7 +62,16 @@ def main():
     direct_effect=any(max(position,velocity)>epsilon for position,velocity in zip(qpos_effect,qvel_effect))
     finite=all(torch.isfinite(value).all().item() for group in gradients+values for value in group)
     finite=finite and all(torch.isfinite(value).all().item() for value in (changed['qpos'],changed['qvel']))
-    matches=parity_matches and gradient_effect and direct_effect and finite
+    with torch.no_grad():
+        recorded,record=env.step_recorded(original,torch.zeros_like(action),torch.zeros(len(frame),93,device=env.device))
+    recorded_values=(recorded['qpos'],recorded['qvel'],recorded['warm'],recorded['xpos'])
+    recording_errors=[float((a-b).abs().max()) for a,b in zip(values[1],recorded_values)]
+    recording_input_error=float((record['input_qpos'][:,0]-original['qpos']).abs().max())
+    recording_shapes={name:list(value.shape) for name,value in record.items()}
+    recording_finite=all(torch.isfinite(value).all().item() for value in record.values())
+    recording_matches=(max(recording_errors+[recording_input_error])<=args.absolute_tolerance
+                       and all(value.shape[1]==4 for value in record.values()) and recording_finite)
+    matches=parity_matches and gradient_effect and direct_effect and finite and recording_matches
     (args.output/'result.json').write_text(json.dumps(dict(frames=args.frames,value_absolute_errors=value_errors,
         gradient_absolute_errors=gradient_errors,
         action_vjp_absolute_max=[float(value[-1].abs().max()) for value in gradients],
@@ -72,6 +81,8 @@ def main():
         action_effect_threshold=epsilon,
         action_effect_definition='At least one state per fused/split VJP and one direct state response exceeds float32 epsilon',
         parity_matches=parity_matches,gradient_effect=gradient_effect,direct_effect=direct_effect,finite=finite,
+        recording_matches=recording_matches,recording_state_absolute_errors=recording_errors,
+        recording_initial_input_error=recording_input_error,recording_shapes=recording_shapes,
         model_actuator_ctrllimited=env.m.actuator_ctrllimited.tolist(),
         model_actuator_ctrlrange=env.m.actuator_ctrlrange.tolist(),
         actual_analytic_torque_absolute_error=torque_error,

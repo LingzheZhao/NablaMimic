@@ -167,12 +167,42 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
             substeps=1,clamp_kv=0,normal=3,clamp_soft=None,grad_decay=1.,kinematics=True,measurements=True)
         last_measurements = last[-1]
         result = self.finish_physics_kin(state,action,last[:-1],proprio_noise)
+        return self.attach_source_measurements(result,first_measurements,last_measurements,reward_torque)
+
+    def attach_source_measurements(self,result,first_measurements,last_measurements,reward_torque):
         result['source_contact_forces'] = torch.cat((
             first_measurements['all_contact_wrench'][:,-2:,:,:3],
             last_measurements['all_contact_wrench'][:,:,:,:3]),1)
         result['source_actual_torque'] = last_measurements['actuator_torque'][:,0]
         result['source_reward_torque'] = reward_torque
         return result
+
+    @torch.no_grad()
+    def step_recorded(self,state,action,proprio_noise=None):
+        """Execute the same 3+1 physics and return complete substep records outside state."""
+        from nablaengine import torch_ffi as engine
+        action=self.bound_action(action)
+        control=self.ctrl_of(action,state['frame']).contiguous()
+        first=engine.forward_measurements(state['qpos'].contiguous(),state['qvel'].contiguous(),
+            state['warm'].contiguous(),control,state['friction'].contiguous(),state['com'].contiguous(),
+            iterations=self.cfg.solver_iterations,substeps=3,tape=True)
+        raw_torque=self.source_kp*(control-first['qpos'][:,7:])-self.source_kd*first['qvel'][:,6:]
+        reward_torque=torch.clamp(raw_torque,-self.source_effort,self.source_effort)
+        last=engine.forward_measurements(first['qpos'].contiguous(),first['qvel'].contiguous(),
+            first['warm'].contiguous(),control,state['friction'].contiguous(),state['com'].contiguous(),
+            iterations=self.cfg.solver_iterations,substeps=1,tape=True)
+        kinematics=self.engine_kinematics(last['qpos'].contiguous(),last['qvel'].contiguous(),state['com'].contiguous())
+        outputs=(last['qpos'],last['qvel'],last['warm'],*kinematics)
+        result=self.finish_physics_kin(state,action,outputs,proprio_noise)
+        result=self.attach_source_measurements(result,first,last,reward_torque)
+        first_inputs=engine.read_substep_inputs(first['tape'],substeps=3)
+        last_inputs=engine.read_substep_inputs(last['tape'],substeps=1)
+        record={name:torch.cat((first[name],last[name]),dim=1) for name in (
+            'terrain_wrench','terrain_contact_count','all_contact_wrench','all_contact_count',
+            'actuator_torque','substep_info')}
+        record.update(input_qpos=torch.cat((first_inputs['qpos'],last_inputs['qpos']),dim=1),
+                      input_qvel=torch.cat((first_inputs['qvel'],last_inputs['qvel']),dim=1))
+        return result,record
 
     def reward(self, state, action, prev_action, prev=None):
         _, terms = super().reward(state, action, prev_action, prev=prev)

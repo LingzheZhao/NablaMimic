@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--maximum-controls', type=int, help='Default is each complete reference length')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
     parser.add_argument('--seed', type=int, required=True)
+    parser.add_argument('--record-substeps', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.maximum_controls is not None and args.maximum_controls < 1:
@@ -49,6 +50,7 @@ def main():
             noise = {name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
             state = env.reset(frame,noise)
             rows=[]
+            substep_rows=[]
             world_errors=[]
             terminations=[]
             body_positions=[]
@@ -66,7 +68,11 @@ def main():
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
                 history,goal = env.policy_obs(state,observation_noise['goal'])
                 action = nets.actor_apply(actor,history,goal)
-                stepped = env.step(state,action,observation_noise['proprio'])
+                if args.record_substeps:
+                    stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'])
+                    substep_rows.append({name:value[0].cpu().numpy() for name,value in substeps.items()})
+                else:
+                    stepped = env.step(state,action,observation_noise['proprio'])
                 done = bool(env.terminated(stepped).item())
                 ended = bool(env.clip_ended(stepped).item())
                 rows.append(dict(qpos=state['qpos'][0].cpu().numpy(),qvel=state['qvel'][0].cpu().numpy(),
@@ -87,7 +93,12 @@ def main():
                 reason=='reference_complete',len(rows),requested)
             output=args.output/f'clip_{clip:02d}' 
             output.mkdir()
-            np.savez(output/'trajectory.npz',**{key:np.asarray([row[key] for row in rows]) for key in rows[0]},
+            substep_arrays={}
+            if args.record_substeps:
+                substep_arrays={f'substep_{name}':np.stack([row[name] for row in substep_rows])
+                                for name in substep_rows[0]}
+                substep_arrays['substep_time_s']=(np.arange(len(rows))[:,None]*4+np.arange(4)[None])*env.m.opt.timestep
+            np.savez(output/'trajectory.npz',**substep_arrays,**{key:np.asarray([row[key] for row in rows]) for key in rows[0]},
                 final_qpos=state['qpos'].cpu().numpy(),final_qvel=state['qvel'].cpu().numpy(),
                 final_frame=state['frame'].cpu().numpy(),world_body_error_m=np.asarray(world_errors),
                 torso_error_m=np.asarray(world_errors)[:,torso_index],body_world_position=np.asarray(body_positions),
@@ -96,7 +107,13 @@ def main():
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
         completed_updates=checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
-        tracked_body_names=body_names,strict_passes=sum(row['strict_pass'] for row in reports),
+        tracked_body_names=body_names,
+        substep_recording=dict(enabled=args.record_substeps,sampling_hz=1/env.m.opt.timestep,
+            time_support='Each physics input t_k before its implicitfast update',
+            body_names=[env.m.body(index).name for index in range(env.m.nbody)],
+            torque_joint_names=[env.m.joint(int(env.m.actuator_trnid[index,0])).name for index in range(env.nu)],
+            wrench_units='world force N and moment about world origin N m',torque_units='executed generalized actuator torque N m'),
+        strict_passes=sum(row['strict_pass'] for row in reports),
         perception=env.perception_contract,
         observation=env.observation_contract,reports=reports),indent=2))
 
