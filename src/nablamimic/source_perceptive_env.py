@@ -110,6 +110,22 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     camera_noise='source stateless stages' if self.cfg.source_depth_noise else 'deterministic optical pipeline',
                     critic_layout='native privileged proprioception+source_goal+anchor+rootvelocity+domainparameters')
 
+    def reset_for_mask(self, reset, active):
+        """Restrict the source ground-height branch to actual simultaneous resets."""
+        if not self.cfg.source_ensure_link_below_zero_ground:
+            return reset
+        minimum_height=self.ref_body_pos[reset['frame'],:,2].amin(dim=-1)
+        candidate_branch=minimum_height.lt(0).any()
+        active_branch=(minimum_height.lt(0)&active).any()
+        shift_z=(candidate_branch.to(minimum_height.dtype)-active_branch.to(minimum_height.dtype))*minimum_height
+        translation=torch.stack((torch.zeros_like(shift_z),torch.zeros_like(shift_z),shift_z),-1)
+        qpos=torch.cat((reset['qpos'][:,:3]+translation,reset['qpos'][:,3:]),-1)
+        # Body zero is the fixed world. All robot subtree COMs, including the
+        # world subtree's total COM, follow the floating robot translation.
+        xpos=torch.cat((reset['xpos'][:,:1],reset['xpos'][:,1:]+translation[:,None]),1)
+        return {**reset,'qpos':qpos,'xpos':xpos,
+                'subtree_com':reset['subtree_com']+translation[:,None]}
+
     def reset(self, frame, noise=None):
         """Write the reference plus declared source noise without soft-limit clipping."""
         if self.cfg.dr:

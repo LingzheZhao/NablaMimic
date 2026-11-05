@@ -372,6 +372,10 @@ class TorchTrackingEnv:
             observation = torch.cat((observation, self.terrain_scan(state)), -1)
         return observation
 
+    def reset_for_mask(self, reset, active):
+        """Use a prepared reset candidate for the selected episode starts."""
+        return reset
+
     def reset(self, frame, noise=None):
         if (self.cfg.dr or self.cfg.reset_noise or self.cfg.obs_noise) and noise is None:
             raise ValueError("Randomized resets require explicit unit-uniform samples")

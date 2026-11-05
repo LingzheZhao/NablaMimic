@@ -84,7 +84,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
         next_acc = acc + discount * reward
         next_discount = discount * gamma
         total = total + torch.where(done, next_acc + next_discount * value * (~terminated), 0.0)
-        next_state = state_where(done, reset, stepped)
+        next_state = state_where(done, env.reset_for_mask(reset, done), stepped)
         reset_age = torch.where(done, 0, torch.where(reset_age >= 0, reset_age + 1, -1))
         outputs = dict(cobs=cobs.detach(), cobs_pre=env.critic_obs(state).detach(),
                        r=reward.detach(), term=terminated, done=done, v2=value.detach(), v2_raw=raw_value.detach(),
@@ -360,7 +360,7 @@ class TorchTrainer:
                 stepped = env.step(collector, action, proprio_noise)
                 term = env.terminated(stepped)
                 done = term | env.clip_ended(stepped) | (stepped['ep'] >= args.max_episode_steps)
-                return state_where(done, reset, stepped), term.to(torch.float32).mean()
+                return state_where(done, env.reset_for_mask(reset, done), stepped), term.to(torch.float32).mean()
 
         self.collector_transition = (compile_fullgraph(collector_transition)
                                      if args.execution != 'eager' else collector_transition)
@@ -686,7 +686,8 @@ def build_environment(args):
         config['reset'] = dict(profile=args.source_reset_profile,
             motion_start_height_offset_m=args.source_motion_start_height_offset,
             ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
-            ground_adjustment='If any selected frame has a tracked link below zero, subtract each selected frame minimum tracked-link z from its root z', definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
+            ground_adjustment='If any actual simultaneous reset frame has a tracked link below zero, subtract each actual reset frame minimum tracked-link z from its root z',
+            ground_adjustment_batch='Actual reset mask across all motion clips in the single source motion buffer', definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
     if args.terrain_sensor or source_task:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)

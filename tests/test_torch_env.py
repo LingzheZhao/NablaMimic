@@ -102,6 +102,41 @@ class TorchEnvironmentTest(unittest.TestCase):
         torch.testing.assert_close(state['qvel'],env.ref_qvel[frames])
         torch.testing.assert_close(state['qpos'][:,3:],env.ref_qpos[frames,3:])
 
+    def test_source_ground_reset_uses_only_active_rows_without_repeating_fk(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture()
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=.1
+        env.cfg.source_ensure_link_below_zero_ground=True
+        # These frames represent different clips in the same source buffer.
+        env.ref_body_pos[0,:,2]=.04
+        env.ref_body_pos[1,:,2]=-.2
+        frames=torch.tensor([0,1])
+        candidate=env.reset(frames)
+        candidate['xpos'][:,0]=0.
+        original={name:value.clone() for name,value in candidate.items()}
+        active=torch.tensor([True,False])
+        adjusted=env.reset_for_mask(candidate,active)
+        expected=env.reset(frames[:1])
+        torch.testing.assert_close(adjusted['qpos'][:1],expected['qpos'])
+        # Translation invariance of the fixture FK for every moving body and COM.
+        _,positions,rotations,velocities,centers=env.engine_kinematics(
+            adjusted['qpos'],adjusted['qvel'],adjusted['com'])
+        torch.testing.assert_close(adjusted['xpos'][:,1:],positions[:,1:])
+        torch.testing.assert_close(adjusted['subtree_com'],centers)
+        torch.testing.assert_close(adjusted['xpos'][:,0],torch.zeros(2,3))
+        for name in candidate:
+            torch.testing.assert_close(candidate[name],original[name],rtol=0,atol=0)
+            if name not in ('qpos','xpos','subtree_com'):
+                torch.testing.assert_close(adjusted[name],candidate[name],rtol=0,atol=0)
+        # An active negative row preserves the original cross-clip branch.
+        both=env.reset_for_mask(candidate,torch.tensor([True,True]))
+        torch.testing.assert_close(both['qpos'],candidate['qpos'],rtol=0,atol=0)
+        none=env.reset_for_mask(candidate,torch.tensor([False,False]))
+        torch.testing.assert_close(none['qpos'][:,2],env.ref_qpos[frames,2]+.1)
+
     def test_root_position_weight_and_maximum_reward_use_the_same_value(self):
         baseline, _ = fixture(root_position_weight=.5)
         weighted, _ = fixture(root_position_weight=2.)
