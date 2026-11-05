@@ -74,3 +74,42 @@ retain their layout. The critic already observes this position and receives no
 additional copy. With the scan, actor history width is 1010, goal width 716 and
 critic width 932. This condition adds simulator-based target-relative feedback
 to the height-scan controller. It uses N64 H32 with explicit compiled CUDA graphs.
+
+## Selected checkpoint result
+
+The selected 2500-update EMA checkpoint meets this pilot's rule on terrain4 and
+motion_07. With the 77-ray height scan and simulator-based target-relative torso
+position, all twenty starts complete the reference and eighteen meet their own
+world-body and torso error bounds with no observed posture fall. The nominal
+start has mean world-body error 0.05736 m and torso error 0.04153 m. With the same
+EMA weights and constant scans, three starts complete and zero meet the rule.
+The live weights meet the rule on zero starts.
+
+These readings use N128 H32, compiled CUDA graphs and seed 0, with the exact
+[NablaMimic source](https://github.com/LingzheZhao/NablaMimic/tree/1e27f8b)
+and the declared Engine495 environment of the run. The selected weights and
+readings remain attached to update 2500. Later update-3000 readings have their
+own identity. The demonstrated scope is one terrain and one reference with
+height-scan and simulator-relative position observations. Ten-motion coverage
+and the original depth-camera interface require separate implementation and
+measurements.
+
+To reproduce the selected policy's evaluation, use that pinned source and the
+run's pinned dependency environment. Provide the resolved training configuration
+and its bound reference, physical scene and sensor artifacts at the declared
+paths. Evaluate the saved EMA weights with the existing command below. This
+command writes EMA and live results separately. Read the `ema` entries for the
+selected policy. The current development source has additional required task
+parameters, so use the pinned source for this saved configuration.
+
+```bash
+python -m nablamimic.torch_terrain_evaluate \
+  --config "$TRAIN_CONFIG" \
+  --checkpoint "$EMA2500_CHECKPOINT" \
+  --execution batch --starts 20 \
+  --output "$NEW_EVALUATION_ROOT"
+```
+
+For an explicit EMA-only local reference-segment diagnostic, run the later
+research script with its matching source and contracts. Its reset segments have
+a separate interpretation from the complete twenty-start result above.
