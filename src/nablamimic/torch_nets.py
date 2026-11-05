@@ -116,6 +116,21 @@ def actor_apply(actor, history, goal):
     return mlp_apply(actor['dec'], torch.cat((latent, history), dim=-1))
 
 
+def discounted_return_bound(maximum_reward, gamma, maximum_controls):
+    """The native trainer's finite-horizon positive-return magnitude for --v-bound."""
+    if not math.isfinite(maximum_reward) or maximum_reward < 0 or not 0 <= gamma < 1 or maximum_controls < 1:
+        raise ValueError('Value bound requires finite nonnegative reward, gamma in [0,1) and positive horizon')
+    return maximum_reward*(1-gamma**maximum_controls)/(1-gamma)
+
+
+def bootstrap_value(value, bound):
+    """Symmetric native algorithm clip. The lower bound is an algorithm choice."""
+    if bound is None:
+        return value
+    lower,upper=value.new_full((),-bound),value.new_full((),bound)
+    return torch.minimum(torch.maximum(value,lower),upper)
+
+
 def td_lambda(reward, terminated, done, next_value, gamma, lam):
     """[H,N] lambda returns; next_value belongs to the pre-reset next state."""
     following = next_value[-1]

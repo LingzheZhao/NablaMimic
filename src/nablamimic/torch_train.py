@@ -43,7 +43,7 @@ def state_where(done, reset, state):
     return select_reset(done, reset, state)
 
 
-def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True):
+def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True, v_bound=None):
     """One differentiable control step; all objective accumulators stay tensors."""
     def body(actor, critic, cnorm, state, reset, acc, discount, total, reset_age,
              latent, reset_latents, action_noise, proprio_noise, goal_noise, delta, probe):
@@ -77,7 +77,8 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
         terminated = env.terminated(stepped)
         done = terminated | env.clip_ended(stepped) | (stepped['ep'] >= max_episode_steps)
         cobs = env.critic_obs(stepped)
-        value = nets.critic_apply(critic, nets.normalize(cnorm, cobs))[:, 0]
+        raw_value = nets.critic_apply(critic, nets.normalize(cnorm, cobs))[:, 0]
+        value = nets.bootstrap_value(raw_value, v_bound)
         reward = torch.where(torch.isfinite(reward), reward, 0.0)
         value = torch.where(torch.isfinite(value), value, 0.0)
         next_acc = acc + discount * reward
@@ -86,7 +87,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
         next_state = state_where(done, reset, stepped)
         reset_age = torch.where(done, 0, torch.where(reset_age >= 0, reset_age + 1, -1))
         outputs = dict(cobs=cobs.detach(), cobs_pre=env.critic_obs(state).detach(),
-                       r=reward.detach(), term=terminated, done=done, v2=value.detach(),
+                       r=reward.detach(), term=terminated, done=done, v2=value.detach(), v2_raw=raw_value.detach(),
                        frame=stepped['frame'], terms={k: v.detach() for k, v in terms.items()},
                        hist=history.detach().to(torch.bfloat16), goal=goal.detach().to(torch.bfloat16),
                        a_pi=policy_action.detach())
@@ -95,7 +96,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
     return body
 
 
-def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode):
+def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode, v_bound=None):
     """Eager host orchestration around compiled body calls, captured as one graph."""
     def window(start, reset, action_noise, proprio_noise, goal_noise, delta, probe):
         continuous_latents, reset_latents = encode(actor, start['frame'], reset['frame'])
@@ -113,10 +114,13 @@ def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode):
                                   proprio_noise[0, t]), goal_noise[t], delta[t], probe)
             records.append(row)
         state, acc, discount, total, _ = carry
-        last_value = nets.critic_apply(critic, nets.normalize(cnorm, env.critic_obs(state)))[:, 0]
+        last_value_raw = nets.critic_apply(critic, nets.normalize(cnorm, env.critic_obs(state)))[:, 0]
+        last_value = nets.bootstrap_value(last_value_raw, v_bound)
         objective = -(total + acc + discount * torch.where(torch.isfinite(last_value), last_value, 0.0)).mean()
         gradients, clip_statistics = torch.autograd.grad(objective, (delta, probe))
         outputs = nets.tree_map(lambda *rows: torch.stack(rows), *records)
+        outputs['window_value_raw'] = last_value_raw.detach()
+        outputs['window_value_used'] = last_value.detach()
         return objective.detach(), gradients.detach(), clip_statistics.detach()/horizon, outputs
     return window
 
@@ -176,6 +180,7 @@ class TorchTrainer:
         self.device = env.device
         self.n, self.nc, self.h = args.num_envs, args.collect_envs or args.num_envs, args.horizon
         self.m = self.n*self.h
+        self.value_bound = nets.discounted_return_bound(env.max_reward,args.gamma,args.max_episode_steps) if args.v_bound else None
         self.actor_params = nets.actor_trainable(actor)
         self.actor_opt, self.critic_opt = nets.adam_init(self.actor_params), nets.adam_init(critic)
         self.ema, self.ema_count = nets.init_policy_ema(actor)
@@ -217,10 +222,10 @@ class TorchTrainer:
             return sequence(frames), sequence(reset_frames)
 
         body = make_control_body(env, args.gamma, args.max_episode_steps, args.act_cot_clip,
-                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot')
+                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot', v_bound=self.value_bound)
         self.body = compile_fullgraph(body) if args.execution != 'eager' else body
         self.encode = compile_fullgraph(encode) if args.execution != 'eager' else encode
-        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode)
+        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode, self.value_bound)
         self.target_fn = lambda a, g: nets.action_targets(
             a, g, env.action_scale, args.action_target[2], args.act_cot_clip,
             outer_step=self.outer_step, decay_steps=args.lr_decay_steps,
@@ -271,7 +276,7 @@ class TorchTrainer:
                 fn(*inputs)
         self.reset_setup_state()
         torch.cuda.synchronize()
-        self.setup_record = dict(seconds=time.monotonic()-setup_started, execution=args.execution,
+        self.setup_record = dict(bootstrap_bound=self.value_bound, seconds=time.monotonic()-setup_started, execution=args.execution,
                                  compilation_scope='per-control differentiable body, encoder, targets, TD, optimizers, collector transition, statistics; collector commits are separate captured kernels',
                                  graph_scope=f'complete {self.h}-step forward/backward and separate reusable update/collector/statistics graphs',
                                  graphs={name: graph.record for name, graph in self.graphs.items()},
@@ -452,6 +457,10 @@ class TorchTrainer:
             target_setpoint_change=numerical_range(
                 (self.target_data['targets']-self.training_data['a_pi'])*self.env.action_scale),
             critic_target=numerical_range(self.critic_targets),
+            bootstrap_raw=numerical_range(self.training_data['v2_raw']),
+            bootstrap_used=numerical_range(self.training_data['v2']),
+            window_bootstrap_raw=numerical_range(self.training_data['window_value_raw']),
+            window_bootstrap_used=numerical_range(self.training_data['window_value_used']),
             cnorm_mean=numerical_range(self.cnorm[0]),
             cnorm_std=numerical_range(torch.sqrt(self.cnorm[1]+1.e-5)),
             collector_qpos=numerical_range(self.collector['qpos']),
@@ -566,7 +575,7 @@ def validate_args(args):
         raise ValueError("Future reference stride must be positive")
     if args.physics!='engine' or not args.policy_ema or args.mask_after_done or not args.no_remat:
         raise ValueError('Torch path currently implements the unmasked, no-rematerialization EMA Engine recipe')
-    if args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
+    if args.shac_strict or args.actor_obs_norm or args.clip_end_boot!='next':
         raise ValueError('Unsupported recipe variant')
     if (args.task_inputs == 'heightscan_pilot' and (not args.anchor_to_decoder or args.enc_hoist!='on')) or not args.critic_pre_state:
         raise ValueError('Current-paper anchor/encoder-hoist/pre-state-critic settings required')
