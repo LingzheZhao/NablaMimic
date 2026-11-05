@@ -136,7 +136,7 @@ def process_clip(m, raw, fps_out=50.0, fps_in=30.0, bodies=TRACKED_BODIES):
         body_pos[i] = d.xpos[body_ids]
         body_quat[i] = d.xquat[body_ids]
         for k, b in enumerate(body_ids):
-            mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_BODY, b, res, 0)
+            mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_XBODY, b, res, 0)
             body_vel[i, k] = res  # [angular, linear], world frame, at the body origin
     return qpos, qvel, body_pos, body_quat, body_vel[..., 3:], body_vel[..., :3]
 

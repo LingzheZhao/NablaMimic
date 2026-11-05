@@ -101,7 +101,7 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance):
         mujoco.mj_comVel(target, td)
         body_pos[i], body_quat[i] = td.xpos[target_ids], td.xquat[target_ids]
         for k, body in enumerate(target_ids):
-            mujoco.mj_objectVelocity(target, td, mujoco.mjtObj.mjOBJ_BODY, body, body_vel[i, k], 0)
+            mujoco.mj_objectVelocity(target, td, mujoco.mjtObj.mjOBJ_XBODY, body, body_vel[i, k], 0)
     pos_error = np.linalg.norm(body_pos-source_body_pos, axis=-1).max(axis=0)
     ori_error = 2*np.arccos(np.clip(np.abs((body_quat*source_body_quat).sum(-1)), 0, 1)).max(axis=0)
     if pos_error.max() > position_tolerance or ori_error.max() > 1e-6:
@@ -169,7 +169,8 @@ def main():
     binding = dict(source_root='torso_link', target_root='pelvis', quaternion='WXYZ',
                    source_model_joint_order=source_names, target_joint_order=target_names,
                    joint_mapping=[dict(target=n, source=n, sign=-1 if n.startswith('waist_') else 1) for n in target_names],
-                   root_mapping='MuJoCo source FK pelvis world pose', position_tolerance_m=args.fk_position_tolerance,
+                   root_mapping='MuJoCo source FK pelvis world pose',
+                   body_linear_velocity='World velocity of xpos body origin, mj_objectVelocity(mjOBJ_XBODY)', position_tolerance_m=args.fk_position_tolerance,
                    orientation_tolerance_rad=1e-6,
                    world_translation_m=args.world_translation,
                    terrain_alignment='Translation applies to motion only to match the generated terrain tile. CoACD top-surface alignment changes collision hulls only, never motion z.',
