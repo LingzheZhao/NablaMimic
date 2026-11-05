@@ -34,3 +34,31 @@ class OfficialSourcePolicy(nn.Module):
         normalized = (raw - self.mean) / (self.std + .01)
         depth = normalized[:, 670:1246].reshape(-1, 1, 18, 32)
         return self.actor(torch.cat((normalized[:, :670], normalized[:, 1246:], self.encoder(depth)), -1))
+
+
+def native_actor_from_official(checkpoint, device):
+    """Initialize the current trainable native actor from the explicit release schema.
+
+    Native normalization owns variance. It intentionally derives its standard
+    deviation from that variance, while the frozen reader uses stored _std.
+    """
+    from .perceptive_task_inputs import source_actor_init
+
+    actor = source_actor_init(device)
+    official = OfficialSourcePolicy(checkpoint).to(device)
+    for destination, source in ((0, 0), (2, 2)):
+        for name in ('weight', 'bias'):
+            actor['enc'][f'convolutions.{destination}.{name}'].copy_(
+                getattr(official.encoder[source], name))
+    for destination, source in ((0, 5), (2, 7)):
+        for name in ('weight', 'bias'):
+            actor['enc'][f'head.{destination}.{name}'].copy_(
+                getattr(official.encoder[source], name))
+    for (weight, bias), index in zip(actor['dec'], (0, 2, 4, 6)):
+        weight.copy_(official.actor[index].weight.T)
+        bias.copy_(official.actor[index].bias)
+    normalization = checkpoint['policy_normalizer_state_dict']
+    actor['source_norm']['mean'].copy_(normalization['_mean'].reshape(1990))
+    actor['source_norm']['variance'].copy_(normalization['_var'].reshape(1990))
+    actor['source_norm']['count'].copy_(normalization['count'])
+    return actor

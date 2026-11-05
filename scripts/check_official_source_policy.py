@@ -9,7 +9,8 @@ import sys
 
 import torch
 
-from nablamimic.official_source_policy import OfficialSourcePolicy
+from nablamimic.official_source_policy import OfficialSourcePolicy, native_actor_from_official
+from nablamimic.perceptive_task_inputs import source_actor_apply
 
 
 def main():
@@ -17,6 +18,7 @@ def main():
     parser.add_argument('--upstream', type=Path, required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--observations',type=Path,help='Optional .npy raw source observations [B,1990], including nominal states')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     sys.path.insert(0, str(args.upstream))
@@ -48,6 +50,8 @@ def main():
     reader = OfficialSourcePolicy(checkpoint)
     torch.manual_seed(0)
     errors = []
+    native_errors=[]
+    native=native_actor_from_official(checkpoint,'cpu')
     with torch.no_grad():
         for batch in (1, 3, 8):
             raw = torch.randn(batch, 1990)
@@ -55,7 +59,21 @@ def main():
             expected = original.act_inference(normalizer(raw))
             actual = reader(history_depth, raw[:, :670])
             errors.append(float((expected - actual).abs().max()))
-    result = dict(batch_sizes=[1, 3, 8], maximum_absolute_errors=errors,
+            native_errors.append(float((actual-source_actor_apply(native,history_depth,raw[:,:670])).abs().max()))
+    nominal_error=None
+    if args.observations:
+        import numpy as np
+        raw=torch.from_numpy(np.load(args.observations)).float()
+        if raw.ndim!=2 or raw.shape[1]!=1990:
+            raise ValueError('Raw source observations must have shape [B,1990]')
+        history_depth=torch.cat((raw[:,1246:],raw[:,670:1246]),-1)
+        with torch.no_grad():
+            nominal_error=float((reader(history_depth,raw[:,:670])-source_actor_apply(native,history_depth,raw[:,:670])).abs().max())
+    result = dict(native_initialization_random_maximum_absolute_errors=native_errors,
+                  nominal_observations_path=str(args.observations) if args.observations else None,
+                  nominal_initialization_maximum_absolute_error=nominal_error,
+                  stored_std_vs_sqrt_variance_absolute_max=float((reader.std-checkpoint['policy_normalizer_state_dict']['_var'].sqrt()).abs().max()),
+                  batch_sizes=[1, 3, 8], maximum_absolute_errors=errors,
                   matches=all(error <= 1e-6 for error in errors),
                   normalization='stored standard deviation plus .01',
                   actor_input_order=['goal', 'history', 'depth_feature'])

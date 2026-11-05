@@ -558,6 +558,7 @@ def build_parser():
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
     parser.add_argument("--actor-checkpoint", type=Path)
+    parser.add_argument("--official-actor-checkpoint", type=Path)
     parser.add_argument("--actor-weights", choices=("ema", "live"))
     parser.add_argument("--actor-anchor-position", action="store_true")
     parser.add_argument("--action-limit", type=float, default=None)
@@ -571,8 +572,10 @@ def validate_args(args):
         raise ValueError("Source reset height offset must be finite")
     if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
         raise ValueError("Source perceptive task requires its scene-bound sharded library")
-    if sum(bool(value) for value in (args.actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
+    if sum(bool(value) for value in (args.actor_checkpoint, args.official_actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
         raise ValueError("Actor initialization, matched initialization and full resume are mutually exclusive")
+    if args.official_actor_checkpoint and (args.task_inputs != 'instinct_perceptive_native' or args.residual_action):
+        raise ValueError("Official actor initialization requires the source task with absolute actions")
     if bool(args.actor_checkpoint) != bool(args.actor_weights):
         raise ValueError("Actor checkpoint and its explicit EMA/live selection are required together")
     if args.future_stride < 1:
@@ -766,6 +769,30 @@ def main(argv=None):
         config['actor_initialization'] = dict(checkpoint_path=str(args.actor_checkpoint),
             completed_updates=source_actor['completed_updates'], weights=args.actor_weights,
             remaining_state='fresh critic, optimizer, normalizer, replay, collector and EMA counters')
+        write_json(output/'config.json', config)
+    if args.official_actor_checkpoint:
+        from .official_source_policy import native_actor_from_official
+        official = torch.load(args.official_actor_checkpoint, map_location=env.device, weights_only=True)
+        selected_actor = native_actor_from_official(official, env.device)
+        nets.copy_tree_(actor, selected_actor)
+        normalization = official['policy_normalizer_state_dict']
+        from .official_source_policy import OfficialSourcePolicy
+        with torch.no_grad():
+            nominal_frames=torch.as_tensor(env.starts,device=env.device,dtype=torch.int32)
+            zero_noise={name:torch.zeros_like(value) for name,value in env.sample_reset_noise(len(nominal_frames)).items()}
+            nominal_state=env.reset(nominal_frames,zero_noise)
+            nominal_history,nominal_goal=env.policy_obs(nominal_state,torch.zeros(len(nominal_frames),670,device=env.device))
+            frozen=OfficialSourcePolicy(official).to(env.device)
+            nominal_difference=float((frozen(nominal_history,nominal_goal)-nets.actor_apply(actor,nominal_history,nominal_goal)).abs().max())
+        config['actor_initialization'] = dict(
+            checkpoint_path=str(args.official_actor_checkpoint), iteration=int(official['iter']),
+            weights='official deterministic actor mean',
+            nominal_start_output_absolute_max_difference=nominal_difference,
+            comparison_inputs='Each clip start, zero reset and goal noise, configured camera noise sampled once and shared by both actors',
+            normalization='Native mean/variance/count initialized from official buffers; native uses sqrt(variance)+.01',
+            stored_std_vs_sqrt_variance_absolute_max=float(
+                (normalization['_std']-normalization['_var'].sqrt()).abs().max()),
+            remaining_state='fresh critic, critic normalizer, optimizer, replay, collector, seeded RNG and EMA counters')
         write_json(output/'config.json', config)
     started=time.monotonic()
     try:
