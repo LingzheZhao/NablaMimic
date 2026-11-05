@@ -80,6 +80,25 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(first).all()))
         self.assertTrue(bool(((first>=0)&(first<=1)).all()))
 
+    def test_source_image_input_stops_gradient_while_encoder_and_physical_inputs_train(self):
+        torch.manual_seed(4)
+        actor=source_actor_init('cpu')
+        for parameter in nets.tree_leaves(nets.actor_trainable(actor)):
+            parameter.requires_grad_()
+        history=torch.rand(2,744,requires_grad=True)
+        depth=torch.rand(2,576,requires_grad=True)
+        goal=torch.rand(2,670,requires_grad=True)
+        policy_history=torch.cat((history,depth),-1)
+        output=source_actor_apply(actor,policy_history,goal)
+        inputs=(depth,history,goal,actor['enc']['convolutions.0.weight'])
+        image_gradient,history_gradient,goal_gradient,encoder_gradient=torch.autograd.grad(
+            output.square().mean(),inputs,allow_unused=True)
+        if image_gradient is not None:
+            torch.testing.assert_close(image_gradient,torch.zeros_like(depth),rtol=0,atol=0)
+        self.assertGreater(float(history_gradient.abs().sum()),0)
+        self.assertGreater(float(goal_gradient.abs().sum()),0)
+        self.assertGreater(float(encoder_gradient.abs().sum()),0)
+
     def test_term_major_history_and_actor_encoder_gradient(self):
         goal = torch.zeros(2,670)
         depth = torch.ones(2,1,18,32)*.5
