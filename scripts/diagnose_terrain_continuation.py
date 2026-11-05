@@ -25,17 +25,21 @@ def main():
         inputs = original_window(trainer)
         if trainer.completed_updates+1 in selected:
             trainer.diagnostic_window = torch_train.clone_tree(inputs)
+            trainer.diagnostic_before = torch_train.clone_tree(dict(
+                actor=trainer.actor, critic=trainer.critic, cnorm=trainer.cnorm))
         return inputs
     def update(trainer):
         metrics = original_update(trainer)
         if trainer.completed_updates in selected:
             torch.save(dict(metrics=metrics, window_inputs=trainer.diagnostic_window,
+                before_window=trainer.diagnostic_before,
                 training_data=trainer.training_data, target_data=trainer.target_data,
                 critic_targets=trainer.critic_targets, cnorm=trainer.cnorm,
                 actor=trainer.actor, critic=trainer.critic,
                 actor_optimizer=trainer.actor_opt, critic_optimizer=trainer.critic_opt),
                 args.diagnostics/f'update_{trainer.completed_updates:06d}.pt')
             del trainer.diagnostic_window
+            del trainer.diagnostic_before
         return metrics
     torch_train.TorchTrainer.window_inputs = window_inputs
     torch_train.TorchTrainer.update = update
