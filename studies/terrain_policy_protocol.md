@@ -109,7 +109,3 @@ python -m nablamimic.torch_terrain_evaluate \
   --execution batch --starts 20 \
   --output "$NEW_EVALUATION_ROOT"
 ```
-
-For an explicit EMA-only local reference-segment diagnostic, run the later
-research script with its matching source and contracts. Its reset segments have
-a separate interpretation from the complete twenty-start result above.
