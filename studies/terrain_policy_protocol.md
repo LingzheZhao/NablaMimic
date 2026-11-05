@@ -22,7 +22,9 @@ error at most 0.10 m within each passing trial. Each trial receives its own deci
 before counting the eighteen required passing trials. Partial trials retain their actual
 time support and errors. Tracking termination and the task-specific posture-fall reading are separate.
 A posture fall is pelvis up-dot below 0.5 or world pelvis height below 0.25 m
-for at least 0.2 seconds continuously. Tracking termination that truncates this
+for at least 0.2 seconds continuously, measured as eleven consecutive 50 Hz
+state samples spanning ten intervals, including the terminal state. An observed
+posture fall excludes that trial from the working-policy count. Tracking termination that truncates this
 support leaves the posture-fall result unavailable. This upright jumpsit rule
 measures posture. The seat interval from 4.5 to 5.5 seconds reports torso/pelvis
 world errors and ankle world heights without additional passing thresholds.

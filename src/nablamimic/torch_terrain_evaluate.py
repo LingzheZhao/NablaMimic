@@ -8,6 +8,19 @@ import torch
 from . import torch_nets as nets
 
 
+def posture_fall(updot, height, reference_complete):
+    """Classify >=0.2 s observed bad posture at 50 Hz, including terminal state."""
+    bad = (np.asarray(updot) < .5) | (np.asarray(height) < .25)
+    run = 0
+    for value in bad:
+        run = run + 1 if value else 0
+        if run >= 11:  # Eleven state samples span ten 20 ms intervals.
+            return True
+    if not reference_complete and (len(bad) < 11 or run > 0):
+        return 'unavailable_truncated_before_0.2s'
+    return False
+
+
 def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=None):
     """Execute one nominal physical chain, ending at tracking termination or clip end.
 
@@ -29,9 +42,6 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
         reset_noise['rotation'][:] = reset_pose['rotation_rad'] / env.reset_rotation_limits
     state = env.reset(frame, reset_noise)
     rows = []
-    posture_run = 0
-    posture_observed = False
-    posture_pending = False
     reason = 'requested_controls'
     with torch.no_grad():
         for control in range(maximum_controls):
@@ -48,9 +58,6 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
             world_error = torch.linalg.vector_norm(physical_body-reference_body, dim=-1)
             q = state['qpos'][0]
             updot = 1 - 2*(q[4]**2 + q[5]**2)
-            posture_pending = bool((updot < .5) | (q[2] < .25))
-            posture_run = posture_run + 1 if posture_pending else 0
-            posture_observed = posture_observed or posture_run >= 10
             pelvis_index = 0
             ankle_indices = [i for i, name in enumerate(env.perception_body_names) if 'ankle_roll' in name]
             rows.append(dict(pelvis_updot=float(updot.item()), pelvis_height_m=float(q[2].item()),
@@ -67,25 +74,28 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
                 break
     terminal_error = torch.linalg.vector_norm(
         state['xpos'][:, env.body_ids]-env.ref_body_pos[state['frame']], dim=-1)[0].cpu().numpy()
+    final_qpos = state['qpos'][0].cpu().numpy()
+    posture_qpos = np.stack([row['qpos'] for row in rows] + [final_qpos])
+    posture_updot = 1-2*(posture_qpos[:, 4]**2+posture_qpos[:, 5]**2)
+    posture_height = posture_qpos[:, 2]
+    posture_result = posture_fall(posture_updot, posture_height, reason == 'reference_complete')
     if rows:
         np.savez(output/'trajectory.npz', **{key: np.array([row[key] for row in rows]) for key in rows[0]},
                  final_qpos=state['qpos'].cpu().numpy(), final_qvel=state['qvel'].cpu().numpy(),
                  final_frame=state['frame'].cpu().numpy(), final_world_body_error_m=terminal_error,
-                 final_body_position=state['xpos'][:, env.body_ids].cpu().numpy())
+                 final_body_position=state['xpos'][:, env.body_ids].cpu().numpy(),
+                 posture_updot=posture_updot, posture_height_m=posture_height)
     report = dict(controls=len(rows), requested_controls=maximum_controls,
                   start_frame=start_frame, stop_reason=reason, perception=env.perception_contract,
                   control_hz=50, stochastic_action_noise=0, posture_fall='unobserved')
-    if posture_observed:
-        report['posture_fall'] = True
-    elif reason == 'tracking_termination' and (posture_pending or len(rows) < 10):
-        report['posture_fall'] = 'unavailable_truncated_before_0.2s'
-    else:
-        report['posture_fall'] = False
+    report['posture_fall'] = posture_result
+    report['posture_states'] = len(posture_qpos)
     if rows:
         report['mean_world_body_error_m'] = float(np.mean([row['world_body_error_m'].mean() for row in rows] + [terminal_error.mean()]))
         report['mean_torso_error_m'] = float(np.mean([row['torso_error_m'] for row in rows] + [terminal_error[env.anchor_k]]))
         report['passing_trial'] = (reason == 'reference_complete' and
-            report['mean_world_body_error_m'] <= .10 and report['mean_torso_error_m'] <= .10)
+            report['mean_world_body_error_m'] <= .10 and report['mean_torso_error_m'] <= .10
+            and posture_result is False)
         seated = [row for row in rows if 4.5 <= row['frame']/50 <= 5.5]
         report['seat_interval'] = dict(requested_s=[4.5, 5.5], controls=len(seated))
         for key in ('torso_error_m', 'pelvis_error_m', 'ankle_height_m'):
