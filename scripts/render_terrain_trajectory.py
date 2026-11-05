@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--code-revision', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--ffmpeg', type=Path, help='Explicit executable from the pinned encoder artifact')
     parser.add_argument('--camera', choices=('follow', 'fixed'), default='follow')
     parser.add_argument('--distance', type=float, default=4.0)
     parser.add_argument('--azimuth', type=float, default=135.0)
@@ -46,6 +47,8 @@ def main():
         parser.error('Positive even dimensions and a positive camera distance are required')
     args.trajectory = args.trajectory.resolve()
     args.model = args.model.resolve()
+    if args.ffmpeg is not None:
+        args.ffmpeg = args.ffmpeg.resolve()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     status = dict(state='started', code_revision=args.code_revision,
@@ -110,7 +113,9 @@ def main():
         centers = np.asarray(centers)
         camera.lookat[:] = (centers.min(0) + centers.max(0)) / 2
         camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(centers, axis=0))) + 3)
-    ffmpeg = shutil.which('ffmpeg')
+    if args.ffmpeg is not None and not (args.ffmpeg.is_file() and os.access(args.ffmpeg, os.X_OK)):
+        raise ValueError('The explicitly selected ffmpeg must be an executable file')
+    ffmpeg = str(args.ffmpeg) if args.ffmpeg is not None else shutil.which('ffmpeg')
     status.update(control_hz=control_hz, states=len(poses), reference_frames=reference_frames.tolist(),
                   stop_reason=result['stop_reason'], posture_fall=result['posture_fall'],
                   mujoco_version=mujoco.__version__, mujoco_gl=os.environ['MUJOCO_GL'],
