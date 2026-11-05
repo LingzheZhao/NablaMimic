@@ -632,7 +632,8 @@ def build_environment(args):
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
-        root_position_weight=args.root_position_weight), model=model)
+        root_position_weight=args.root_position_weight), model=model,
+        source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']

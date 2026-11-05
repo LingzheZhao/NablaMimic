@@ -116,14 +116,21 @@ class TorchTrackingEnv:
             ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel", "root_ori")))
 
 
-    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, model=None):
+    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, model=None, source_parameters=None):
         # These routines construct CPU model constants / NumPy reference features.
         # They do not construct TrackingEnv or an MJX runtime state.
         import mujoco
         from .env import ANCHOR, BM_BODIES, Q0, TrackingEnv, build_model
         if tuple(lib.bodies) != BM_BODIES:
             raise ValueError("Reference body order must be the current G1 tracking body order")
-        model, kp = build_model(cfg, model=model)
+        if source_parameters is None:
+            model, kp = build_model(cfg, model=model)
+        else:
+            if model is None:
+                raise ValueError('Source actuator binding requires the prepared physical model')
+            kp = np.array(model.actuator_gainprm[:, 0], copy=True)
+            if not np.isfinite(kp).all() or (kp <= 0).any():
+                raise ValueError('Source position actuator gains must be finite and positive')
         model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_SENSOR)
         q0 = np.zeros(model.nu)
         for i in range(model.nu):
@@ -131,11 +138,20 @@ class TorchTrackingEnv:
             for key, value in Q0.items():
                 if key in name:
                     q0[i] = value
+        if source_parameters is not None:
+            q0 = np.asarray(source_parameters['default_joint_position'], dtype=np.float32)
+            if q0.shape != (model.nu,) or not np.isfinite(q0).all():
+                raise ValueError('Source default positions must bind every actuator')
         effort = np.array([model.jnt_actfrcrange[model.actuator_trnid[i, 0], 1] for i in range(model.nu)])
         ranges = np.array([model.jnt_range[model.actuator_trnid[i, 0]] for i in range(model.nu)])
         mid, half = ranges.mean(1), 0.5 * (ranges[:, 1]-ranges[:, 0]) * 0.9
+        action_scale = 0.25*effort/kp
+        if source_parameters is not None:
+            action_scale = np.asarray(source_parameters['action_scale'], dtype=np.float32)
+            if action_scale.shape != (model.nu,) or not np.isfinite(action_scale).all() or (action_scale <= 0).any():
+                raise ValueError('Source action scales must be finite, positive and in actuator order')
         prepared = SimpleNamespace(
-            m=model, cfg=cfg, nu=model.nu, q0=q0, action_scale=0.25*effort/kp,
+            m=model, cfg=cfg, nu=model.nu, q0=q0, action_scale=action_scale,
             ctrl_lo=model.actuator_ctrlrange[:, 0], ctrl_hi=model.actuator_ctrlrange[:, 1],
             soft_lo=mid-half, soft_hi=mid+half,
             body_ids=np.array([model.body(name).id for name in BM_BODIES]), anchor_k=BM_BODIES.index(ANCHOR),
