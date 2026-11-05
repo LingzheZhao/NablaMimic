@@ -6,7 +6,7 @@ pose derivatives. The trainable CNN receives native actor-regression gradients.
 import torch
 
 from .perceptive_task_inputs import (SOURCE_CAMERA_POSITION, SOURCE_CAMERA_QUATERNION_WXYZ,
-                                     source_depth_image, source_raw_camera_rays)
+                                     source_optical_depth, source_processed_depth, source_raw_camera_rays)
 from .torch_env import TorchTrackingEnv, gravity_b, quat_inv, quat_mul, quat_rotate, quat_to_matrix
 
 
@@ -63,13 +63,13 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         local = self.camera_rays.flatten(0, 1)
         directions = quat_rotate(local[None], camera_q[:, None])
         origins = origin[:, None].expand_as(directions)
-        ranges, _ = self.depth_geometry.raycast(state['xpos'], state['xquat'], origins, directions,
+        ranges, geometry_ids = self.depth_geometry.raycast(state['xpos'], state['xquat'], origins, directions,
                                                max_distance=1.e6, min_distance=.05, max_hops=24)
         raw_range = ranges.reshape(-1, 27, 48)
+        optical=source_optical_depth(raw_range,self.camera_rays,geometry_ids.reshape(-1,27,48))
         if self.camera_noise is not None:
-            optical = raw_range*self.camera_rays[...,0]
             return self.camera_noise.noised(optical[...,None])
-        return source_depth_image(raw_range, self.camera_rays)
+        return source_processed_depth(optical)
 
     def policy_obs(self, state, goal_noise=None):
         history = state['hist'][:, -8:]

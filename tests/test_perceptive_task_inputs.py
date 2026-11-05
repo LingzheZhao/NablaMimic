@@ -67,6 +67,24 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         output=source_actor_apply(actor,history,torch.zeros(1,670))
         self.assertAlmostEqual(float(output[0,0]),2.,places=5)
 
+    def test_source_miss_depth_is_fixed_before_contour_noise(self):
+        from nablamimic.perceptive_task_inputs import source_optical_depth,source_processed_depth
+        from nablamimic.source_depth_noise import SourceDepthNoise
+        rays=source_raw_camera_rays('cpu')
+        ranges=torch.full((1,27,48),1.e6)
+        ids=torch.full((1,27,48),-1,dtype=torch.int64)
+        optical=source_optical_depth(ranges,rays,ids)
+        torch.testing.assert_close(optical,ranges,rtol=0,atol=0)
+        contour=SourceDepthNoise('cpu').contour_mask(optical)
+        self.assertFalse(bool(contour[:,2:-2,2:-2].any()))
+        torch.testing.assert_close(source_processed_depth(optical),source_depth_image(ranges,rays))
+        ranges[:,10:14,20:24]=1.
+        ids[:,10:14,20:24]=4
+        optical=source_optical_depth(ranges,rays,ids)
+        torch.testing.assert_close(optical[:,10:14,20:24],rays[10:14,20:24,0][None])
+        torch.testing.assert_close(optical[ids<0],torch.full_like(optical[ids<0],1.e6))
+        torch.testing.assert_close(source_processed_depth(optical),source_depth_image(ranges,rays))
+
     def test_camera_optical_distance_and_constant_image(self):
         rays = source_raw_camera_rays('cpu')
         torch.testing.assert_close(torch.linalg.vector_norm(rays, dim=-1), torch.ones(27,48))

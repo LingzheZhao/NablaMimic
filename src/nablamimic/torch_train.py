@@ -670,7 +670,8 @@ def build_environment(args):
             physical_scene_artifact_id=model_contract['artifact_id'],
             terrain_artifact_id=model_contract['terrain_artifact_id'],
             physical_frame=model_contract['frame'],
-            geometry_groups=[0,2], root_body='torso_link')
+            geometry_groups=[0,2], root_body='torso_link',
+            miss_optical_depth_m=1.e6, miss_conversion='negative geometry ID sets fixed far optical depth before noise')
     elif args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']

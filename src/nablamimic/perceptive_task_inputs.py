@@ -65,6 +65,18 @@ class SourceDepthEncoder(torch.nn.Module):
         return self.head(self.convolutions(depth).flatten(1))
 
 
+def source_optical_depth(ray_range, local_unit_directions, geometry_ids):
+    """Source miss pixels retain fixed far depth after optical-axis conversion."""
+    optical=ray_range*local_unit_directions[...,0]
+    return torch.where(geometry_ids < 0, torch.full_like(optical,1.e6),optical)
+
+
+def source_processed_depth(optical_depth):
+    normalized=optical_depth.clamp(0.,2.)/2.
+    return F.interpolate(normalized[:,None,2:-2,2:-2],size=(18,32),
+                         mode='bilinear',align_corners=False)
+
+
 def source_depth_image(ray_range, local_unit_directions):
     """Convert raw ranges into the deterministic processed source image.
 
@@ -72,9 +84,7 @@ def source_depth_image(ray_range, local_unit_directions):
     The image-plane depth uses each unit ray's local forward component.
     """
     optical_depth = ray_range*local_unit_directions[..., 0]
-    normalized = optical_depth.clamp(0., 2.)/2.
-    return F.interpolate(normalized[:, None, 2:-2, 2:-2], size=(18, 32),
-                         mode='bilinear', align_corners=False)
+    return source_processed_depth(optical_depth)
 
 
 def source_actor_init(device):
