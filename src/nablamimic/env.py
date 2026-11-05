@@ -70,6 +70,8 @@ class EnvConfig:
     reset_noise: bool = True
     term_height: float = 0.25
     term_tilt: float = 0.8
+    future_stride: int = 1
+    reference_root_displacement: bool = False
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions

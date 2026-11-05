@@ -1,0 +1,3 @@
+# Reference torso displacements over the upstream task's 0.9-second future window.
+@terrain_heightscan_learning.args
+--future-stride 5 --reference-root-displacement

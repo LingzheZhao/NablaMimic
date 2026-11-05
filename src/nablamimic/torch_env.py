@@ -156,6 +156,10 @@ class TorchTrackingEnv:
         self.cfg = reference.cfg
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
             raise ValueError("action_rate_space must be setpoint or raw")
+        if type(self.cfg.future_stride) is not int or self.cfg.future_stride < 1:
+            raise ValueError("future_stride must be a positive integer number of controls")
+        if type(self.cfg.reference_root_displacement) is not bool:
+            raise ValueError("reference_root_displacement must be boolean")
         self.perception_contract = {"sensor": "none", "width": 0}
         self.terrain = None
         self.m = reference.m
@@ -188,9 +192,10 @@ class TorchTrackingEnv:
         if tuple(self.body_ids.shape) != (14,):
             raise ValueError("Exactly 14 current tracking body IDs are required")
         self.valid = torch.arange(self.n_frames, device=self.device) < self.ref_last
-        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM, FUTURE*GOAL_FRAME_DIM+6, 1+self.nu+3
+        frame_dim = GOAL_FRAME_DIM + 3*int(self.cfg.reference_root_displacement)
+        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM, FUTURE*frame_dim+6, 1+self.nu+3
         self.critic_dim = PROPRIO_DIM + 9 + self.goal_dim + 4 + self.xi_dim
-        self.future_offsets = torch.arange(FUTURE, dtype=torch.int32, device=self.device)
+        self.future_offsets = self.cfg.future_stride*torch.arange(FUTURE, dtype=torch.int32, device=self.device)
         self.noise_limits = torch.tensor([0.01]*self.nu + [0.5/5.0]*self.nu + [0.2/2.0]*3
                                          + [0.05]*3 + [0.0]*self.nu, device=self.device, dtype=torch.float32)
         self.reset_position_limits = torch.tensor([0.05, 0.05, 0.01], device=self.device, dtype=torch.float32)
@@ -234,9 +239,36 @@ class TorchTrackingEnv:
         rotation = quat_to_matrix(quat_mul(quat_inv(ra_q), ma_q))
         return torch.cat((position, rotation[..., :, 0], rotation[..., :, 1]), -1)
 
+    @property
+    def observation_contract(self):
+        return dict(control_dt_s=DT, history_frames=HIST, proprioception_frame_dim=PROPRIO_DIM,
+                    history_dim=self.hist_dim, goal_dim=self.goal_dim, critic_dim=self.critic_dim,
+                    reference_frames=FUTURE, future_stride=self.cfg.future_stride,
+                    reference_time_offsets_s=[i*self.cfg.future_stride*DT for i in range(FUTURE)],
+                    reference_end_rule="Clamp each requested frame to the current clip's last frame",
+                    reference_frame_dim=GOAL_FRAME_DIM+3*int(self.cfg.reference_root_displacement),
+                    reference_feature_order=["joint_position_minus_default_29", "joint_velocity_scaled_29",
+                        "pelvis_projected_gravity_3", "pelvis_angular_velocity_scaled_3",
+                        "pelvis_heading_frame_linear_velocity_3", "pelvis_world_height_1"] +
+                        (["reference_torso_displacement_in_current_reference_torso_frame_3"]
+                         if self.cfg.reference_root_displacement else []),
+                    reference_root_displacement=self.cfg.reference_root_displacement,
+                    reference_root_body="torso_link",
+                    reference_root_displacement_definition=
+                        "Inverse full current reference torso rotation applied to future reference torso position minus current reference torso position",
+                    dynamic_anchor="Current reference torso rotation relative to physical torso, first two matrix columns",
+                    dynamic_anchor_dim=6)
+
     def goal_ref(self, frame):
         index = torch.minimum(frame[:, None]+self.future_offsets, self.ref_last[frame, None])
-        return self.goal_feat[index].flatten(1)
+        features = self.goal_feat[index]
+        if self.cfg.reference_root_displacement:
+            current_position = self.ref_body_pos[frame, self.anchor_k]
+            current_rotation = self.ref_body_quat[frame, self.anchor_k]
+            displacement = self.ref_body_pos[index, self.anchor_k]-current_position[:, None]
+            displacement = quat_rotate(displacement, quat_inv(current_rotation)[:, None])
+            features = torch.cat((features, displacement), -1)
+        return features.flatten(1)
 
     def goal(self, state, noise=None):
         anchor = self.anchor_rel(state)[..., 3:9]

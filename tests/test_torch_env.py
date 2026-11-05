@@ -14,8 +14,9 @@ from nablamimic.torch_env import (COMPACT_KEYS, STATE_KEYS, TorchTrackingEnv, ab
                                  quat_angle_sq, quat_mul, quat_rotate, quat_to_matrix, select_reset)
 
 
-def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
-    frames, bodies = 12, 14
+def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
+            future_stride=1, reference_root_displacement=False, frames=12):
+    bodies = 14
     qpos = np.zeros((frames, 36), np.float32)
     qpos[:, 2], qpos[:, 3] = 1, 1
     qvel = np.zeros((frames, 35), np.float32)
@@ -25,14 +26,15 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
     quaternions = np.zeros((frames, bodies, 4), np.float32)
     quaternions[..., 0] = 1
     cfg = SimpleNamespace(residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
-                          dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8)
+                          dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8,
+                          future_stride=future_stride, reference_root_displacement=reference_root_displacement)
     reference = SimpleNamespace(m=SimpleNamespace(nq=36, nv=35, nu=29), cfg=cfg, nu=29,
         q0=np.zeros(29), action_scale=np.full(29, 0.5), ctrl_lo=np.full(29, -2), ctrl_hi=np.full(29, 2),
         soft_lo=np.full(29, -1), soft_hi=np.full(29, 1), body_ids=np.arange(bodies), anchor_k=1,
-        torso_id=1, root_com_id=0, foot_pairs=np.array([0, 1]), starts=np.array([0, 6]), lengths=np.array([6, 6]),
+        torso_id=1, root_com_id=0, foot_pairs=np.array([0, 1]), starts=np.array([0, 6]), lengths=np.array([6, frames-6]),
         ref_qpos=qpos, ref_qvel=qvel, ref_body_pos=positions, ref_body_quat=quaternions,
         ref_body_lin=np.zeros((frames, bodies, 3)), ref_body_ang=np.zeros((frames, bodies, 3)),
-        ref_last=np.repeat([5, 11], 6), goal_feat=np.arange(frames*68, dtype=np.float32).reshape(frames, 68))
+        ref_last=np.repeat([5, frames-1], [6, frames-6]), goal_feat=np.arange(frames*68, dtype=np.float32).reshape(frames, 68))
 
     def kinematics(q, v, com):
         normalized = q[:, 3:7]/torch.linalg.vector_norm(q[:, 3:7], dim=-1, keepdim=True)
@@ -55,6 +57,46 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
 
 
 class TorchEnvironmentTest(unittest.TestCase):
+    def test_reference_torso_displacement_uses_full_reference_rotation_and_stride(self):
+        env, _ = fixture(frames=72, future_stride=5, reference_root_displacement=True)
+        times = torch.arange(env.n_frames)*.02
+        positions = torch.stack((torch.sin(times), torch.cos(2*times), .5+.2*times**2), -1)
+        yaw = .7+.4*times
+        yaw_rotation = torch.stack((torch.cos(yaw/2), 0*yaw, 0*yaw, torch.sin(yaw/2)), -1)
+        pitch_rotation = torch.tensor([np.cos(.35/2), 0., np.sin(.35/2), 0.], dtype=torch.float32)
+        rotations = quat_mul(yaw_rotation, pitch_rotation.expand_as(yaw_rotation))
+        env.ref_body_pos[:, env.anchor_k] = positions
+        env.ref_body_quat[:, env.anchor_k] = rotations
+        frames = torch.tensor([7, 20, 62], dtype=torch.int32)
+        indices = torch.minimum(frames[:, None]+5*torch.arange(10), env.ref_last[frames, None])
+        features = env.goal_ref(frames).reshape(3, 10, 71)
+        delta = positions[indices]-positions[frames, None]
+        inverse_rotation = quat_to_matrix(rotations[frames]).transpose(-1, -2)
+        expected = torch.einsum('bij,bfj->bfi', inverse_rotation, delta)
+        torch.testing.assert_close(features[..., :68], env.goal_feat[indices])
+        torch.testing.assert_close(features[..., 68:], expected)
+        torch.testing.assert_close(features[:, 0, 68:], torch.zeros(3, 3))
+        # A shared translation of the reference trajectory cancels exactly.
+        env.ref_body_pos += torch.tensor([2., -3., 1.])
+        torch.testing.assert_close(env.goal_ref(frames).reshape(3, 10, 71), features, atol=5e-7, rtol=1e-5)
+        state = env.reset(frames)
+        self.assertEqual(env.goal(state).shape, (3, 716))
+        self.assertEqual(env.critic_obs(state).shape, (3, 855))
+        contract = env.observation_contract
+        self.assertEqual(contract['reference_frame_dim'], 71)
+        self.assertEqual(contract['future_stride'], 5)
+        self.assertAlmostEqual(contract['reference_time_offsets_s'][-1], .9)
+        self.assertEqual(contract['goal_dim'], 716)
+        self.assertTrue(contract['reference_root_displacement'])
+        self.assertEqual(int(indices[-1, -1]), 71)
+
+    def test_reference_future_configuration_rejects_invalid_values(self):
+        for stride in (0, -1, 1.5, True):
+            with self.subTest(stride=stride), self.assertRaises(ValueError):
+                fixture(future_stride=stride)
+        with self.assertRaises(ValueError):
+            fixture(reference_root_displacement=1)
+
     def test_nominal_reset_and_reference_goal_do_not_cross_clip_boundary(self):
         env, _ = fixture()
         state = env.reset(torch.tensor([4, 10]))
