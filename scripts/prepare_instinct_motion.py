@@ -221,11 +221,15 @@ def main():
     source_names, target_names = validate_model(source,'torso_link'), validate_model(target,'pelvis')
     args.output.mkdir(parents=True, exist_ok=False)
     index = dict(fps=args.fps, bodies=BODIES, clips={})
-    reports = []
+    reports, failed_conditions = [], []
     for i, entry, terrain in selection:
         name = f'motion_{i:02d}'
-        with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
-            arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
+        try:
+            with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
+                arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance)
+        except (ValueError, KeyError, OSError) as error:
+            failed_conditions.append(dict(name=name, **entry, terrain_file=terrain['terrain_file'], error=str(error)))
+            continue
         length = len(arrays['qpos'])
         np.savez(args.output/f'{name}.npz', **arrays, names=np.array([name]), starts=np.array([0]), lengths=np.array([length]))
         np.savez(args.output/f'{name}_diagnostics.npz', **diagnostics)
@@ -258,11 +262,14 @@ def main():
     contract = dict(artifact_id=args.artifact_id, upstream_revision=args.upstream_revision,
                     source_dataset=str(args.dataset), source_artifact_id=args.source_artifact_id, source_model=str(source_path), target_model=str(args.target_model),
                     target_artifact_id=args.target_artifact_id, mujoco_version=mujoco.__version__, binding=binding,
-                    metadata_motion_count=10, metadata_terrain_count=6, selected_motion_count=len(reports),
+                    metadata_motion_count=10, metadata_terrain_count=6, selected_motion_count=len(selection),
+                    completed_motion_count=len(reports), failed_conditions=failed_conditions,
                     selected_motion_indices=selected_indices, selected_terrain_count=len({r['terrain_id'] for r in reports}),
                     terrains=metadata['terrains'], motions=reports)
-    (args.output/'index.json').write_text(json.dumps(index, indent=2))
     (args.output/'screening.json').write_text(json.dumps(contract, indent=2))
+    if failed_conditions:
+        raise ValueError(f'{len(failed_conditions)} selected motion conditions failed; see screening.json. Library index was not written.')
+    (args.output/'index.json').write_text(json.dumps(index, indent=2))
     print(json.dumps(dict(output=str(args.output), motions=len(reports), max_fk_position_m=max(max(r['fk_position_max_m'].values()) for r in reports))))
 
 
