@@ -542,6 +542,7 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--source-reset-profile", choices=("nominal", "source_pose"), default="nominal")
     parser.add_argument("--source-depth-noise", action="store_true")
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
@@ -633,6 +634,9 @@ def build_environment(args):
         from .source_perceptive_env import SourcePerceptiveEnv
         environment_type = SourcePerceptiveEnv
     env=environment_type(library,EnvConfig(solver_iterations=args.solver_iterations,
+        dr=args.task_inputs == 'heightscan_pilot',
+        reset_noise=args.task_inputs == 'heightscan_pilot' or args.source_reset_profile == 'source_pose',
+        source_reset_profile=args.source_reset_profile,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,

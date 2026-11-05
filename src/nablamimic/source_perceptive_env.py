@@ -20,6 +20,9 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         self.camera_position = torch.tensor(SOURCE_CAMERA_POSITION, device=self.device)
         offset_rotation = torch.tensor(SOURCE_CAMERA_QUATERNION_WXYZ, device=self.device)
         self.camera_rotation = offset_rotation / torch.linalg.vector_norm(offset_rotation)
+        self.reset_position_limits = torch.tensor([.15,.15,0.],device=self.device)
+        self.reset_rotation_limits = torch.zeros(3,device=self.device)
+        self.reset_velocity_limits = torch.zeros(6,device=self.device)
         self.history_frames = 8
         self.noise_limits = torch.tensor([.05]*3+[.2]*3+[.01]*29+[.5]*29+[0.]*29, device=self.device)
         self.hist_dim, self.goal_dim = 744+576, 670
@@ -91,6 +94,8 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     depth_shape=[1,18,32], depth_feature_dim=32,
                     actor_relative_position=False, normalized_action_limit=self.cfg.action_limit,
                     encoder_learning='native action-target regression gradient',
+                    reset_profile=self.cfg.source_reset_profile, physical_randomization='nominal prepared model',
+                    policy_normalization='empirical population moments, cumulative sample count, epsilon .01, collection updates',
                     camera_noise='source stateless stages' if self.cfg.source_depth_noise else 'deterministic optical pipeline',
                     critic_layout='native privileged proprioception+source_goal+anchor+rootvelocity+domainparameters')
 

@@ -1,7 +1,8 @@
 # Source camera/goal/proprioception interface with native physics gradients.
-# Camera noise and source reward matching require their explicit validation.
+# Source stochastic image stages and pose resets are explicit. Physical model DR remains nominal.
 @base/action_target.args
 --task-inputs instinct_perceptive_native --physics engine --policy-ema
 --action-limit 20 --future-stride 5 --lr-warmup-steps 100
 --num-envs 32 --horizon 8 --collect-envs 32 --replay-steps 64
 --regression-batch 512 --max-episode-steps 600 --execution eager
+--source-depth-noise --source-reset-profile source_pose
