@@ -8,6 +8,14 @@ One eager N32 H8 update measures actual peak CUDA allocation before the N64 H16
 1000-update learning condition. Both require a new output root. A run that fails
 retains its condition and receives a distinct output root on retry.
 
+The baseline supplies ten future reference frames spaced by one 20 ms control,
+covering 0.18 seconds. The reference-path condition spaces them by five controls,
+covering 0.9 seconds, and adds each future reference torso's displacement in the
+current reference torso's full orientation frame. The normalized-action-domain
+condition adds the source's limit of ±20 to that reference-path condition. These
+are independent training conditions with distinct observation contracts. Every
+checkpoint retains its own condition and separate EMA/live readings.
+
 Every evaluated checkpoint is read separately as EMA and live. Each policy read
 executes 20 starts from reference frame zero, one nominal start and 19 deterministic
 pose perturbations from generator seed 0. Translation perturbations are uniform
@@ -47,3 +55,10 @@ history, the existing reward formula and recorded actions. Action-target anchors
 use the bounded noise-free policy output, while regression predicts the raw
 network output. This prevents saturated raw outputs from copying themselves into
 the target. Baseline configurations retain their declared unrestricted domain.
+
+The observed training input ranges and checkpoint variance concentrated in the
+previous-action features support investigating raw-action history feedback. The
+fixed zero-input 128-step network recurrence reached a maximum action magnitude
+of 4.616 in both compared conditions and never activated its command limit. That
+diagnostic did not demonstrate divergence. A completed training run and bounded
+inputs do not establish the working-policy criterion above.
