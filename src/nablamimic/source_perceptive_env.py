@@ -13,6 +13,8 @@ from .torch_env import TorchTrackingEnv, gravity_b, quat_inv, quat_mul, quat_rot
 class SourcePerceptiveEnv(TorchTrackingEnv):
     def bind_source_camera(self):
         from nablaengine.depth_geometry import DepthGeometry
+        from .source_depth_noise import SourceDepthNoise
+        self.camera_noise = SourceDepthNoise(self.device) if self.cfg.source_depth_noise else None
         self.depth_geometry = DepthGeometry.from_model(self.m, device=self.device, dtype=torch.float32, groups=(0, 2))
         self.camera_rays = source_raw_camera_rays(self.device)
         self.camera_position = torch.tensor(SOURCE_CAMERA_POSITION, device=self.device)
@@ -51,7 +53,11 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         origins = origin[:, None].expand_as(directions)
         ranges, _ = self.depth_geometry.raycast(state['xpos'], state['xquat'], origins, directions,
                                                max_distance=1.e6, min_distance=.05, max_hops=24)
-        return source_depth_image(ranges.reshape(-1, 27, 48), self.camera_rays)
+        raw_range = ranges.reshape(-1, 27, 48)
+        if self.camera_noise is not None:
+            optical = raw_range*self.camera_rays[...,0]
+            return self.camera_noise.noised(optical[...,None])
+        return source_depth_image(raw_range, self.camera_rays)
 
     def policy_obs(self, state, goal_noise=None):
         history = state['hist'][:, -8:]
@@ -85,7 +91,7 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     depth_shape=[1,18,32], depth_feature_dim=32,
                     actor_relative_position=False, normalized_action_limit=self.cfg.action_limit,
                     encoder_learning='native action-target regression gradient',
-                    camera_noise='deterministic optical pipeline, stochastic camera stages pending',
+                    camera_noise='source stateless stages' if self.cfg.source_depth_noise else 'deterministic optical pipeline',
                     critic_layout='native privileged proprioception+source_goal+anchor+rootvelocity+domainparameters')
 
     def reset(self, frame, noise=None):

@@ -348,6 +348,9 @@ class TorchTrainer:
         def collector_transition(collector, reset, action_noise, proprio_noise, goal_noise):
             with torch.no_grad():
                 history, goal = env.policy_obs(collector, goal_noise)
+                if args.task_inputs == 'instinct_perceptive_native':
+                    from .perceptive_task_inputs import update_source_normalizer
+                    update_source_normalizer(self.actor, history, goal)
                 action = nets.actor_apply(self.actor, history, goal)+action_noise
                 stepped = env.step(collector, action, proprio_noise)
                 term = env.terminated(stepped)
@@ -539,6 +542,7 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--source-depth-noise", action="store_true")
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
     parser.add_argument("--actor-checkpoint", type=Path)
@@ -632,7 +636,7 @@ def build_environment(args):
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
-        root_position_weight=args.root_position_weight), model=model,
+        root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise), model=model,
         source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)

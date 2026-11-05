@@ -75,6 +75,7 @@ class EnvConfig:
     reference_root_displacement: bool = False
     actor_anchor_position: bool = False
     root_position_weight: float = 0.5
+    source_depth_noise: bool = False
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions

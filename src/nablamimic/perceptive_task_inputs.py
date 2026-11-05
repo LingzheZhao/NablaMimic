@@ -85,11 +85,17 @@ def source_actor_init(device):
         layer = torch.nn.Linear(input_width, output_width, device=device)
         layers.append((layer.weight.detach().T.contiguous(), layer.bias.detach().clone()))
     return dict(enc={name: value.detach().clone() for name, value in encoder.named_parameters()},
-                dec=layers, source_perceptive=torch.empty(0, device=device))
+                dec=layers, source_perceptive=torch.empty(0, device=device),
+                source_norm=dict(mean=torch.zeros(1990,device=device), variance=torch.ones(1990,device=device),
+                                 count=torch.zeros((),dtype=torch.int64,device=device)))
 
 
 def source_actor_apply(actor, history_and_depth, goal):
     history, depth = history_and_depth[:, :744], history_and_depth[:, 744:].reshape(-1,1,18,32)
+    packed = torch.cat((goal, depth.flatten(1), history), -1)
+    norm = actor['source_norm']
+    packed = (packed-norm['mean'])/(torch.sqrt(norm['variance'])+.01)
+    goal, depth, history = packed[:,:670], packed[:,670:1246].reshape(-1,1,18,32), packed[:,1246:]
     parameters = actor['enc']
     for index in (0,2):
         depth = F.relu(F.conv2d(depth, parameters[f'convolutions.{index}.weight'],
@@ -101,3 +107,18 @@ def source_actor_apply(actor, history_and_depth, goal):
         value = F.elu(value@weight+bias)
     weight, bias = actor['dec'][-1]
     return value@weight+bias
+
+
+def update_source_normalizer(actor, history_and_depth, goal):
+    history, depth = history_and_depth[:,:744], history_and_depth[:,744:]
+    values = torch.cat((goal, depth, history), -1)
+    norm = actor['source_norm']
+    count = norm['count']+values.shape[0]
+    rate = values.shape[0]/count.to(values.dtype)
+    batch_mean = values.mean(0)
+    delta = batch_mean-norm['mean']
+    mean = norm['mean']+rate*delta
+    variance = norm['variance']+rate*(values.var(0,unbiased=False)-norm['variance']+delta*(batch_mean-mean))
+    norm['mean'].copy_(mean)
+    norm['variance'].copy_(variance)
+    norm['count'].copy_(count)

@@ -334,7 +334,7 @@ def update_policy_ema(average, actor, updates):
 def _validate_ema_actor(actor):
     # Plain membership keeps this static schema check traceable by Dynamo;
     # set subset/difference operations are unsupported in the pinned compiler.
-    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm', 'source_perceptive')
+    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm', 'source_perceptive', 'source_norm')
     if (not isinstance(actor, dict) or 'enc' not in actor or 'dec' not in actor or
             any(name not in allowed for name in actor)):
         raise ValueError('Policy EMA requires enc/dec and only optional anchor_dec/obs_norm')
