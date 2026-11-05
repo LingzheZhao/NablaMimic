@@ -45,10 +45,33 @@ def main():
         values.append([value.detach() for value in outputs])
     value_errors=[float((a-b).abs().max()) for a,b in zip(*values)]
     gradient_errors=[float((a-b).abs().max()) for a,b in zip(*gradients)]
-    matches=max(value_errors+gradient_errors+[torque_error])<=args.absolute_tolerance
+    parity_matches=max(value_errors+gradient_errors+[torque_error])<=args.absolute_tolerance
+    epsilon=torch.finfo(torch.float32).eps
+    action_gradients=[value[-1].abs().amax(-1).cpu().tolist() for value in gradients]
+    gradient_effect=all(any(value>epsilon for value in group) for group in action_gradients)
+    hip_name='left_hip_pitch_joint'
+    joint_names=[env.m.joint(int(env.m.actuator_trnid[i,0])).name for i in range(env.nu)]
+    hip_index=joint_names.index(hip_name)
+    action=torch.zeros(len(frame),env.nu,device=env.device)
+    with torch.no_grad():
+        baseline=env.step(original,action,torch.zeros(len(frame),93,device=env.device))
+        action[:,hip_index]=.1
+        changed=env.step(original,action,torch.zeros(len(frame),93,device=env.device))
+        qpos_effect=(changed['qpos']-baseline['qpos']).abs().amax(-1).cpu().tolist()
+        qvel_effect=(changed['qvel']-baseline['qvel']).abs().amax(-1).cpu().tolist()
+    direct_effect=any(max(position,velocity)>epsilon for position,velocity in zip(qpos_effect,qvel_effect))
+    finite=all(torch.isfinite(value).all().item() for group in gradients+values for value in group)
+    finite=finite and all(torch.isfinite(value).all().item() for value in (changed['qpos'],changed['qvel']))
+    matches=parity_matches and gradient_effect and direct_effect and finite
     (args.output/'result.json').write_text(json.dumps(dict(frames=args.frames,value_absolute_errors=value_errors,
         gradient_absolute_errors=gradient_errors,
         action_vjp_absolute_max=[float(value[-1].abs().max()) for value in gradients],
+        action_vjp_per_state=action_gradients,
+        direct_action_comparison=dict(joint=hip_name,actuator_index=hip_index,normalized_action_change=.1,
+            qpos_absolute_max_per_state=qpos_effect,qvel_absolute_max_per_state=qvel_effect),
+        action_effect_threshold=epsilon,
+        action_effect_definition='At least one state per fused/split VJP and one direct state response exceeds float32 epsilon',
+        parity_matches=parity_matches,gradient_effect=gradient_effect,direct_effect=direct_effect,finite=finite,
         model_actuator_ctrllimited=env.m.actuator_ctrllimited.tolist(),
         model_actuator_ctrlrange=env.m.actuator_ctrlrange.tolist(),
         actual_analytic_torque_absolute_error=torque_error,
