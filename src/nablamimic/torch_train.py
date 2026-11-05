@@ -446,6 +446,7 @@ class TorchTrainer:
             temporary.replace(destination)
         if full:
             state = dict(format='nablamimic_torch_training_v1', completed_updates=iteration, wall_s=elapsed,
+                perception=self.env.perception_contract,
                 actor=self.actor, critic=self.critic, ema=self.ema, ema_count=self.ema_count,
                 actor_optimizer=self.actor_opt, critic_optimizer=self.critic_opt, cnorm=self.cnorm,
                 bin_q=self.sampler.bin_q, probabilities=self.sampler.probs, collector=self.collector,
@@ -563,6 +564,8 @@ def main(argv=None):
     if args.initial_checkpoint:
         with args.initial_checkpoint.open('rb') as handle:initial=pickle.load(handle)
         if initial['completed_updates']!=0 or initial['ema_updates']!=0:raise ValueError('Matched initial checkpoint must contain zero completed updates')
+        if initial.get('perception', {'sensor':'none','width':0}) != env.perception_contract:
+            raise ValueError('Initial checkpoint perception layout differs from constructed environment')
         actor=nets.tree_from_jax(initial['actor'],env.device)
         critic=nets.tree_from_jax(initial['critic'],env.device)
     else:

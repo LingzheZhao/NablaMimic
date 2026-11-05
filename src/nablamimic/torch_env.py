@@ -258,6 +258,15 @@ class TorchTrackingEnv:
             self.terrain = ConvexTerrain(*[
                 torch.as_tensor(arrays[name].copy(), device=self.device)
                 for name in ("normals", "offsets", "valid_faces")])
+        normals, offsets, valid = self.terrain.normals, self.terrain.offsets, self.terrain.valid_faces
+        if normals.ndim != 3 or normals.shape[-1] != 3 or offsets.shape != normals.shape[:2] or valid.shape != offsets.shape:
+            raise ValueError("Malformed convex terrain halfspaces")
+        if not bool(torch.isfinite(normals).all() & torch.isfinite(offsets).all()):
+            raise ValueError("Nonfinite terrain halfspaces")
+        if not bool(valid.any(-1).all()):
+            raise ValueError("Every terrain hull requires boundary faces")
+        if not bool(torch.allclose(torch.linalg.vector_norm(normals[valid], dim=-1), torch.ones_like(offsets[valid]), atol=1.e-5)):
+            raise ValueError("Terrain halfspaces require unit outward normals")
         x = torch.linspace(-0.8, 1.2, 11, device=self.device)
         y = torch.linspace(-0.5, 0.5, 7, device=self.device)
         self.scan_offsets = torch.cartesian_prod(x, y)
