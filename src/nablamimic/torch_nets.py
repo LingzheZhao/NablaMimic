@@ -101,6 +101,9 @@ def actor_decode(actor, latent, history, anchor):
 
 
 def actor_apply(actor, history, goal):
+    if 'source_perceptive' in actor:
+        from .perceptive_task_inputs import source_actor_apply
+        return source_actor_apply(actor, history, goal)
     if 'obs_norm' in actor:
         norm = tuple(value.detach() for value in actor['obs_norm'])
         normalized = normalize(norm, torch.cat((history, goal), dim=-1))
@@ -331,7 +334,7 @@ def update_policy_ema(average, actor, updates):
 def _validate_ema_actor(actor):
     # Plain membership keeps this static schema check traceable by Dynamo;
     # set subset/difference operations are unsupported in the pinned compiler.
-    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm')
+    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm', 'source_perceptive')
     if (not isinstance(actor, dict) or 'enc' not in actor or 'dec' not in actor or
             any(name not in allowed for name in actor)):
         raise ValueError('Policy EMA requires enc/dec and only optional anchor_dec/obs_norm')

@@ -208,13 +208,16 @@ class TorchTrainer:
 
         def encode(actor_, frames, reset_frames):
             offsets = torch.arange(self.h, device=self.device)[:, None]
+            if args.task_inputs == 'instinct_perceptive_native':
+                zeros = torch.zeros((self.h, self.n, 1), device=env.device)
+                return zeros, zeros
             def sequence(frame):
                 f = torch.minimum(frame[None]+offsets, env.ref_last[frame][None])
                 return nets.actor_encode(actor_, env.goal_ref(f.reshape(-1))).reshape(self.h, self.n, -1)
             return sequence(frames), sequence(reset_frames)
 
         body = make_control_body(env, args.gamma, args.max_episode_steps, args.act_cot_clip,
-                                 tuple(args.term_penalty), enc_hoist=True)
+                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot')
         self.body = compile_fullgraph(body) if args.execution != 'eager' else body
         self.encode = compile_fullgraph(encode) if args.execution != 'eager' else encode
         self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode)
@@ -536,6 +539,7 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
     parser.add_argument("--actor-checkpoint", type=Path)
     parser.add_argument("--actor-weights", choices=("ema", "live"))
@@ -557,7 +561,7 @@ def validate_args(args):
         raise ValueError('Torch path currently implements the unmasked, no-rematerialization EMA Engine recipe')
     if args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
         raise ValueError('Unsupported recipe variant')
-    if not args.anchor_to_decoder or args.enc_hoist!='on' or not args.critic_pre_state:
+    if (args.task_inputs == 'heightscan_pilot' and (not args.anchor_to_decoder or args.enc_hoist!='on')) or not args.critic_pre_state:
         raise ValueError('Current-paper anchor/encoder-hoist/pre-state-critic settings required')
     if not args.action_target or args.action_target[:2]!=[8.,1.] or args.replay_steps<=0 or args.reset_sampling!='supermimic':
         raise ValueError('Eight regression steps, one target window and replay with SuperMimic resets required')
@@ -617,7 +621,11 @@ def build_environment(args):
         if model_contract['terrain_artifact_id'] != json.loads((args.terrain_sensor/'contract.json').read_text())['artifact_id']:
             raise ValueError("Sensor and physical terrain artifact bindings differ")
         config['physical_model'] = model_contract
-    env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
+    environment_type = TorchTrackingEnv
+    if args.task_inputs == 'instinct_perceptive_native':
+        from .source_perceptive_env import SourcePerceptiveEnv
+        environment_type = SourcePerceptiveEnv
+    env=environment_type(library,EnvConfig(solver_iterations=args.solver_iterations,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
@@ -626,6 +634,9 @@ def build_environment(args):
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
         env.perception_contract['physical_frame'] = model_contract['frame']
+    if args.task_inputs == 'instinct_perceptive_native':
+        env.bind_source_camera()
+        env.perception_contract['sensor'] = 'source_depth_camera'
     config['perception'] = env.perception_contract
     config['observation'] = env.observation_contract
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
@@ -687,7 +698,11 @@ def main(argv=None):
         import jax
         from . import nets as jax_nets
         key,ka,kc=jax.random.split(jax.random.PRNGKey(args.seed),3)
-        actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
+        if args.task_inputs == 'instinct_perceptive_native':
+            from .perceptive_task_inputs import source_actor_init
+            actor = source_actor_init(env.device)
+        else:
+            actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
         critic=nets.tree_from_jax(jax_nets.mlp_init(kc,[env.critic_dim,*jax_nets.CRITIC_HIDDEN,1]),env.device)
     if args.actor_checkpoint:
         with args.actor_checkpoint.open('rb') as handle:

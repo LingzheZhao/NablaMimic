@@ -75,3 +75,29 @@ def source_depth_image(ray_range, local_unit_directions):
     normalized = optical_depth.clamp(0., 2.)/2.
     return F.interpolate(normalized[:, None, 2:-2, 2:-2], size=(18, 32),
                          mode='bilinear', align_corners=False)
+
+
+def source_actor_init(device):
+    """Create functional CNN and actor weights for the native-gradient condition."""
+    encoder = SourceDepthEncoder().to(device)
+    layers = []
+    for input_width, output_width in zip((1446,512,256,128), (512,256,128,29)):
+        layer = torch.nn.Linear(input_width, output_width, device=device)
+        layers.append((layer.weight.detach().T.contiguous(), layer.bias.detach().clone()))
+    return dict(enc={name: value.detach().clone() for name, value in encoder.named_parameters()},
+                dec=layers, source_perceptive=torch.empty(0, device=device))
+
+
+def source_actor_apply(actor, history_and_depth, goal):
+    history, depth = history_and_depth[:, :744], history_and_depth[:, 744:].reshape(-1,1,18,32)
+    parameters = actor['enc']
+    for index in (0,2):
+        depth = F.relu(F.conv2d(depth, parameters[f'convolutions.{index}.weight'],
+                                parameters[f'convolutions.{index}.bias'], padding=1))
+    feature = F.relu(F.linear(depth.flatten(1), parameters['head.0.weight'], parameters['head.0.bias']))
+    feature = F.linear(feature, parameters['head.2.weight'], parameters['head.2.bias'])
+    value = torch.cat((goal, feature, history), -1)
+    for weight, bias in actor['dec'][:-1]:
+        value = F.elu(value@weight+bias)
+    weight, bias = actor['dec'][-1]
+    return value@weight+bias
