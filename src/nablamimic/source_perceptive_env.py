@@ -88,3 +88,19 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         root_velocity = state['qvel'][:, :6]
         return torch.cat((self.proprio(state), self.source_goal(state), self.anchor_rel(state),
                           root_velocity, state['friction'][:, None], state['enc_bias'], state['com']), -1)
+
+    def terminated(self, state):
+        frame = state['frame']
+        torso_height = state['xpos'][:, self.torso_id, 2]
+        reference_height = self.ref_body_pos[frame, self.anchor_k, 2]
+        gravity_error = torch.linalg.vector_norm(
+            gravity_b(state['xquat'][:, self.torso_id])-
+            gravity_b(self.ref_body_quat[frame, self.anchor_k]), dim=-1)
+        from .env import BM_BODIES
+        links = ('left_ankle_roll_link','right_ankle_roll_link','left_wrist_yaw_link','right_wrist_yaw_link')
+        indices = [BM_BODIES.index(name) for name in links]
+        actual = state['xpos'][:, self.body_ids[indices], 2]
+        reference = self.ref_body_pos[frame][:, indices, 2]
+        nonfinite = ~torch.isfinite(state['qpos']).all(-1) | ~torch.isfinite(state['qvel']).all(-1)
+        return ((torso_height-reference_height).abs() > .25) | (gravity_error > .8) | (
+            (actual-reference).abs().amax(-1) > .25) | nonfinite
