@@ -88,8 +88,10 @@ The live weights meet the rule on zero starts.
 These readings use N128 H32, compiled CUDA graphs and seed 0, with the exact
 [NablaMimic source](https://github.com/LingzheZhao/NablaMimic/tree/1e27f8b)
 and the declared Engine495 environment of the run. The selected weights and
-readings remain attached to update 2500. Later update-3000 readings have their
-own identity. The demonstrated scope is one terrain and one reference with
+readings remain attached to update 2500. At update 3000, the EMA measured-scan
+group completes nineteen starts but only two meet the error rule. That later
+checkpoint is not selected. Replaying the delivered 2500-update package with its
+relocated inputs reproduces all eighty original readings using the same starts. The demonstrated scope is one terrain and one reference with
 height-scan and simulator-relative position observations. Ten-motion coverage
 and the original depth-camera interface require separate implementation and
 measurements.
