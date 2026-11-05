@@ -51,6 +51,7 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
             action = nets.actor_apply(actor, history, goal)
             scan = env.terrain_scan(state)
             next_state = env.step(state, action, observation_noise['proprio'])
+            action = next_state['prev_a']
             terminated = bool(env.terminated(next_state).item())
             complete = bool(env.clip_ended(next_state).item())
             physical_body = state['xpos'][:, env.body_ids]
@@ -130,6 +131,7 @@ def evaluate_batch(env, actor, outputs, maximum_controls, start_frame, reset_pos
             actions = nets.actor_apply(actor, history, goal)
             scan = env.terrain_scan(state)
             stepped = env.step(state, actions, noise['proprio'])
+            actions = stepped['prev_a']
             terminated = env.terminated(stepped).cpu().numpy()
             complete = env.clip_ended(stepped).cpu().numpy()
             body = state['xpos'][:, env.body_ids]

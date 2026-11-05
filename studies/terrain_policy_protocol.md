@@ -36,3 +36,14 @@ Report paired completion and errors on their common supports as well as each ful
 support. The comparison measures sensitivity to withholding the scan under this
 single-reference distribution. Motion phase and reference cues may also predict
 terrain, which limits conclusions about general perceptive control.
+
+## Normalized action domain condition
+
+The fresh-seed condition in `configs/terrain_heightscan_action_domain.args` uses
+an explicit normalized action limit of 20, following InstinctMJ SuperMimic's
+imagined and real collection steps. The final noise- and delta-modified action
+is clamped before physics. Its bounded value is shared by the previous-action
+history, the existing reward formula and recorded actions. Action-target anchors
+use the bounded noise-free policy output, while regression predicts the raw
+network output. This prevents saturated raw outputs from copying themselves into
+the target. Baseline configurations retain their declared unrestricted domain.

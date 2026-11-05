@@ -154,6 +154,8 @@ class TorchTrackingEnv:
 
     def _init(self, reference, device, step_fn, kinematics_fn):
         self.cfg = reference.cfg
+        if self.cfg.action_limit is not None and (not np.isfinite(self.cfg.action_limit) or self.cfg.action_limit <= 0):
+            raise ValueError("Normalized action limit must be finite and positive")
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
             raise ValueError("action_rate_space must be setpoint or raw")
         if type(self.cfg.future_stride) is not int or self.cfg.future_stride < 1:
@@ -227,11 +229,6 @@ class TorchTrackingEnv:
 
     def proprio(self, state, prev_a=None):
         action = state["prev_a"] if prev_a is None else prev_a
-        if self.cfg.applied_command_history:
-            base = self.ref_qpos[state['frame'], 7:] if self.cfg.residual_action else self.q0
-            action = clip(action, (self.ctrl_lo-base)/self.action_scale,
-                          (self.ctrl_hi-base)/self.action_scale)
-            action = torch.where((state['ep'] == 0)[:, None], torch.zeros_like(action), action)
         return torch.cat((state["qpos"][..., 7:]-self.q0+state["enc_bias"],
                           state["qvel"][..., 6:]*(1/5.0), state["qvel"][..., 3:6]*(1/2.0),
                           gravity_b(state["qpos"][..., 3:7]), action), -1)
@@ -406,7 +403,13 @@ class TorchTrackingEnv:
         result["hist"] = torch.cat((state["hist"][:, 1:], p[:, None]), 1)
         return result
 
+    def bound_action(self, action):
+        if self.cfg.action_limit is None:
+            return action
+        return torch.clamp(action, -self.cfg.action_limit, self.cfg.action_limit)
+
     def step(self, state, action, proprio_noise=None):
+        action = self.bound_action(action)
         outputs = self.engine_step(state["qpos"].contiguous(), state["qvel"].contiguous(),
                                    state["warm"].contiguous(), self.ctrl_of(action, state["frame"]).contiguous(),
                                    state["friction"].contiguous(), state["com"].contiguous(),

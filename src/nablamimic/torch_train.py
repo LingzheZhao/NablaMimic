@@ -55,11 +55,13 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
             policy_action = nets.actor_decode(actor, z, history, goal[:, -6:])
         else:
             policy_action = nets.actor_apply(actor, history, goal)
+        policy_action = env.bound_action(policy_action)
         action = policy_action + action_noise
         if act_clip is not None:
             action = nets.clip_rows_to_median(action, act_clip, probe)
         action = action + delta
         stepped = env.step(state, action, proprio_noise)
+        action = stepped['prev_a']
         reward, terms = env.reward(stepped, action, state['prev_a'], prev=state)
         if term_penalty is not None:
             weight, height_start, tilt_start = term_penalty
@@ -534,7 +536,7 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
-    parser.add_argument("--applied-command-history", action="store_true")
+    parser.add_argument("--action-limit", type=float, default=None)
     parser.add_argument("--future-stride", type=int, default=1)
     parser.add_argument("--reference-root-displacement", action="store_true")
     return parser
@@ -610,7 +612,7 @@ def build_environment(args):
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
-        applied_command_history=args.applied_command_history), model=model)
+        action_limit=args.action_limit), model=model)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
