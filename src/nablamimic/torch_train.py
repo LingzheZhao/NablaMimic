@@ -611,8 +611,11 @@ def build_environment(args):
         model = (mujoco.MjModel.from_binary_path(str(args.terrain_model))
                  if args.terrain_model.suffix == '.mjb' else
                  mujoco.MjModel.from_xml_path(str(args.terrain_model)))
-        if model.body(model.jnt_bodyid[0]).name != 'pelvis':
-            raise ValueError("Terrain training requires the validated pelvis-root model")
+        expected_root = 'torso_link' if args.task_inputs == 'instinct_perceptive_native' else 'pelvis'
+        if model.jnt_type[0] != mujoco.mjtJoint.mjJNT_FREE or model.body(model.jnt_bodyid[0]).name != expected_root:
+            raise ValueError(f'Terrain task requires a free {expected_root} root')
+        if model_contract['free_root_body'] != expected_root:
+            raise ValueError('Scene root contract differs from the constructed free joint')
         actual_order = [model.joint(model.actuator_trnid[i, 0]).name for i in range(model.nu)]
         if actual_order != model_contract['actuator_joint_names']:
             raise ValueError("Constructed actuator binding differs from physical contract")

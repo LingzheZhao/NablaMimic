@@ -76,7 +76,8 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
 
     @property
     def observation_contract(self):
-        return dict(task='instinct_perceptive_native', history_frames=8,
+        return dict(task='instinct_perceptive_native', free_root_body='torso_link',
+                    free_root_linear_velocity='world', free_root_angular_velocity='torso body frame', history_frames=8,
                     proprioception_frame_dim=93, history_dim=self.hist_dim,
                     goal_dim=670, critic_dim=self.critic_dim,
                     reference_time_offsets_s=[i*.1 for i in range(10)],

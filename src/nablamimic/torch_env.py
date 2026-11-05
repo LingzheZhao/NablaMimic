@@ -139,7 +139,7 @@ class TorchTrackingEnv:
             ctrl_lo=model.actuator_ctrlrange[:, 0], ctrl_hi=model.actuator_ctrlrange[:, 1],
             soft_lo=mid-half, soft_hi=mid+half,
             body_ids=np.array([model.body(name).id for name in BM_BODIES]), anchor_k=BM_BODIES.index(ANCHOR),
-            torso_id=model.body(ANCHOR).id, root_com_id=int(model.body_rootid[model.body("pelvis").id]),
+            torso_id=model.body(ANCHOR).id, root_com_id=int(model.body_rootid[model.jnt_bodyid[0]]),
             foot_pairs=np.array([i for i in range(model.npair)
                                  if "_foot" in model.pair(i).name and model.pair(i).name.endswith("_floor")]),
             starts=lib.starts, lengths=np.asarray([lib.last[s]-s+1 for s in lib.starts]),
