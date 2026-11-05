@@ -128,6 +128,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--upstream', type=Path, required=True)
+    parser.add_argument('--source-artifact-id', required=True)
     parser.add_argument('--upstream-revision', required=True)
     parser.add_argument('--target-model', type=Path, required=True)
     parser.add_argument('--target-artifact-id', required=True)
@@ -179,7 +180,7 @@ def main():
                        force_range=target.actuator_forcerange[i].tolist(),
                        joint_force_range=target.jnt_actfrcrange[target.actuator_trnid[i,0]].tolist()) for i in range(target.nu)])
     contract = dict(artifact_id=args.artifact_id, upstream_revision=args.upstream_revision,
-                    source_dataset=str(args.dataset), source_model=str(source_path), target_model=str(args.target_model),
+                    source_dataset=str(args.dataset), source_artifact_id=args.source_artifact_id, source_model=str(source_path), target_model=str(args.target_model),
                     target_artifact_id=args.target_artifact_id, mujoco_version=mujoco.__version__, binding=binding,
                     selected_motion_count=10, selected_terrain_count=6, terrains=metadata['terrains'], motions=reports)
     (args.output/'index.json').write_text(json.dumps(index, indent=2))
