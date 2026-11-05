@@ -41,7 +41,7 @@ def main():
                                         torch.ones(2), torch.ones(29))
     parameters = nets.actor_trainable(actor)
     gradient, value = torch.func.grad_and_value(loss)(parameters)
-    updated, optimizer = nets.adam_step(parameters, gradient, nets.adam_init(parameters), 1.e-3)
+    updated, optimizer, gradient_norm = nets.adam_step(parameters, gradient, nets.adam_init(parameters), 1.e-3)
     assert all(bool(torch.isfinite(item).all()) for item in nets.tree_leaves(updated))
     critic = [layer(902, 1)]
     assert nets.critic_apply(critic, torch.zeros(2, 902)).shape == (2, 1)
