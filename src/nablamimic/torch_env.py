@@ -110,8 +110,11 @@ def select_reset(done, reset, stepped):
 class TorchTrackingEnv:
     TABLES = ("ref_qpos", "ref_qvel", "ref_body_pos", "ref_body_quat", "ref_body_lin", "ref_body_ang",
               "ref_last", "goal_feat")
-    max_reward = DT * sum(W[key] for key in ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel",
-                                            "root_pos", "root_ori"))
+    @property
+    def max_reward(self):
+        return DT*(self.cfg.root_position_weight + sum(W[key] for key in
+            ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel", "root_ori")))
+
 
     def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, model=None):
         # These routines construct CPU model constants / NumPy reference features.
@@ -154,6 +157,8 @@ class TorchTrackingEnv:
 
     def _init(self, reference, device, step_fn, kinematics_fn):
         self.cfg = reference.cfg
+        if not np.isfinite(self.cfg.root_position_weight) or self.cfg.root_position_weight < 0:
+            raise ValueError("Root position reward weight must be finite and nonnegative")
         if self.cfg.action_limit is not None and (not np.isfinite(self.cfg.action_limit) or self.cfg.action_limit <= 0):
             raise ValueError("Normalized action limit must be finite and positive")
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
@@ -448,7 +453,7 @@ class TorchTrackingEnv:
                      body_ori=quat_angle_sq(rel_quat, quat).mean(-1),
                      body_lin_vel=((ref_linear-linear)**2).sum(-1).mean(-1),
                      body_ang_vel=((ref_angular-angular)**2).sum(-1).mean(-1))
-        terms = {name: DT*W[name]*torch.exp(-value/(STD[name]**2)) for name, value in error.items()}
+        terms = {name: DT*(self.cfg.root_position_weight if name == "root_pos" else W[name])*torch.exp(-value/(STD[name]**2)) for name, value in error.items()}
         terms["action_rate"] = DT*W["action_rate"]*(self.action_change(action, prev_action, prev)**2).sum(-1)
         joints = state["qpos"][:, 7:]
         zero = torch.zeros_like(joints)

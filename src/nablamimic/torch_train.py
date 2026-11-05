@@ -536,6 +536,9 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--root-position-weight", type=float, default=.5)
+    parser.add_argument("--actor-checkpoint", type=Path)
+    parser.add_argument("--actor-weights", choices=("ema", "live"))
     parser.add_argument("--actor-anchor-position", action="store_true")
     parser.add_argument("--action-limit", type=float, default=None)
     parser.add_argument("--future-stride", type=int, default=1)
@@ -544,6 +547,10 @@ def build_parser():
 
 
 def validate_args(args):
+    if sum(bool(value) for value in (args.actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
+        raise ValueError("Actor initialization, matched initialization and full resume are mutually exclusive")
+    if bool(args.actor_checkpoint) != bool(args.actor_weights):
+        raise ValueError("Actor checkpoint and its explicit EMA/live selection are required together")
     if args.future_stride < 1:
         raise ValueError("Future reference stride must be positive")
     if args.physics!='engine' or not args.policy_ema or args.mask_after_done or not args.no_remat:
@@ -613,13 +620,15 @@ def build_environment(args):
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
-        action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position), model=model)
+        action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
+        root_position_weight=args.root_position_weight), model=model)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
         env.perception_contract['physical_frame'] = model_contract['frame']
     config['perception'] = env.perception_contract
     config['observation'] = env.observation_contract
+    config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
     if args.terrain_sensor:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
         actual = []
@@ -680,6 +689,23 @@ def main(argv=None):
         key,ka,kc=jax.random.split(jax.random.PRNGKey(args.seed),3)
         actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
         critic=nets.tree_from_jax(jax_nets.mlp_init(kc,[env.critic_dim,*jax_nets.CRITIC_HIDDEN,1]),env.device)
+    if args.actor_checkpoint:
+        with args.actor_checkpoint.open('rb') as handle:
+            source_actor = pickle.load(handle)
+        if source_actor['observation'] != env.observation_contract or source_actor['perception'] != env.perception_contract:
+            raise ValueError('Actor initialization observation or physical sensor binding differs')
+        source_key = 'actor_ema' if args.actor_weights == 'ema' else 'actor'
+        selected_actor = nets.tree_from_jax(source_actor[source_key], env.device)
+        if len(nets.tree_leaves(actor)) != len(nets.tree_leaves(selected_actor)):
+            raise ValueError('Selected actor parameter tree differs')
+        for current, selected in zip(nets.tree_leaves(actor), nets.tree_leaves(selected_actor)):
+            if current.shape != selected.shape or current.dtype != selected.dtype:
+                raise ValueError('Selected actor parameter layout differs')
+        nets.copy_tree_(actor, selected_actor)
+        config['actor_initialization'] = dict(checkpoint_path=str(args.actor_checkpoint),
+            completed_updates=source_actor['completed_updates'], weights=args.actor_weights,
+            remaining_state='fresh critic, optimizer, normalizer, replay, collector and EMA counters')
+        write_json(output/'config.json', config)
     started=time.monotonic()
     try:
         trainer=TorchTrainer(env,actor,critic,args)
