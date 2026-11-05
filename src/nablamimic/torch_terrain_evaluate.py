@@ -57,3 +57,41 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
                   control_hz=50, stochastic_action_noise=0, physical_fall='unavailable_without_force_classifier')
     (output/'result.json').write_text(json.dumps(report, indent=2))
     return report
+
+
+def evaluate_checkpoint(env, checkpoint_path, output):
+    """Read EMA/live separately at the fixed twenty paired physical starts."""
+    import pickle
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    with Path(checkpoint_path).open('rb') as handle:
+        checkpoint = pickle.load(handle)
+    if checkpoint['perception'] != env.perception_contract:
+        raise ValueError('Evaluation sensor layout differs from checkpoint binding')
+    if len(env.starts) != 1 or int(env.lengths[0]) != 537:
+        raise ValueError('This pilot requires the selected complete 537-frame reference')
+    generator = torch.Generator(device='cpu').manual_seed(0)
+    positions = .01*(2*torch.rand(20, 3, generator=generator)-1)
+    rotations = .02*(2*torch.rand(20, 3, generator=generator)-1)
+    positions[0] = 0
+    rotations[0] = 0
+    identity = dict(checkpoint_path=str(checkpoint_path), completed_updates=checkpoint['completed_updates'])
+    reports = []
+    original = env.sensor_ablation
+    try:
+        for weights in ('ema', 'live'):
+            key = 'actor_ema' if weights == 'ema' else 'actor'
+            actor = nets.tree_from_jax(checkpoint[key], env.device)
+            for index in range(20):
+                pose = dict(translation_m=positions[index].to(env.device),
+                            rotation_rad=rotations[index].to(env.device))
+                for sensor in ('measured', 'constant'):
+                    env.sensor_ablation = sensor
+                    report = evaluate(env, actor, output/f'{weights}_start{index:02d}_{sensor}',
+                                      maximum_controls=536, start_frame=int(env.starts[0]), reset_pose=pose)
+                    reports.append(dict(**identity, weights=weights, start=index,
+                                        sensor_intervention=sensor, **report))
+    finally:
+        env.sensor_ablation = original
+    (output/'panel.json').write_text(json.dumps(dict(identity=identity, reports=reports), indent=2))
+    return reports
