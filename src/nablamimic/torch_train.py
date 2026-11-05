@@ -426,6 +426,24 @@ class TorchTrainer:
             clip_stats=result[2].detach().cpu().tolist(), target_stats=self.target_data['at_clip'].cpu().tolist(),
             memory=dict(allocated=torch.cuda.memory_allocated(),reserved=torch.cuda.memory_reserved(),
                         peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved()))
+        def numerical_range(value):
+            value = value.detach()
+            return dict(minimum=float(value.amin()), maximum=float(value.amax()),
+                        absolute_max=float(value.abs().amax()))
+        metrics['numerical_ranges'] = dict(
+            reward_terms={name: numerical_range(value) for name, value in self.training_data['terms'].items()},
+            critic_observation=numerical_range(self.training_data['cobs_pre']),
+            policy_history=numerical_range(self.training_data['hist']),
+            policy_action=numerical_range(self.training_data['a_pi']),
+            action_target=numerical_range(self.target_data['targets']),
+            action_cotangent=numerical_range(result[1]),
+            target_setpoint_change=numerical_range(
+                (self.target_data['targets']-self.training_data['a_pi'])*self.env.action_scale),
+            critic_target=numerical_range(self.critic_targets),
+            cnorm_mean=numerical_range(self.cnorm[0]),
+            cnorm_std=numerical_range(torch.sqrt(self.cnorm[1]+1.e-5)),
+            collector_qpos=numerical_range(self.collector['qpos']),
+            collector_qvel=numerical_range(self.collector['qvel']))
         if self.completed_updates != metrics['ema_updates'] or metrics['actor_optimizer_steps'] != self.completed_updates*int(self.args.action_target[0]) or metrics['critic_optimizer_steps'] != self.completed_updates*self.args.critic_epochs*self.args.critic_minibatches:
             raise RuntimeError('Training/EMA/optimizer counters disagree')
         if invalid or not all(math.isfinite(metrics[key]) for key in ('actor_loss','regression_loss','critic_loss','reward_mean')):
