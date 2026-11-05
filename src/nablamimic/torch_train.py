@@ -461,7 +461,7 @@ class TorchTrainer:
 
 
 def build_parser():
-    from .train import build_parser as donor_parser
+    from .training_options import build_parser as donor_parser
     parser = donor_parser()
     parser.prog = 'python -m nablamimic.torch_train'
     parser.description = __doc__
@@ -500,7 +500,7 @@ def main(argv=None):
     from .env import BM_BODIES, EnvConfig
     from .motion import all_clip_names,load_library
     from .params import resolve_params,git_state
-    from .train import FIXED
+    from .training_options import FIXED
     from nablaengine import torch_ffi
     resolved, info = resolve_params(sys.argv[1:] if argv is None else argv)
     args=build_parser().parse_args(resolved);validate_args(args)
@@ -559,6 +559,17 @@ def main(argv=None):
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
     config['perception'] = env.perception_contract
+    if args.terrain_sensor:
+        expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
+        actual = []
+        for index in range(env.m.npair):
+            geoms = [int(env.m.pair_geom1[index]), int(env.m.pair_geom2[index])]
+            names = [env.m.geom(geom).name for geom in geoms]
+            if any('_foot' in name for name in names) and any(int(env.m.geom_bodyid[geom]) == 0 for geom in geoms):
+                actual.append(index)
+        if sorted(expected.tolist()) != actual or len(actual) == 0:
+            raise ValueError('Prepared foot-pair contract differs from compiled foot/static terrain pairs')
+        env.foot_pairs = expected
     engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
     config['engine']=engine;write_json(output/'config.json',config)
     if args.initial_checkpoint:
