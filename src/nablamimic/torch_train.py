@@ -583,7 +583,7 @@ def main(argv=None):
     torch.manual_seed(args.seed);np.random.seed(args.seed);random.seed(args.seed)
     code=os.environ.get('NABLA_SOURCE_REVISION') or git_state()[0]
     if not code:raise ValueError('Declared committed source revision required')
-    config={**vars(args),**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
+    config={**{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
             'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
             'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
             'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
