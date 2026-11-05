@@ -227,6 +227,11 @@ class TorchTrackingEnv:
 
     def proprio(self, state, prev_a=None):
         action = state["prev_a"] if prev_a is None else prev_a
+        if self.cfg.applied_command_history:
+            base = self.ref_qpos[state['frame'], 7:] if self.cfg.residual_action else self.q0
+            action = clip(action, (self.ctrl_lo-base)/self.action_scale,
+                          (self.ctrl_hi-base)/self.action_scale)
+            action = torch.where((state['ep'] == 0)[:, None], torch.zeros_like(action), action)
         return torch.cat((state["qpos"][..., 7:]-self.q0+state["enc_bias"],
                           state["qvel"][..., 6:]*(1/5.0), state["qvel"][..., 3:6]*(1/2.0),
                           gravity_b(state["qpos"][..., 3:7]), action), -1)

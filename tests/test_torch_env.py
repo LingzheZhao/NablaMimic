@@ -15,7 +15,7 @@ from nablamimic.torch_env import (COMPACT_KEYS, STATE_KEYS, TorchTrackingEnv, ab
 
 
 def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
-            future_stride=1, reference_root_displacement=False, frames=12):
+            future_stride=1, reference_root_displacement=False, applied_command_history=False, frames=12):
     bodies = 14
     qpos = np.zeros((frames, 36), np.float32)
     qpos[:, 2], qpos[:, 3] = 1, 1
@@ -25,7 +25,7 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
     positions = qpos[:, None, :3] + offsets.numpy()[None]
     quaternions = np.zeros((frames, bodies, 4), np.float32)
     quaternions[..., 0] = 1
-    cfg = SimpleNamespace(residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
+    cfg = SimpleNamespace(applied_command_history=applied_command_history, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
                           dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8,
                           future_stride=future_stride, reference_root_displacement=reference_root_displacement)
     reference = SimpleNamespace(m=SimpleNamespace(nq=36, nv=35, nu=29), cfg=cfg, nu=29,
@@ -57,6 +57,21 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
 
 
 class TorchEnvironmentTest(unittest.TestCase):
+    def test_applied_command_history_is_bounded_and_preserves_raw_reward_action(self):
+        env, _ = fixture(residual=True, applied_command_history=True)
+        state = env.reset(torch.tensor([0]))
+        torch.testing.assert_close(env.proprio(state)[:, 64:], torch.zeros(1, 29))
+        state['frame'][:] = 1
+        state['ep'][:] = 1
+        state['prev_a'][:] = 1.e6
+        recorded_raw = state['prev_a'].clone()
+        observation = env.proprio(state)[:, 64:]
+        base = env.ref_qpos[state['frame'], 7:]
+        reconstructed = base + env.action_scale*observation
+        torch.testing.assert_close(reconstructed, env.ctrl_hi.expand_as(reconstructed))
+        torch.testing.assert_close(state['prev_a'], recorded_raw)
+
+
     def test_reference_torso_displacement_uses_full_reference_rotation_and_stride(self):
         env, _ = fixture(frames=72, future_stride=5, reference_root_displacement=True)
         times = torch.arange(env.n_frames)*.02
