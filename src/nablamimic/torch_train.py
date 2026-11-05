@@ -665,11 +665,12 @@ def build_environment(args):
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
     if args.terrain_sensor or source_task:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
+        foot_bodies = {env.m.body(name).id for name in ('left_ankle_roll_link','right_ankle_roll_link')}
         actual = []
         for index in range(env.m.npair):
-            geoms = [int(env.m.pair_geom1[index]), int(env.m.pair_geom2[index])]
-            names = [env.m.geom(geom).name for geom in geoms]
-            if any('_foot' in name for name in names) and any(int(env.m.geom_bodyid[geom]) == 0 for geom in geoms):
+            bodies = [int(env.m.geom_bodyid[int(env.m.pair_geom1[index])]),
+                      int(env.m.geom_bodyid[int(env.m.pair_geom2[index])])]
+            if 0 in bodies and any(body in foot_bodies for body in bodies):
                 actual.append(index)
         if sorted(expected.tolist()) != actual or len(actual) == 0:
             raise ValueError('Prepared foot-pair contract differs from compiled foot/static terrain pairs')
