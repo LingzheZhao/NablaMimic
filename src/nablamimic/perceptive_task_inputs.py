@@ -63,3 +63,15 @@ class SourceDepthEncoder(torch.nn.Module):
 
     def forward(self, depth):
         return self.head(self.convolutions(depth).flatten(1))
+
+
+def source_depth_image(ray_range, local_unit_directions):
+    """Convert raw ranges into the deterministic processed source image.
+
+    Caller supplies [B,27,48] ranges after the source minimum-distance filtering.
+    The image-plane depth uses each unit ray's local forward component.
+    """
+    optical_depth = ray_range*local_unit_directions[..., 0]
+    normalized = optical_depth.clamp(0., 2.)/2.
+    return F.interpolate(normalized[:, None, 2:-2, 2:-2], size=(18, 32),
+                         mode='bilinear', align_corners=False)
