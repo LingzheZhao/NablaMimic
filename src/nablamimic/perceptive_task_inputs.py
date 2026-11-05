@@ -49,3 +49,17 @@ def source_raw_camera_rays(device, dtype=torch.float32):
     rays = torch.stack((torch.ones_like(row), -(column-width/2)/focal_x,
                         -(row-height/2)/focal_y), -1)
     return F.normalize(rays, dim=-1)
+
+
+class SourceDepthEncoder(torch.nn.Module):
+    """Conv2dHeadModel shape from the pinned Instinct policy configuration."""
+    def __init__(self):
+        super().__init__()
+        self.convolutions = torch.nn.Sequential(
+            torch.nn.Conv2d(1, 32, 3, padding=1), torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 32, 3, padding=1), torch.nn.ReLU())
+        self.head = torch.nn.Sequential(torch.nn.Linear(32*18*32, 32),
+                                        torch.nn.ReLU(), torch.nn.Linear(32, 32))
+
+    def forward(self, depth):
+        return self.head(self.convolutions(depth).flatten(1))
