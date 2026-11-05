@@ -606,7 +606,8 @@ def build_environment(args):
     config['reference_body_binding'] = dict(declared_order=list(declared_bodies),
         canonical_order=list(BM_BODIES), source_indices=body_indices)
     model = None
-    if args.terrain_sensor:
+    source_task = args.task_inputs == 'instinct_perceptive_native'
+    if args.terrain_sensor or source_task:
         if args.terrain_model is None:
             raise ValueError("Terrain sensor requires the matching physical terrain model")
         import mujoco
@@ -626,7 +627,7 @@ def build_environment(args):
             raise ValueError("Constructed actuator binding differs from physical contract")
         if list(BM_BODIES) != model_contract['tracked_body_names']:
             raise ValueError("Constructed tracking body order differs from physical contract")
-        if model_contract['terrain_artifact_id'] != json.loads((args.terrain_sensor/'contract.json').read_text())['artifact_id']:
+        if not source_task and model_contract['terrain_artifact_id'] != json.loads((args.terrain_sensor/'contract.json').read_text())['artifact_id']:
             raise ValueError("Sensor and physical terrain artifact bindings differ")
         config['physical_model'] = model_contract
     environment_type = TorchTrackingEnv
@@ -642,17 +643,23 @@ def build_environment(args):
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
         root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise), model=model,
         source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None)
-    if args.terrain_sensor:
+    if source_task:
+        if args.terrain_sensor is not None:
+            raise ValueError('Source camera is constructed from the physical model and takes no heightscan input')
+        env.bind_source_camera()
+        env.perception_contract = dict(sensor='source_depth_camera', image_shape=[1,18,32],
+            physical_scene_artifact_id=model_contract['artifact_id'],
+            terrain_artifact_id=model_contract['terrain_artifact_id'],
+            physical_frame=model_contract['frame'],
+            geometry_groups=[0,2], root_body='torso_link')
+    elif args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
         env.perception_contract['physical_frame'] = model_contract['frame']
-    if args.task_inputs == 'instinct_perceptive_native':
-        env.bind_source_camera()
-        env.perception_contract['sensor'] = 'source_depth_camera'
     config['perception'] = env.perception_contract
     config['observation'] = env.observation_contract
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
-    if args.terrain_sensor:
+    if args.terrain_sensor or source_task:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
         actual = []
         for index in range(env.m.npair):
