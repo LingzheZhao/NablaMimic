@@ -8,7 +8,7 @@ import torch
 from . import torch_nets as nets
 
 
-def evaluate(env, actor, output, maximum_controls, start_frame=0):
+def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=None):
     """Execute one nominal physical chain, ending at tracking termination or clip end.
 
     The caller supplies the already constructed physical environment and EMA or
@@ -21,6 +21,9 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0):
     frame = torch.tensor([start_frame], device=env.device, dtype=torch.int32)
     reset_noise = env.sample_reset_noise(1)
     reset_noise = {name: torch.zeros_like(value) for name, value in reset_noise.items()}
+    if reset_pose is not None:
+        reset_noise['position'][:] = reset_pose['translation_m'] / env.reset_position_limits
+        reset_noise['rotation'][:] = reset_pose['rotation_rad'] / env.reset_rotation_limits
     state = env.reset(frame, reset_noise)
     rows = []
     reason = 'requested_controls'
@@ -34,7 +37,11 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0):
             next_state = env.step(state, action, observation_noise['proprio'])
             terminated = bool(env.terminated(next_state).item())
             complete = bool(env.clip_ended(next_state).item())
-            rows.append(dict(qpos=state['qpos'][0].cpu().numpy(),
+            physical_body = state['xpos'][:, env.body_ids]
+            reference_body = env.ref_body_pos[state['frame']]
+            world_error = torch.linalg.vector_norm(physical_body-reference_body, dim=-1)
+            rows.append(dict(world_body_error_m=world_error[0].cpu().numpy(),
+                torso_error_m=float(world_error[0, env.anchor_k].item()), qpos=state['qpos'][0].cpu().numpy(),
                 qvel=state['qvel'][0].cpu().numpy(), action=action[0].cpu().numpy(),
                 scan=scan[0].cpu().numpy(), frame=int(state['frame'][0].item()),
                 tracking_terminated=terminated, clip_ended=complete))
@@ -47,6 +54,6 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0):
                  final_qpos=state['qpos'].cpu().numpy(), final_qvel=state['qvel'].cpu().numpy())
     report = dict(controls=len(rows), requested_controls=maximum_controls,
                   start_frame=start_frame, stop_reason=reason, perception=env.perception_contract,
-                  control_hz=50, stochastic_action_noise=0)
+                  control_hz=50, stochastic_action_noise=0, physical_fall='unavailable_without_force_classifier')
     (output/'result.json').write_text(json.dumps(report, indent=2))
     return report
