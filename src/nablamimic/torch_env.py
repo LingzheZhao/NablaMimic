@@ -144,7 +144,14 @@ class TorchTrackingEnv:
                 raise ValueError('Source default positions must bind every actuator')
         effort = np.array([model.jnt_actfrcrange[model.actuator_trnid[i, 0], 1] for i in range(model.nu)])
         ranges = np.array([model.jnt_range[model.actuator_trnid[i, 0]] for i in range(model.nu)])
-        mid, half = ranges.mean(1), 0.5 * (ranges[:, 1]-ranges[:, 0]) * 0.9
+        soft_limit_factor = .9 if source_parameters is None else source_parameters['soft_joint_pos_limit_factor']
+        if not np.isfinite(soft_limit_factor) or not 0 < soft_limit_factor <= 1:
+            raise ValueError('Soft joint limit factor must lie in (0,1]')
+        if source_parameters is not None:
+            actual_joint_names = [model.joint(model.actuator_trnid[i,0]).name for i in range(model.nu)]
+            if source_parameters['joint_names'] != actual_joint_names:
+                raise ValueError('Source action coordinates differ from model actuator joint order')
+        mid, half = ranges.mean(1), 0.5 * (ranges[:, 1]-ranges[:, 0]) * soft_limit_factor
         action_scale = 0.25*effort/kp
         if source_parameters is not None:
             action_scale = np.asarray(source_parameters['action_scale'], dtype=np.float32)

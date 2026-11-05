@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--maximum-controls', type=int, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if args.maximum_controls < 1:
+        raise ValueError("Requested source rollout must contain at least one control")
     args.output.mkdir(parents=True, exist_ok=False)
     config = json.loads(args.config.read_text())
     for key in ('terrain_model','terrain_model_contract'):
