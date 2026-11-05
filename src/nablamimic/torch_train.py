@@ -432,6 +432,41 @@ class TorchTrainer:
             raise RuntimeError('Invalid training condition: '+json.dumps(dict(invalid=invalid,metrics=metrics)))
         return metrics
 
+    def restore(self, path):
+        """Restore current-format full state into its allocated storage owners."""
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        if state['format'] != 'nablamimic_torch_training_v1':
+            raise ValueError('Current Torch full training state required')
+        if state['perception'] != self.env.perception_contract:
+            raise ValueError('Resume physical perception contract differs')
+        controls = {'out', 'config', 'resume', 'iters', 'hours', 'save_wall_minutes',
+                    'ckpt_every', 'full_state_at_end', 'initial_checkpoint'}
+        current, saved = vars(self.args), state['resolved_config']
+        for key in set(current) | set(saved):
+            if key not in controls and current.get(key) != saved.get(key):
+                raise ValueError(f'Resume training input differs for {key}')
+        owners = dict(actor=self.actor, critic=self.critic, ema=self.ema, ema_count=self.ema_count,
+            actor_optimizer=self.actor_opt, critic_optimizer=self.critic_opt, cnorm=self.cnorm,
+            bin_q=self.sampler.bin_q, probabilities=self.sampler.probs, collector=self.collector,
+            replay=self.replay, replay_ptr=self.replay_ptr, outer_step=self.outer_step)
+        with torch.no_grad():
+            for key, owner in owners.items():
+                def restore_tensor(destination, source):
+                    if destination.shape != source.shape or destination.dtype != source.dtype:
+                        raise ValueError(f'Resume tensor shape or dtype differs in {key}')
+                    destination.copy_(source)
+                nets.tree_map(restore_tensor, owner, state[key])
+        self.completed_updates = int(state['completed_updates'])
+        self.total_collector_steps = int(state['total_collector_steps'])
+        self.col_accumulator = float(state['col_accumulator'])
+        if int(self.outer_step) != self.completed_updates or int(self.ema_count) != self.completed_updates:
+            raise ValueError('Resume update and EMA counters differ')
+        torch.set_rng_state(state['cpu_rng'].cpu())
+        torch.cuda.set_rng_state(state['cuda_rng'].cpu())
+        np.random.set_state(state['numpy_rng'])
+        random.setstate(state['python_rng'])
+        return float(state['wall_s'])
+
     def save(self, output, elapsed, *, full=False):
         iteration = self.completed_updates
         checkpoint = dict(actor=as_numpy(self.actor), actor_ema=as_numpy(self.ema), critic=as_numpy(self.critic),
@@ -486,8 +521,6 @@ def validate_args(args):
         raise ValueError('Current-paper anchor/encoder-hoist/pre-state-critic settings required')
     if not args.action_target or args.action_target[:2]!=[8.,1.] or args.replay_steps<=0 or args.reset_sampling!='supermimic':
         raise ValueError('Eight regression steps, one target window and replay with SuperMimic resets required')
-    if args.resume:
-        raise ValueError('Torch resumed execution is not validated yet; full terminal state is saved but fresh runs are required')
     if args.num_envs<1 or args.horizon<1 or args.regression_batch<1 or args.num_envs*args.horizon%args.critic_minibatches:
         raise ValueError('Invalid fixed batch dimensions')
     if not 0 < args.utd <= 1:
@@ -596,7 +629,7 @@ def main(argv=None):
     env, bindings = build_environment(args)
     config.update(bindings)
     write_json(output/'config.json', config)
-    if args.initial_checkpoint:
+    if args.initial_checkpoint and not args.resume:
         with args.initial_checkpoint.open('rb') as handle:initial=pickle.load(handle)
         if initial['completed_updates']!=0 or initial['ema_updates']!=0:raise ValueError('Matched initial checkpoint must contain zero completed updates')
         if initial.get('perception', {'sensor':'none','width':0}) != env.perception_contract:
@@ -618,17 +651,23 @@ def main(argv=None):
         raise
     write_json(output/'execution.json',trainer.setup_record)
     torch_ffi.read_diagnostics(reset=True)
-    training_started=time.monotonic();trainer.save(output,0.)
+    restored_wall = trainer.restore(args.resume) if args.resume else 0.0
+    if trainer.completed_updates > args.iters:
+        raise ValueError('Requested final update precedes restored state')
+    training_started=time.monotonic()-restored_wall
+    trainer.save(output,restored_wall)
     stop_requested=False
     def stop(_signal,_frame):
         nonlocal stop_requested
         stop_requested=True
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     deadlines=sorted(set(60*x for x in args.save_wall_minutes));next_deadline=0
+    while next_deadline < len(deadlines) and deadlines[next_deadline] <= restored_wall:
+        next_deadline += 1
     status='failed'
     try:
         with (output/'log.jsonl').open('x') as log:
-            for _ in range(args.iters):
+            for _ in range(trainer.completed_updates, args.iters):
                 metrics=trainer.update();elapsed=time.monotonic()-training_started
                 metrics['wall_s']=elapsed
                 log.write(json.dumps(metrics,allow_nan=False)+'\n');log.flush()
