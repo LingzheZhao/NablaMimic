@@ -146,8 +146,10 @@ def main():
                         write_png(frames / f'{index:06d}.png', pixels)
         finally:
             if process:
-                process.stdin.close()
-                returncode = process.wait()
+                try:
+                    process.stdin.close()
+                finally:
+                    returncode = process.wait()
         if process and returncode:
             raise RuntimeError(f'ffmpeg exited with {returncode}; see ffmpeg.log')
     status.update(state='completed', video=str(args.output / 'policy.mp4') if ffmpeg else None,
