@@ -65,9 +65,13 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
             if terminated or complete:
                 reason = 'tracking_termination' if terminated else 'reference_complete'
                 break
+    terminal_error = torch.linalg.vector_norm(
+        state['xpos'][:, env.body_ids]-env.ref_body_pos[state['frame']], dim=-1)[0].cpu().numpy()
     if rows:
         np.savez(output/'trajectory.npz', **{key: np.array([row[key] for row in rows]) for key in rows[0]},
-                 final_qpos=state['qpos'].cpu().numpy(), final_qvel=state['qvel'].cpu().numpy())
+                 final_qpos=state['qpos'].cpu().numpy(), final_qvel=state['qvel'].cpu().numpy(),
+                 final_frame=state['frame'].cpu().numpy(), final_world_body_error_m=terminal_error,
+                 final_body_position=state['xpos'][:, env.body_ids].cpu().numpy())
     report = dict(controls=len(rows), requested_controls=maximum_controls,
                   start_frame=start_frame, stop_reason=reason, perception=env.perception_contract,
                   control_hz=50, stochastic_action_noise=0, posture_fall='unobserved')
@@ -78,8 +82,8 @@ def evaluate(env, actor, output, maximum_controls, start_frame=0, reset_pose=Non
     else:
         report['posture_fall'] = False
     if rows:
-        report['mean_world_body_error_m'] = float(np.mean([row['world_body_error_m'].mean() for row in rows]))
-        report['mean_torso_error_m'] = float(np.mean([row['torso_error_m'] for row in rows]))
+        report['mean_world_body_error_m'] = float(np.mean([row['world_body_error_m'].mean() for row in rows] + [terminal_error.mean()]))
+        report['mean_torso_error_m'] = float(np.mean([row['torso_error_m'] for row in rows] + [terminal_error[env.anchor_k]]))
         report['passing_trial'] = (reason == 'reference_complete' and
             report['mean_world_body_error_m'] <= .10 and report['mean_torso_error_m'] <= .10)
         seated = [row for row in rows if 4.5 <= row['frame']/50 <= 5.5]
@@ -124,7 +128,14 @@ def evaluate_checkpoint(env, checkpoint_path, output):
                                         sensor_intervention=sensor, **report))
     finally:
         env.sensor_ablation = original
-    (output/'panel.json').write_text(json.dumps(dict(identity=identity, reports=reports), indent=2))
+    decisions = []
+    for weights in ('ema', 'live'):
+        for sensor in ('measured', 'constant'):
+            selected = [row for row in reports if row['weights'] == weights and row['sensor_intervention'] == sensor]
+            passing = sum(row.get('passing_trial', False) for row in selected)
+            decisions.append(dict(weights=weights, sensor_intervention=sensor,
+                                  passing_trials=passing, trials=len(selected), passes=passing >= 18))
+    (output/'panel.json').write_text(json.dumps(dict(identity=identity, reports=reports, decisions=decisions), indent=2))
     return reports
 
 
