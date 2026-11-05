@@ -548,6 +548,8 @@ def build_environment(args):
         residual_action=args.residual_action,action_rate_space=args.action_rate_space), model=model)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
+        env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
+        env.perception_contract['physical_frame'] = model_contract['frame']
     config['perception'] = env.perception_contract
     if args.terrain_sensor:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
