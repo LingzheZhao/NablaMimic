@@ -439,6 +439,8 @@ class TorchTrainer:
             raise ValueError('Current Torch full training state required')
         if state['perception'] != self.env.perception_contract:
             raise ValueError('Resume physical perception contract differs')
+        if state['observation'] != self.env.observation_contract:
+            raise ValueError('Resume policy observation contract differs')
         controls = {'out', 'config', 'resume', 'iters', 'hours', 'save_wall_minutes',
                     'ckpt_every', 'full_state_at_end', 'initial_checkpoint'}
         current, saved = vars(self.args), state['resolved_config']
@@ -473,7 +475,8 @@ class TorchTrainer:
             cnorm=as_numpy(self.cnorm), bin_q=as_numpy(self.sampler.bin_q), iter=iteration,
             completed_updates=iteration, ema_updates=int(self.ema_count), evaluation_policy='ema',
             wall_s=elapsed, env_steps=iteration*self.n*self.h,
-            training_framework='torch', execution=self.args.execution, perception=self.env.perception_contract)
+            training_framework='torch', execution=self.args.execution, perception=self.env.perception_contract,
+            observation=self.env.observation_contract)
         destination = output/'ckpt'/f'it_{iteration:06d}.pkl'
         if not destination.exists():
             temporary = destination.with_suffix('.tmp')
@@ -481,7 +484,7 @@ class TorchTrainer:
             temporary.replace(destination)
         if full:
             state = dict(format='nablamimic_torch_training_v1', completed_updates=iteration, wall_s=elapsed,
-                perception=self.env.perception_contract,
+                perception=self.env.perception_contract, observation=self.env.observation_contract,
                 actor=self.actor, critic=self.critic, ema=self.ema, ema_count=self.ema_count,
                 actor_optimizer=self.actor_opt, critic_optimizer=self.critic_opt, cnorm=self.cnorm,
                 bin_q=self.sampler.bin_q, probabilities=self.sampler.probs, collector=self.collector,
@@ -509,10 +512,14 @@ def build_parser():
     parser.add_argument("--terrain-model-contract", type=Path)
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--future-stride", type=int, default=1)
+    parser.add_argument("--reference-root-displacement", action="store_true")
     return parser
 
 
 def validate_args(args):
+    if args.future_stride < 1:
+        raise ValueError("Future reference stride must be positive")
     if args.physics!='engine' or not args.policy_ema or args.mask_after_done or not args.no_remat:
         raise ValueError('Torch path currently implements the unmasked, no-rematerialization EMA Engine recipe')
     if args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
@@ -578,12 +585,14 @@ def build_environment(args):
             raise ValueError("Sensor and physical terrain artifact bindings differ")
         config['physical_model'] = model_contract
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
-        residual_action=args.residual_action,action_rate_space=args.action_rate_space), model=model)
+        residual_action=args.residual_action,action_rate_space=args.action_rate_space,
+        future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement), model=model)
     if args.terrain_sensor:
         env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
         env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
         env.perception_contract['physical_frame'] = model_contract['frame']
     config['perception'] = env.perception_contract
+    config['observation'] = env.observation_contract
     if args.terrain_sensor:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
         actual = []
@@ -632,8 +641,10 @@ def main(argv=None):
     if args.initial_checkpoint and not args.resume:
         with args.initial_checkpoint.open('rb') as handle:initial=pickle.load(handle)
         if initial['completed_updates']!=0 or initial['ema_updates']!=0:raise ValueError('Matched initial checkpoint must contain zero completed updates')
-        if initial.get('perception', {'sensor':'none','width':0}) != env.perception_contract:
+        if initial['perception'] != env.perception_contract:
             raise ValueError('Initial checkpoint perception layout differs from constructed environment')
+        if initial['observation'] != env.observation_contract:
+            raise ValueError('Initial checkpoint observation layout differs from constructed environment')
         actor=nets.tree_from_jax(initial['actor'],env.device)
         critic=nets.tree_from_jax(initial['critic'],env.device)
     else:

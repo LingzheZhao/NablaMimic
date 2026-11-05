@@ -173,6 +173,8 @@ def evaluate_checkpoint(env, checkpoint_path, output, execution="serial", starts
         checkpoint = pickle.load(handle)
     if checkpoint['perception'] != env.perception_contract:
         raise ValueError('Evaluation sensor layout differs from checkpoint binding')
+    if checkpoint['observation'] != env.observation_contract:
+        raise ValueError('Evaluation policy observation differs from checkpoint binding')
     if len(env.starts) != 1 or int(env.lengths[0]) != 537:
         raise ValueError('This pilot requires the selected complete 537-frame reference')
     generator = torch.Generator(device='cpu').manual_seed(0)

@@ -30,23 +30,30 @@ def main():
     torch.testing.assert_close(derivative, torch.tensor([[0., 0., 1.]]))
     def layer(width, output):
         return (torch.randn(width, output)*0.01, torch.zeros(output))
-    actor = dict(enc=[layer(680, 32)], dec=[layer(32+1007+6, 29)], anchor_dec=torch.zeros(6))
-    history = torch.zeros(2, 1007)
-    goal = torch.zeros(2, 686)
-    prediction = nets.actor_apply(actor, history, goal)
-    assert prediction.shape == (2, 29)
-    def loss(parameters):
-        policy = nets.with_actor_parameters(actor, parameters)
-        return nets.weighted_action_mse(nets.actor_apply(policy, history, goal), torch.ones(2, 29)*.01,
-                                        torch.ones(2), torch.ones(29))
-    parameters = nets.actor_trainable(actor)
-    gradient, value = torch.func.grad_and_value(loss)(parameters)
-    updated, optimizer, gradient_norm = nets.adam_step(parameters, gradient, nets.adam_init(parameters), 1.e-3)
-    assert all(bool(torch.isfinite(item).all()) for item in nets.tree_leaves(updated))
-    critic = [layer(902, 1)]
-    assert nets.critic_apply(critic, torch.zeros(2, 902)).shape == (2, 1)
+    for displacement in (False, True):
+        options = ['--out', str(args.output), '--future-stride', '5' if displacement else '1']
+        if displacement:
+            options.append('--reference-root-displacement')
+        parsed = build_parser().parse_args(options)
+        goal_width = 686 + 30*int(parsed.reference_root_displacement)
+        critic_width = 902 + 30*int(parsed.reference_root_displacement)
+        actor = dict(enc=[layer(goal_width-6, 32)], dec=[layer(32+1007+6, 29)], anchor_dec=torch.zeros(6))
+        history = torch.zeros(2, 1007)
+        goal = torch.zeros(2, goal_width)
+        prediction = nets.actor_apply(actor, history, goal)
+        assert prediction.shape == (2, 29)
+        def loss(parameters):
+            policy = nets.with_actor_parameters(actor, parameters)
+            return nets.weighted_action_mse(nets.actor_apply(policy, history, goal), torch.ones(2, 29)*.01,
+                                            torch.ones(2), torch.ones(29))
+        parameters = nets.actor_trainable(actor)
+        gradient, value = torch.func.grad_and_value(loss)(parameters)
+        updated, optimizer, gradient_norm = nets.adam_step(parameters, gradient, nets.adam_init(parameters), 1.e-3)
+        assert all(bool(torch.isfinite(item).all()) for item in nets.tree_leaves(updated))
+        critic = [layer(critic_width, 1)]
+        assert nets.critic_apply(critic, torch.zeros(2, critic_width)).shape == (2, 1)
     (args.output/'result.json').write_text(json.dumps(dict(sensor=True, pose_gradient=True,
-        actor=True, critic=True, actor_regression_update=True, loss=float(value),
+        actor=True, critic=True, actor_regression_update=True, goal_widths=[686, 716], loss=float(value),
         scope='analytic sensor and numerical optimizer only'), indent=2))
 
 
