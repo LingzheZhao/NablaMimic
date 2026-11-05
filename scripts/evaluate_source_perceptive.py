@@ -49,6 +49,11 @@ def main():
             frame = torch.tensor([int(start)],device=env.device,dtype=torch.int32)
             noise = {name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
             state = env.reset(frame,noise)
+            initial_state_error=dict(
+                qpos_reference_absolute_max=float((state['qpos']-env.ref_qpos[frame]).abs().max()),
+                qvel_reference_absolute_max=float((state['qvel']-env.ref_qvel[frame]).abs().max()),
+                tracked_body_world_position_error_max_m=float(torch.linalg.vector_norm(
+                    state['xpos'][:,env.body_ids]-env.ref_body_pos[frame],dim=-1).max()))
             rows=[]
             substep_rows=[]
             world_errors=[]
@@ -103,10 +108,10 @@ def main():
                 final_frame=state['frame'].cpu().numpy(),world_body_error_m=np.asarray(world_errors),
                 torso_error_m=np.asarray(world_errors)[:,torso_index],body_world_position=np.asarray(body_positions),
                 torso_updot=np.asarray(up_dots),state_tracking_terminated=np.asarray(terminations))
-            reports.append(dict(clip=clip,start_frame=int(start),stop_reason=reason,**reading))
+            reports.append(dict(clip=clip,start_frame=int(start),stop_reason=reason,initial_state_error=initial_state_error,**reading))
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
         completed_updates=checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
-        reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
+        reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
         tracked_body_names=body_names,
         substep_recording=dict(enabled=args.record_substeps,sampling_hz=1/env.m.opt.timestep,
             time_support='Each physics input t_k before its implicitfast update',

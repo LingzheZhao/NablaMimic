@@ -83,7 +83,7 @@ def main():
             torque_units='executed generalized actuator torque N m'),
         initialization='One nominal reference-state reset at the first frame of each clip',
         normalized_action_limit=20., unrepresentable_targets='Report and execute the declared bounded action',
-        physical_randomization='nominal prepared source model', reset_noise='zero', proprioception_noise='zero',
+        physical_randomization='nominal prepared source model', reset=bindings['reset'], reset_noise='zero', proprioception_noise='zero',
         policy_weights=None, perception_used=False, tracked_body_names=body_names, joint_names=joint_names,
         source_default_joint_position=default.tolist(), source_action_scale=scale.tolist(),
         physical_model=bindings['physical_model'], observation=env.observation_contract, reports=[])
@@ -100,6 +100,11 @@ def main():
             frame = torch.tensor([int(start)], device=env.device, dtype=torch.int32)
             noise = {name: torch.zeros_like(value) for name, value in env.sample_reset_noise(1).items()}
             state = env.reset(frame, noise)
+            initial_state_error=dict(
+                qpos_reference_absolute_max=float((state['qpos']-env.ref_qpos[frame]).abs().max()),
+                qvel_reference_absolute_max=float((state['qvel']-env.ref_qvel[frame]).abs().max()),
+                tracked_body_world_position_error_max_m=float(torch.linalg.vector_norm(
+                    state['xpos'][:,env.body_ids]-env.ref_body_pos[frame],dim=-1).max()))
             requested_controls = int(env.lengths[clip])-1
             rows, errors, terminations, positions, up_dots, substep_rows = [], [], [], [], [], []
             reason = 'requested_controls'
@@ -162,7 +167,7 @@ def main():
                 torso_updot=np.asarray(up_dots), state_tracking_terminated=np.asarray(terminations))
             excess = np.maximum(np.abs(arrays['requested_action'])-20., 0)
             target_error = np.abs(arrays['requested_joint_target']-arrays['executed_joint_target'])
-            reading = dict(clip=clip, start_frame=int(start), stop_reason=reason, failure=failure,
+            reading = dict(clip=clip, start_frame=int(start), stop_reason=reason, failure=failure,initial_state_error=initial_state_error,
                 controls_exceeding_action_limit=int((excess > 0).any(axis=1).sum()),
                 action_limit_excess_max=float(excess.max(initial=0)),
                 controls_exceeding_action_limit_by_joint=dict(zip(joint_names, (excess > 0).sum(axis=0).tolist())),
