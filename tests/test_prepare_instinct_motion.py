@@ -107,3 +107,38 @@ def test_metadata_terrain_binding_uses_declared_ids(tmp_path):
     terrains[1]['terrain_id'] = terrains[0]['terrain_id']
     with pytest.raises(ValueError, match='unique'):
         producer.selected_metadata(tmp_path, dict(terrains=terrains, motion_files=motions), [7])
+
+
+def test_scene_metadata_binding_applies_base_and_tile_once():
+    terrain_ids = [23, 8, 41, 19, 7, 32]
+    metadata = dict(terrains=[dict(terrain_id=key, terrain_file=f'surface_{i}.stl')
+                              for i, key in enumerate(terrain_ids)])
+    offsets = [[0,0,0], [30,0,0], [60,0,0], [0,16,0], [30,16,0], [60,16,0]]
+    scene = dict(artifact_id='six-terrain-scene', free_root_body='torso_link',
+                 frame=dict(coacd_input_to_tile_translation_m=[15,8,0],
+                            terrain_translations_m={str(key): value for key, value in zip(terrain_ids, offsets)}),
+                 terrains=[dict(terrain_index=row['terrain_id'], terrain_file=row['terrain_file'],
+                                coacd_auto_align_z_m=-.123) for row in metadata['terrains']])
+    base, tiles = producer.scene_reference_translations(scene, 'six-terrain-scene', 'six-terrain-scene', 'torso_link', metadata)
+    source = model('torso_link', producer.JOINTS[::-1])
+    target = model('torso_link', producer.JOINTS)
+    raw = dict(joint_names=np.array(producer.JOINTS), joint_pos=np.zeros((4,29)),
+               base_pos_w=np.array([[.01*i, -.02*i, .9] for i in range(4)]),
+               base_quat_w=np.tile([1.,0,0,0], (4,1)), framerate=np.array(50.))
+    baseline, _, _ = producer.prepare(source, target, raw, 50., base, 1e-7, 'torso_link')
+    for key, offset in zip(terrain_ids, offsets):
+        arrays, report, _ = producer.prepare(source, target, raw, 50., base+tiles[str(key)], 1e-7, 'torso_link')
+        expected = raw['base_pos_w']+np.array([15,8,0])+offset
+        np.testing.assert_allclose(arrays['qpos'][:, :3], expected, atol=4e-6)
+        np.testing.assert_allclose(arrays['body_pos'], baseline['body_pos']+offset, atol=4e-6)
+        np.testing.assert_allclose(arrays['qvel'], baseline['qvel'], atol=1e-10)
+        np.testing.assert_allclose(arrays['body_lin_vel'], baseline['body_lin_vel'], atol=1e-10)
+        assert report['excluded_source_frames'] == 0
+        assert arrays['qpos'].shape[0] == 4
+    with pytest.raises(ValueError, match='artifact identity'):
+        producer.scene_reference_translations(scene, 'another-scene', 'six-terrain-scene', 'torso_link', metadata)
+    with pytest.raises(ValueError, match='target root'):
+        producer.scene_reference_translations(scene, 'six-terrain-scene', 'six-terrain-scene', 'pelvis', metadata)
+    scene['frame']['terrain_translations_m'].pop(str(terrain_ids[-1]))
+    with pytest.raises(ValueError, match='exactly the metadata terrain IDs'):
+        producer.scene_reference_translations(scene, 'six-terrain-scene', 'six-terrain-scene', 'torso_link', metadata)

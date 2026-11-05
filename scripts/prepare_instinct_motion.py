@@ -88,6 +88,35 @@ def selected_metadata(dataset, metadata, indices):
     return selected
 
 
+def scene_reference_translations(scene, artifact_id, target_artifact_id, target_root, metadata):
+    if scene['artifact_id'] != artifact_id or target_artifact_id != artifact_id:
+        raise ValueError('Selected scene and target model must have the declared scene artifact identity')
+    if scene['free_root_body'] != target_root:
+        raise ValueError('Scene root differs from declared target root')
+    frame = scene['frame']
+    base = np.asarray(frame['coacd_input_to_tile_translation_m'], dtype=float)
+    if base.shape != (3,) or not np.isfinite(base).all():
+        raise ValueError('Scene base translation must be three finite metres')
+    terrain_ids = {str(entry['terrain_id']) for entry in metadata['terrains']}
+    translations = frame['terrain_translations_m']
+    if set(translations) != terrain_ids:
+        raise ValueError('Scene translations must cover exactly the metadata terrain IDs')
+    rows = {str(row['terrain_index']): row for row in scene['terrains']}
+    if len(rows) != len(scene['terrains']) or set(rows) != terrain_ids:
+        raise ValueError('Scene terrain rows must bind each metadata terrain ID once')
+    offsets = {}
+    for terrain in metadata['terrains']:
+        key = str(terrain['terrain_id'])
+        offset = np.asarray(translations[key], dtype=float)
+        if offset.shape != (3,) or not np.isfinite(offset).all():
+            raise ValueError('Each scene tile translation must be three finite metres')
+        if rows[key]['terrain_file'] != terrain['terrain_file']:
+            raise ValueError('Scene terrain file differs from metadata terrain ID binding')
+        # This is the only source of tile offsets. Collision top alignment is absent.
+        offsets[key] = offset
+    return base, offsets
+
+
 def physical_properties(model):
     joints = {}
     for j in range(1, model.njnt):
@@ -207,7 +236,12 @@ def main():
     parser.add_argument('--target-root', required=True, choices=['torso_link', 'pelvis'])
     parser.add_argument('--target-artifact-id', required=True)
     parser.add_argument('--artifact-id', required=True)
-    parser.add_argument('--world-translation', nargs=3, type=float, required=True)
+    translation = parser.add_mutually_exclusive_group(required=True)
+    translation.add_argument('--world-translation', nargs=3, type=float,
+                             help='Explicit input-to-world translation for an independent tile')
+    translation.add_argument('--scene-contract', type=Path,
+                             help='Six-terrain scene contract owning the base and per-terrain world translations')
+    parser.add_argument('--scene-artifact-id')
     parser.add_argument('--fps', type=float, default=50.)
     parser.add_argument('--motion-index', type=int, action='append', help='Zero-based metadata entry, repeatable. Default selects all ten.')
     parser.add_argument('--fk-position-tolerance', type=float, required=True)
@@ -215,11 +249,26 @@ def main():
     args = parser.parse_args()
     if not np.isfinite(args.fps) or args.fps <= 0:
         raise ValueError('Output rate must be finite and positive')
-    if not np.isfinite(args.world_translation).all() or not np.isfinite(args.fk_position_tolerance) or args.fk_position_tolerance <= 0:
-        raise ValueError('Translation and positive FK tolerance must be finite')
+    if not np.isfinite(args.fk_position_tolerance) or args.fk_position_tolerance <= 0:
+        raise ValueError('FK tolerance must be finite and positive')
     metadata = yaml.safe_load((args.dataset/'metadata.yaml').read_text())
     selected_indices = list(range(10)) if args.motion_index is None else args.motion_index
     selection = selected_metadata(args.dataset, metadata, selected_indices)
+    if args.scene_contract is not None:
+        if not args.scene_artifact_id:
+            raise ValueError('Scene contract requires --scene-artifact-id')
+        scene = json.loads(args.scene_contract.read_text())
+        if args.target_model.resolve() != (args.scene_contract.parent/'model.mjb').resolve():
+            raise ValueError('Target model must be model.mjb beside the selected scene contract')
+        base_translation, tile_offsets = scene_reference_translations(
+            scene, args.scene_artifact_id, args.target_artifact_id, args.target_root, metadata)
+    else:
+        if args.scene_artifact_id is not None:
+            raise ValueError('--scene-artifact-id requires --scene-contract')
+        base_translation = np.asarray(args.world_translation, dtype=float)
+        if base_translation.shape != (3,) or not np.isfinite(base_translation).all():
+            raise ValueError('World translation must be three finite metres')
+        tile_offsets = {str(row['terrain_id']): np.zeros(3) for row in metadata['terrains']}
     source_path = args.upstream/'src/instinct_mj/assets/resources/unitree_g1/xml/g1_29dof_torsobase_popsicle.xml'
     source = mujoco.MjModel.from_xml_path(str(source_path))
     target = mujoco.MjModel.from_binary_path(str(args.target_model))
@@ -227,22 +276,29 @@ def main():
     if target.nu != 29 or not np.array_equal(target.jnt_qposadr[actuator_joints], np.arange(7, 36)) or not np.array_equal(target.jnt_dofadr[actuator_joints], np.arange(6, 35)):
         raise ValueError('Target actuator order must bind qpos[7:36] and qvel[6:35] in joint order')
     source_names, target_names = validate_model(source,'torso_link'), validate_model(target, args.target_root)
+    if args.scene_contract is not None:
+        actual_names = [target.joint(j).name for j in actuator_joints]
+        if actual_names != scene['actuator_joint_names']:
+            raise ValueError('Actual target model actuator binding differs from the selected scene contract')
     args.output.mkdir(parents=True, exist_ok=False)
-    index = dict(fps=args.fps, bodies=BODIES, clips={})
+    index = dict(fps=args.fps, bodies=BODIES, clips={}, scene_artifact_id=args.scene_artifact_id)
     reports, failed_conditions = [], []
     for i, entry, terrain in selection:
         name = f'motion_{i:02d}'
+        tile_offset = tile_offsets[str(entry['terrain_id'])]
+        world_translation = base_translation+tile_offset
         try:
             with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
-                arrays, report, diagnostics = prepare(source, target, raw, args.fps, np.array(args.world_translation), args.fk_position_tolerance, args.target_root)
+                arrays, report, diagnostics = prepare(source, target, raw, args.fps, world_translation, args.fk_position_tolerance, args.target_root)
         except (ValueError, KeyError, OSError) as error:
-            failed_conditions.append(dict(name=name, **entry, terrain_file=terrain['terrain_file'], error=str(error)))
+            failed_conditions.append(dict(name=name, **entry, terrain_file=terrain['terrain_file'],
+                                          world_translation_m=world_translation.tolist(), error=str(error)))
             continue
         length = len(arrays['qpos'])
         np.savez(args.output/f'{name}.npz', **arrays, names=np.array([name]), starts=np.array([0]), lengths=np.array([length]))
         np.savez(args.output/f'{name}_diagnostics.npz', **diagnostics)
-        index['clips'][name] = dict(shard=name, length=length, motion_file=entry['motion_file'], terrain_id=entry['terrain_id'])
-        reports.append(dict(name=name, terrain_file=terrain['terrain_file'], diagnostics_file=f'{name}_diagnostics.npz', **entry, **report))
+        index['clips'][name] = dict(shard=name, length=length, motion_file=entry['motion_file'], terrain_id=entry['terrain_id'], world_translation_m=world_translation.tolist())
+        reports.append(dict(name=name, base_translation_m=base_translation.tolist(), tile_translation_m=tile_offset.tolist(), world_translation_m=world_translation.tolist(), terrain_file=terrain['terrain_file'], diagnostics_file=f'{name}_diagnostics.npz', **entry, **report))
     binding = dict(source_nominal_joint_and_foot_properties=physical_properties(source),
                    target_joint_and_foot_properties=physical_properties(target),
                    source_physical_scope='Unshod popsicle XML selected by Perceptive G1. XML passive damping/frictionloss are preserved by the selected BeyondMimic actuators. XML armature is replaced by actuator group armature in the source task.',
@@ -254,8 +310,11 @@ def main():
                                  else 'MuJoCo source FK pelvis world pose'),
                    body_linear_velocity='World velocity of xpos body origin, mj_objectVelocity(mjOBJ_XBODY)', position_tolerance_m=args.fk_position_tolerance,
                    orientation_tolerance_rad=1e-6,
-                   world_translation_m=args.world_translation,
-                   terrain_alignment='Translation applies to motion only to match the generated terrain tile. CoACD top-surface alignment changes collision hulls only, never motion z.',
+                   base_translation_m=base_translation.tolist(),
+                   terrain_translations_m={key: value.tolist() for key, value in tile_offsets.items()},
+                   scene_artifact_id=args.scene_artifact_id,
+                   scene_contract=str(args.scene_contract) if args.scene_contract is not None else None,
+                   terrain_alignment='Raw source positions receive base translation plus the metadata terrain ID tile offset exactly once. CoACD top-surface alignment applies to collision hulls only.',
                    resampling='Linear positions/joints, shortest-path quaternion SLERP. First through last supported output-rate tick. No floor shift, clip filter, joint clamp or smoothing.',
                    source_total_mass_kg=float(source.body_mass.sum()), target_total_mass_kg=float(target.body_mass.sum()),
                    inertial_properties={b: {label: dict(mass_kg=float(model.body_mass[model.body(b).id]),
