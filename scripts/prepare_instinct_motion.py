@@ -59,6 +59,68 @@ def resample(pos, quat, joints, fps_in, fps_out):
 
 
 
+def resample_source(pos, quat, joints, fps_in, fps_out):
+    """InstinctMJ motion_interpolate_bilinear with its float32 frame arithmetic."""
+    pos, quat, joints = (np.asarray(value, dtype=np.float32) for value in (pos, quat, joints))
+    count = int(np.ceil((len(pos)-1)/fps_in*fps_out))
+    fractional = np.arange(count, dtype=np.float32)/fps_out*fps_in
+    fractional = fractional[fractional <= len(pos)-1]
+    if len(fractional) < 2:
+        raise ValueError('Source interpolation must retain at least two frames')
+    lo, hi = np.floor(fractional).astype(int), np.ceil(fractional).astype(int)
+    weight = (fractional-lo.astype(np.float32))[:, None]
+    qa, qb = quat[lo], quat[hi]
+    dot = np.clip((qa*qb).sum(-1, keepdims=True), -1, 1)
+    qb = np.where(dot < 0, -qb, qb)
+    dot = np.abs(dot)
+    angle = np.arccos(dot)
+    sine = np.sin(angle)
+    similar = (dot > 1-1e-9) | (np.abs(angle) < 1e-9)
+    denominator = np.where(sine == 0, np.ones_like(sine), sine)
+    q = (np.sin((1-weight)*angle)/denominator*qa + np.sin(weight*angle)/denominator*qb)*(~similar)+similar*qa
+    q /= np.linalg.norm(q, axis=-1, keepdims=True)
+    return (np.arange(len(fractional))/fps_out, weight*pos[hi]+(1-weight)*pos[lo], q,
+            weight*joints[hi]+(1-weight)*joints[lo])
+
+
+def source_linear_velocity(positions, dt):
+    values = np.asarray(positions, dtype=np.float32)
+    previous = np.concatenate((values[:1], values[:-1]))
+    following = np.concatenate((values[1:], values[-1:]))
+    return (following-previous)/(2*dt)
+
+
+def source_world_angular_velocity(quaternions, dt):
+    """World log(q_next*q_previous^-1)/(2dt), including repeated endpoints."""
+    values = np.asarray(quaternions, dtype=np.float32)
+    previous = np.concatenate((values[:1], values[:-1]))
+    following = np.concatenate((values[1:], values[-1:]))
+    following = np.where((previous*following).sum(-1, keepdims=True) < 0, -following, following)
+    # The optimized product and axis-angle operations follow mjlab 1.6's math API.
+    w1, x1, y1, z1 = np.moveaxis(following, -1, 0)
+    w2, x2, y2, z2 = np.moveaxis(previous*np.array([1,-1,-1,-1], dtype=np.float32), -1, 0)
+    ww = (z1+x1)*(x2+y2)
+    yy = (w1-y1)*(w2+z2)
+    zz = (w1+y1)*(w2-z2)
+    xx = ww+yy+zz
+    qq = .5*(xx+(z1-x1)*(x2-y2))
+    relative = np.stack((qq-ww+(z1-y1)*(y2-z2), qq-xx+(x1+w1)*(x2+w2),
+                         qq-yy+(w1-x1)*(y2+z2), qq-zz+(z1+y1)*(w2-x2)), axis=-1)
+    relative *= 1-2*(relative[..., :1] < 0)
+    magnitude = np.linalg.norm(relative[..., 1:], axis=-1)
+    half_angle = np.arctan2(magnitude, relative[..., 0])
+    angle = 2*half_angle
+    denominator = .5-angle*angle/48
+    np.divide(np.sin(half_angle), angle, out=denominator, where=np.abs(angle) > 1e-6)
+    return relative[..., 1:]/denominator[..., None]/(2*dt)
+
+
+def source_angular_velocity_in_body(quaternions, world_velocity):
+    q = np.asarray(quaternions, dtype=np.float32)
+    first_cross = np.cross(q[..., 1:], world_velocity)
+    return world_velocity-2*q[..., :1]*first_cross+2*np.cross(q[..., 1:], first_cross)
+
+
 def joint_limit_reading(names, positions, ranges):
     excess = np.maximum(ranges[:, 0]-positions, positions-ranges[:, 1]).clip(0)
     return excess, dict(
@@ -136,7 +198,7 @@ def physical_properties(model):
     return dict(joints=joints, feet=feet)
 
 
-def prepare(source, target, raw, fps_out, translation, position_tolerance, target_root):
+def prepare(source, target, raw, fps_out, translation, position_tolerance, target_root, velocity_definition):
     names = raw['joint_names'].tolist()
     if len(names) != 29 or len(set(names)) != 29 or set(names) != set(JOINTS):
         raise ValueError("Source joint_names must bind all 29 unique G1 joints")
@@ -149,7 +211,14 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance, targe
         raise ValueError("Source contains nonfinite values or invalid rate")
     if not np.allclose(np.linalg.norm(quat, axis=-1), 1, atol=1e-5):
         raise ValueError("Source WXYZ quaternions are not normalized")
-    times, p, q, joint = resample(pos, quat, joints, fps_in, fps_out)
+    if velocity_definition == 'source_frontbackward':
+        if target_root != 'torso_link' or fps_out != 50.:
+            raise ValueError('Source frontbackward velocities require the source torso-root binding at 50 Hz')
+        times, p, q, joint = resample_source(pos, quat, joints, fps_in, fps_out)
+    elif velocity_definition == 'mujoco_position_difference':
+        times, p, q, joint = resample(pos, quat, joints, fps_in, fps_out)
+    else:
+        raise ValueError('Unknown declared velocity definition')
     source_names = validate_model(source, 'torso_link')
     target_names = validate_model(target, target_root)
     if target_root not in ('torso_link', 'pelvis'):
@@ -163,12 +232,12 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance, targe
     source_body_pos = np.empty((len(times), len(BODIES), 3))
     source_body_quat = np.empty((len(times), len(BODIES), 4))
     for i in range(len(times)):
-        sd.qpos[:3], sd.qpos[3:7] = p[i] + translation, q[i]
+        sd.qpos[:3], sd.qpos[3:7] = p[i].astype(float) + translation, q[i]
         for j, name in enumerate(source_names, 1):
             sd.qpos[source.jnt_qposadr[j]] = joint[i, names.index(name)]
         mujoco.mj_kinematics(source, sd)
         if target_root == 'torso_link':
-            qpos[i, :3], qpos[i, 3:7] = p[i]+translation, q[i]
+            qpos[i, :3], qpos[i, 3:7] = p[i].astype(float)+translation, q[i]
         else:
             qpos[i, :3], qpos[i, 3:7] = sd.xpos[source.body('pelvis').id], sd.xquat[source.body('pelvis').id]
         for j, name in enumerate(target_names, 1):
@@ -176,21 +245,33 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance, targe
             qpos[i, target.jnt_qposadr[j]] = joint[i, names.index(name)] * (-1 if target_root == 'pelvis' and name.startswith('waist_') else 1)
         source_body_pos[i], source_body_quat[i] = sd.xpos[source_ids], sd.xquat[source_ids]
     qvel = np.empty((len(times), target.nv))
+    if velocity_definition == 'source_frontbackward':
+        qvel[:, :3] = source_linear_velocity(p, 1/fps_out)
+        qvel[:, 3:6] = source_angular_velocity_in_body(q, source_world_angular_velocity(q, 1/fps_out))
+        qvel[:, 6:] = source_linear_velocity(qpos[:, 7:], 1/fps_out)
     body_pos = np.empty_like(source_body_pos)
     body_quat = np.empty_like(source_body_quat)
     body_vel = np.empty((len(times), len(BODIES), 6))
     for i in range(len(times)):
-        a, b = max(0, i-1), min(len(times)-1, i+1)
-        mujoco.mj_differentiatePos(target, qvel[i], times[b]-times[a], qpos[a], qpos[b])
+        if velocity_definition == 'mujoco_position_difference':
+            a, b = max(0, i-1), min(len(times)-1, i+1)
+            mujoco.mj_differentiatePos(target, qvel[i], times[b]-times[a], qpos[a], qpos[b])
         td.qpos[:], td.qvel[:] = qpos[i], qvel[i]
         mujoco.mj_kinematics(target, td)
-        mujoco.mj_comPos(target, td)
-        mujoco.mj_comVel(target, td)
         body_pos[i], body_quat[i] = td.xpos[target_ids], td.xquat[target_ids]
-        for k, body in enumerate(target_ids):
-            mujoco.mj_objectVelocity(target, td, mujoco.mjtObj.mjOBJ_XBODY, body, body_vel[i, k], 0)
+        if velocity_definition == 'mujoco_position_difference':
+            mujoco.mj_comPos(target, td)
+            mujoco.mj_comVel(target, td)
+            for k, body in enumerate(target_ids):
+                mujoco.mj_objectVelocity(target, td, mujoco.mjtObj.mjOBJ_XBODY, body, body_vel[i, k], 0)
+    if velocity_definition == 'source_frontbackward':
+        # Differentiate motion-local poses, before the constant scene translation.
+        body_vel[..., 3:] = source_linear_velocity(body_pos-translation, 1/fps_out)
+        body_vel[..., :3] = source_world_angular_velocity(body_quat, 1/fps_out)
     pos_error = np.linalg.norm(body_pos-source_body_pos, axis=-1).max(axis=0)
-    ori_error = 2*np.arccos(np.clip(np.abs((body_quat*source_body_quat).sum(-1)), 0, 1)).max(axis=0)
+    quaternion_cosine = np.abs((body_quat*source_body_quat).sum(-1))/(
+        np.linalg.norm(body_quat, axis=-1)*np.linalg.norm(source_body_quat, axis=-1))
+    ori_error = 2*np.arccos(np.clip(quaternion_cosine, 0, 1)).max(axis=0)
     if pos_error.max() > position_tolerance or ori_error.max() > 1e-6:
         raise ValueError(f"Source/target FK binding exceeds declared tolerances: {pos_error.max()}m {ori_error.max()}rad")
     target_joint = qpos[:, target.jnt_qposadr[1:]]
@@ -200,7 +281,7 @@ def prepare(source, target, raw, fps_out, translation, position_tolerance, targe
     fk_position_error = np.linalg.norm(body_pos-source_body_pos, axis=-1)
     speed = np.linalg.norm(np.gradient(pos, 1/fps_in, axis=0), axis=1)
     up = 1-2*(quat[:, 1]**2+quat[:, 2]**2)
-    report = dict(source_joint_order=names, source_frames=n, source_fps=fps_in, source_duration_s=(n-1)/fps_in,
+    report = dict(velocity_definition=velocity_definition, source_joint_order=names, source_frames=n, source_fps=fps_in, source_duration_s=(n-1)/fps_in,
                   output_frames=len(times), output_duration_s=float(times[-1]),
                   source_frame_range_inclusive=[0, n-1], source_start_time_s=0.,
                   source_end_time_s=float((n-1)/fps_in), output_start_time_s=float(times[0]),
@@ -243,6 +324,8 @@ def main():
                              help='Six-terrain scene contract owning the base and per-terrain world translations')
     parser.add_argument('--scene-artifact-id')
     parser.add_argument('--fps', type=float, default=50.)
+    parser.add_argument('--velocity-definition', required=True,
+                        choices=['source_frontbackward', 'mujoco_position_difference'])
     parser.add_argument('--motion-index', type=int, action='append', help='Zero-based metadata entry, repeatable. Default selects all ten.')
     parser.add_argument('--fk-position-tolerance', type=float, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -281,7 +364,8 @@ def main():
         if actual_names != scene['actuator_joint_names']:
             raise ValueError('Actual target model actuator binding differs from the selected scene contract')
     args.output.mkdir(parents=True, exist_ok=False)
-    index = dict(fps=args.fps, bodies=BODIES, clips={}, scene_artifact_id=args.scene_artifact_id)
+    index = dict(fps=args.fps, bodies=BODIES, clips={}, scene_artifact_id=args.scene_artifact_id,
+                 velocity_definition=args.velocity_definition)
     reports, failed_conditions = [], []
     for i, entry, terrain in selection:
         name = f'motion_{i:02d}'
@@ -289,7 +373,7 @@ def main():
         world_translation = base_translation+tile_offset
         try:
             with np.load(args.dataset/entry['motion_file'], allow_pickle=False) as raw:
-                arrays, report, diagnostics = prepare(source, target, raw, args.fps, world_translation, args.fk_position_tolerance, args.target_root)
+                arrays, report, diagnostics = prepare(source, target, raw, args.fps, world_translation, args.fk_position_tolerance, args.target_root, args.velocity_definition)
         except (ValueError, KeyError, OSError) as error:
             failed_conditions.append(dict(name=name, **entry, terrain_file=terrain['terrain_file'],
                                           world_translation_m=world_translation.tolist(), error=str(error)))
@@ -308,14 +392,25 @@ def main():
                    joint_mapping=[dict(target=n, source=n, sign=-1 if args.target_root == 'pelvis' and n.startswith('waist_') else 1) for n in target_names],
                    root_mapping=('Source torso world pose directly' if args.target_root == 'torso_link'
                                  else 'MuJoCo source FK pelvis world pose'),
-                   body_linear_velocity='World velocity of xpos body origin, mj_objectVelocity(mjOBJ_XBODY)', position_tolerance_m=args.fk_position_tolerance,
+                   velocity_definition=args.velocity_definition,
+                   body_velocity=('Source float32 world-pose frontbackward difference, repeated endpoints divided by 2dt'
+                                  if args.velocity_definition == 'source_frontbackward' else
+                                  'MuJoCo xpos body-origin instantaneous world velocity, mjOBJ_XBODY'),
+                   free_velocity='World linear velocity and current-root-body angular velocity',
+                   source_velocity_order='Interpolate 90 Hz poses to 50 Hz, then estimate velocities from the interpolated sequence',
+                   source_velocity_coordinate='World angular log(q_next*q_previous^-1)/(2dt); free-root angular velocity rotated by inverse current root orientation',
+                   body_pose_representation='MuJoCo FK on the named target model; source velocity differences computed on motion-local float32 body poses before tile translation',
+                   position_tolerance_m=args.fk_position_tolerance,
                    orientation_tolerance_rad=1e-6,
                    base_translation_m=base_translation.tolist(),
                    terrain_translations_m={key: value.tolist() for key, value in tile_offsets.items()},
                    scene_artifact_id=args.scene_artifact_id,
                    scene_contract=str(args.scene_contract) if args.scene_contract is not None else None,
                    terrain_alignment='Raw source positions receive base translation plus the metadata terrain ID tile offset exactly once. CoACD top-surface alignment applies to collision hulls only.',
-                   resampling='Linear positions/joints, shortest-path quaternion SLERP. First through last supported output-rate tick. No floor shift, clip filter, joint clamp or smoothing.',
+                   resampling=('Source float32 bilinear position/joint interpolation and source near-identical-quaternion SLERP; ceil(duration*rate) frame count'
+                               if args.velocity_definition == 'source_frontbackward' else
+                               'Float64 linear positions/joints and shortest-path SLERP, through last supported control tick'),
+                   filtering='No floor shift, clip filter, joint clamp or smoothing' ,
                    source_total_mass_kg=float(source.body_mass.sum()), target_total_mass_kg=float(target.body_mass.sum()),
                    inertial_properties={b: {label: dict(mass_kg=float(model.body_mass[model.body(b).id]),
                        body_inertia_kg_m2=model.body_inertia[model.body(b).id].tolist(),
