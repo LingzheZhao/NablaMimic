@@ -41,19 +41,24 @@ def main():
     parser.add_argument('--config', type=Path)
     parser.add_argument('--code-revision')
     parser.add_argument('--record-substeps', action='store_true')
+    parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'))
     parser.add_argument('--output', type=Path)
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
-    if args.config is None or args.output is None or args.code_revision is None:
-        parser.error('--config, --output and --code-revision are required')
+    if args.config is None or args.output is None or args.code_revision is None or args.reset_condition is None:
+        parser.error('--config, --output, --code-revision and --reset-condition are required')
     import torch
     from nablaengine import torch_ffi as engine
     from nablamimic.torch_train import build_environment
 
     config = json.loads(args.config.read_text())
+    if not {'source_motion_start_height_offset','source_ensure_link_below_zero_ground'} <= config.keys():
+        raise ValueError('Evaluation requires a current resolved source reset configuration')
+    config.update(source_motion_start_height_offset=.1 if args.reset_condition == 'source-reset' else 0.,
+                  source_ensure_link_below_zero_ground=args.reset_condition == 'source-reset')
     if config['task_inputs'] != 'instinct_perceptive_native':
         raise ValueError('This baseline requires the source perceptive task')
     if config['action_limit'] != 20.:

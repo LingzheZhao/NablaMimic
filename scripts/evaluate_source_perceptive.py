@@ -21,12 +21,17 @@ def main():
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
+    parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'), required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.maximum_controls is not None and args.maximum_controls < 1:
         raise ValueError("Requested source rollout must contain at least one control")
     args.output.mkdir(parents=True, exist_ok=False)
     config = json.loads(args.config.read_text())
+    if not {'source_motion_start_height_offset','source_ensure_link_below_zero_ground'} <= config.keys():
+        raise ValueError('Evaluation requires a current resolved source reset configuration')
+    config.update(source_motion_start_height_offset=.1 if args.reset_condition == 'source-reset' else 0.,
+                  source_ensure_link_below_zero_ground=args.reset_condition == 'source-reset')
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
     env, bindings = build_environment(argparse.Namespace(**config))

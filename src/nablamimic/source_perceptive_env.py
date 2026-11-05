@@ -119,6 +119,13 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         frame=frame.to(dtype=torch.int32)
         qpos=self.ref_qpos[frame].clone()
         qvel=self.ref_qvel[frame].clone()
+        height_offset=torch.full_like(qpos[:,2],self.cfg.source_motion_start_height_offset)
+        if self.cfg.source_ensure_link_below_zero_ground:
+            minimum_height=self.ref_body_pos[frame,:,2].amin(dim=-1)
+            # Preserve the upstream whole-batch branch, including positive rows.
+            height_offset=height_offset+torch.where(minimum_height.lt(0).any(),
+                -minimum_height,torch.zeros_like(minimum_height))
+        qpos=torch.cat((qpos[:,:2],(qpos[:,2]+height_offset)[:,None],qpos[:,3:]),-1)
         if self.cfg.reset_noise:
             qpos=torch.cat((qpos[:,:3]+noise['position']*self.reset_position_limits,
                             qpos[:,3:7],qpos[:,7:]+.1*noise['joints']),-1)

@@ -552,6 +552,8 @@ def build_parser():
     parser.add_argument("--terrain-sensor", type=Path)
     parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
     parser.add_argument("--source-reset-profile", choices=("nominal", "source_pose"), default="nominal")
+    parser.add_argument("--source-motion-start-height-offset", type=float, default=0.)
+    parser.add_argument("--source-ensure-link-below-zero-ground", action="store_true")
     parser.add_argument("--source-depth-noise", action="store_true")
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
@@ -565,6 +567,8 @@ def build_parser():
 
 
 def validate_args(args):
+    if not math.isfinite(args.source_motion_start_height_offset):
+        raise ValueError("Source reset height offset must be finite")
     if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
         raise ValueError("Source perceptive task requires its scene-bound sharded library")
     if sum(bool(value) for value in (args.actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
@@ -651,6 +655,8 @@ def build_environment(args):
         dr=args.task_inputs == 'heightscan_pilot',
         reset_noise=args.task_inputs == 'heightscan_pilot' or args.source_reset_profile == 'source_pose',
         source_reset_profile=args.source_reset_profile,
+        source_motion_start_height_offset=args.source_motion_start_height_offset,
+        source_ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
@@ -673,7 +679,10 @@ def build_environment(args):
     config['observation'] = env.observation_contract
     if source_task:
         config['action'] = env.action_contract
-        config['reset'] = dict(profile=args.source_reset_profile, definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
+        config['reset'] = dict(profile=args.source_reset_profile,
+            motion_start_height_offset_m=args.source_motion_start_height_offset,
+            ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
+            ground_adjustment='If any selected frame has a tracked link below zero, subtract each selected frame minimum tracked-link z from its root z', definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
     config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
     if args.terrain_sensor or source_task:
         expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)

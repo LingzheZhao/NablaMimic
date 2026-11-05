@@ -77,6 +77,8 @@ class EnvConfig:
     root_position_weight: float = 0.5
     source_depth_noise: bool = False
     source_reset_profile: str = "nominal"
+    source_motion_start_height_offset: float = 0.0
+    source_ensure_link_below_zero_ground: bool = False
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions

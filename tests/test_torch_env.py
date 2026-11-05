@@ -63,6 +63,8 @@ class TorchEnvironmentTest(unittest.TestCase):
         env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
         env.__dict__.update(template.__dict__)
         env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=0.
+        env.cfg.source_ensure_link_below_zero_ground=False
         env.reset_position_limits=torch.tensor([.15,.15,0.])
         env.ref_qpos[0,:3]=torch.tensor([3.,4.,.8])
         env.ref_qpos[0,7:]=2.
@@ -79,6 +81,26 @@ class TorchEnvironmentTest(unittest.TestCase):
             state=env.reset(frame,noise)
             torch.testing.assert_close(state['qpos'][:,7:],env.ref_qpos[frame,7:]+.1*direction)
             torch.testing.assert_close(state['qvel'],env.ref_qvel[frame],rtol=0,atol=0)
+
+    def test_source_reset_lift_preserves_upstream_batch_branch(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture()
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=.1
+        env.cfg.source_ensure_link_below_zero_ground=True
+        env.ref_body_pos[0,:,2]=.04
+        env.ref_body_pos[1,:,2]=-.2
+        # A positive-only batch receives just the fixed lift.
+        state=env.reset(torch.tensor([0]))
+        torch.testing.assert_close(state['qpos'][:,2],env.ref_qpos[[0],2]+.1)
+        # One negative frame triggers subtraction for every selected row.
+        frames=torch.tensor([0,1])
+        state=env.reset(frames)
+        torch.testing.assert_close(state['qpos'][:,2],env.ref_qpos[frames,2]+torch.tensor([.06,.3]))
+        torch.testing.assert_close(state['qvel'],env.ref_qvel[frames])
+        torch.testing.assert_close(state['qpos'][:,3:],env.ref_qpos[frames,3:])
 
     def test_root_position_weight_and_maximum_reward_use_the_same_value(self):
         baseline, _ = fixture(root_position_weight=.5)
