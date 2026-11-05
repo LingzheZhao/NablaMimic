@@ -123,12 +123,12 @@ def discounted_return_bound(maximum_reward, gamma, maximum_controls):
     return maximum_reward*(1-gamma**maximum_controls)/(1-gamma)
 
 
-def bootstrap_value(value, bound):
+def bootstrap_value(value, bound, *, gradient=True):
     """Symmetric native algorithm clip. The lower bound is an algorithm choice."""
-    if bound is None:
-        return value
-    lower,upper=value.new_full((),-bound),value.new_full((),bound)
-    return torch.minimum(torch.maximum(value,lower),upper)
+    if bound is not None:
+        lower,upper=value.new_full((),-bound),value.new_full((),bound)
+        value=torch.minimum(torch.maximum(value,lower),upper)
+    return value if gradient else value.detach()
 
 
 def td_lambda(reward, terminated, done, next_value, gamma, lam):

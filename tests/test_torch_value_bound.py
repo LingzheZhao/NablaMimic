@@ -31,6 +31,30 @@ class TorchValueBoundTest(unittest.TestCase):
         self.assertLessEqual(float(target.max()),10.)
         self.assertGreater(float(nets.td_lambda(reward,terminated,done,raw,.99,.95).max()),300.)
 
+    def test_bootstrap_gradient_switch_preserves_values_td_and_reward_gradient(self):
+        gradients=[]
+        values=[]
+        targets=[]
+        for enabled in (True,False):
+            action=torch.tensor([.2,.4],requires_grad=True)
+            reward=action.square()
+            raw_next=3*action
+            raw_end=5*action
+            next_value=nets.bootstrap_value(raw_next,1.,gradient=enabled)
+            end_value=nets.bootstrap_value(raw_end,1.,gradient=enabled)
+            loss=-(reward+.9*next_value+.9**2*end_value).sum()
+            gradients.append(torch.autograd.grad(loss,action)[0])
+            values.append(torch.stack((next_value,end_value)))
+            targets.append(nets.td_lambda(reward[None],torch.zeros(1,2,dtype=torch.bool),
+                torch.ones(1,2,dtype=torch.bool),next_value[None],.9,.95))
+        torch.testing.assert_close(values[0],values[1],rtol=0,atol=0)
+        torch.testing.assert_close(targets[0],targets[1],rtol=0,atol=0)
+        torch.testing.assert_close(gradients[1],torch.tensor([-.4,-.8]))
+        self.assertGreater(float((gradients[0]-gradients[1]).abs().sum()),0)
+        raw=torch.tensor([.1],requires_grad=True)
+        self.assertIs(nets.bootstrap_value(raw,None),raw)
+        self.assertFalse(nets.bootstrap_value(raw,None,gradient=False).requires_grad)
+
     def test_critic_regression_uses_raw_prediction_and_can_correct_saturation(self):
         prediction=torch.tensor([30.],requires_grad=True)
         target=torch.tensor([5.])

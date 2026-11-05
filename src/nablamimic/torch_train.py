@@ -43,7 +43,7 @@ def state_where(done, reset, state):
     return select_reset(done, reset, state)
 
 
-def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True, v_bound=None):
+def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True, v_bound=None, bootstrap_gradient=True):
     """One differentiable control step; all objective accumulators stay tensors."""
     def body(actor, critic, cnorm, state, reset, acc, discount, total, reset_age,
              latent, reset_latents, action_noise, proprio_noise, goal_noise, delta, probe):
@@ -78,7 +78,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
         done = terminated | env.clip_ended(stepped) | (stepped['ep'] >= max_episode_steps)
         cobs = env.critic_obs(stepped)
         raw_value = nets.critic_apply(critic, nets.normalize(cnorm, cobs))[:, 0]
-        value = nets.bootstrap_value(raw_value, v_bound)
+        value = nets.bootstrap_value(raw_value, v_bound, gradient=bootstrap_gradient)
         reward = torch.where(torch.isfinite(reward), reward, 0.0)
         value = torch.where(torch.isfinite(value), value, 0.0)
         next_acc = acc + discount * reward
@@ -96,7 +96,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
     return body
 
 
-def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode, v_bound=None):
+def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode, v_bound=None, bootstrap_gradient=True):
     """Eager host orchestration around compiled body calls, captured as one graph."""
     def window(start, reset, action_noise, proprio_noise, goal_noise, delta, probe):
         continuous_latents, reset_latents = encode(actor, start['frame'], reset['frame'])
@@ -115,7 +115,7 @@ def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode, v_bound
             records.append(row)
         state, acc, discount, total, _ = carry
         last_value_raw = nets.critic_apply(critic, nets.normalize(cnorm, env.critic_obs(state)))[:, 0]
-        last_value = nets.bootstrap_value(last_value_raw, v_bound)
+        last_value = nets.bootstrap_value(last_value_raw, v_bound, gradient=bootstrap_gradient)
         objective = -(total + acc + discount * torch.where(torch.isfinite(last_value), last_value, 0.0)).mean()
         gradients, clip_statistics = torch.autograd.grad(objective, (delta, probe))
         outputs = nets.tree_map(lambda *rows: torch.stack(rows), *records)
@@ -222,10 +222,10 @@ class TorchTrainer:
             return sequence(frames), sequence(reset_frames)
 
         body = make_control_body(env, args.gamma, args.max_episode_steps, args.act_cot_clip,
-                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot', v_bound=self.value_bound)
+                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot', v_bound=self.value_bound, bootstrap_gradient=args.bootstrap_gradient)
         self.body = compile_fullgraph(body) if args.execution != 'eager' else body
         self.encode = compile_fullgraph(encode) if args.execution != 'eager' else encode
-        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode, self.value_bound)
+        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode, self.value_bound, args.bootstrap_gradient)
         self.target_fn = lambda a, g: nets.action_targets(
             a, g, env.action_scale, args.action_target[2], args.act_cot_clip,
             outer_step=self.outer_step, decay_steps=args.lr_decay_steps,
@@ -559,6 +559,7 @@ def build_parser():
     parser.add_argument("--root-position-weight", type=float, default=.5)
     parser.add_argument("--actor-checkpoint", type=Path)
     parser.add_argument("--official-actor-checkpoint", type=Path)
+    parser.add_argument("--bootstrap-gradient", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--actor-weights", choices=("ema", "live"))
     parser.add_argument("--actor-anchor-position", action="store_true")
     parser.add_argument("--action-limit", type=float, default=None)
