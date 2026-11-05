@@ -2,6 +2,8 @@
 
 Requires the pinned environment's MuJoCo rendering backend. Uses an existing
 ffmpeg executable when available, otherwise writes PNG frames at control_hz.
+Optional --reference overlays the prepared robot at each recorded reference frame,
+with ACTUAL and REFERENCE colour captions and one copy of the terrain.
 No physics stepping or policy inference occurs during rendering.
 """
 import argparse
@@ -29,10 +31,34 @@ def write_png(path, pixels):
                      chunk(b'IDAT', zlib.compress(scanlines)) + chunk(b'IEND', b''))
 
 
+def caption(pixels, text, left, color):
+    """Draw the two fixed comparison labels without a font dependency."""
+    glyphs = {
+        'A': ('01110', '10001', '10001', '11111', '10001', '10001', '10001'),
+        'C': ('01111', '10000', '10000', '10000', '10000', '10000', '01111'),
+        'T': ('11111', '00100', '00100', '00100', '00100', '00100', '00100'),
+        'U': ('10001', '10001', '10001', '10001', '10001', '10001', '01110'),
+        'L': ('10000', '10000', '10000', '10000', '10000', '10000', '11111'),
+        'R': ('11110', '10001', '10001', '11110', '10100', '10010', '10001'),
+        'E': ('11111', '10000', '10000', '11110', '10000', '10000', '11111'),
+        'F': ('11111', '10000', '10000', '11110', '10000', '10000', '10000'),
+        'N': ('10001', '11001', '11001', '10101', '10011', '10011', '10001'),
+    }
+    scale = 2
+    for letter in text:
+        for row, values in enumerate(glyphs[letter]):
+            for column, value in enumerate(values):
+                if value == '1':
+                    pixels[8 + row*scale:8 + (row+1)*scale,
+                           left + column*scale:left + (column+1)*scale] = color
+        left += 6*scale
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--trajectory', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
+    parser.add_argument('--reference', type=Path, help='Prepared single-motion NPZ to overlay at recorded reference frames')
     parser.add_argument('--code-revision', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--ffmpeg', type=Path, help='Explicit executable from the pinned encoder artifact')
@@ -47,6 +73,8 @@ def main():
         parser.error('Positive even dimensions and a positive camera distance are required')
     args.trajectory = args.trajectory.resolve()
     args.model = args.model.resolve()
+    if args.reference is not None:
+        args.reference = args.reference.resolve()
     if args.ffmpeg is not None:
         args.ffmpeg = args.ffmpeg.resolve()
     args.output = args.output.resolve()
@@ -91,6 +119,28 @@ def main():
     if not np.isfinite(poses).all():
         raise ValueError('Recorded physical qpos contains nonfinite values')
     reference_frames = np.concatenate((reference_frames, final_frame))
+    reference_poses = None
+    if args.reference is not None:
+        screening = json.loads(args.reference.with_name('screening.json').read_text())
+        index = json.loads(args.reference.with_name('index.json').read_text())
+        joint_names = [model.joint(i).name for i in range(1, model.njnt)]
+        if screening['binding']['target_joint_order'] != joint_names or screening['binding']['target_root'] != 'pelvis':
+            raise ValueError('Reference joint order or root differs from the rendered physical model')
+        if index['fps'] != control_hz:
+            raise ValueError('Reference and evaluation sample rates differ')
+        with np.load(args.reference, allow_pickle=False) as reference:
+            reference_qpos = reference['qpos']
+            if reference['starts'].tolist() != [0] or reference['lengths'].tolist() != [len(reference_qpos)]:
+                raise ValueError('Reference must use the prepared single-motion NPZ schema')
+            if reference['names'].tolist() != [args.reference.stem]:
+                raise ValueError('Reference name differs from the selected prepared clip')
+        if reference_qpos.ndim != 2 or reference_qpos.shape[1] != model.nq or not np.isfinite(reference_qpos).all():
+            raise ValueError('Reference qpos must be finite and match the physical model width')
+        if not np.issubdtype(reference_frames.dtype, np.integer) or reference_frames.min() < 0 or reference_frames.max() >= len(reference_qpos):
+            raise ValueError('Recorded reference frames must index the selected complete reference')
+        reference_poses = reference_qpos[reference_frames]
+        if args.width < 300 or args.height < 30:
+            raise ValueError('Reference comparison captions require at least 300 by 30 pixels')
     model.vis.global_.offwidth = args.width
     model.vis.global_.offheight = args.height
     # The physical fixture contains collision geoms. Give the body and terrain
@@ -99,6 +149,9 @@ def main():
     model.geom_rgba[robot_geoms] = [.18, .45, .80, 1.0]
     model.geom_rgba[~robot_geoms] = [.62, .66, .51, 1.0]
     data = mujoco.MjData(model)
+    reference_data = mujoco.MjData(model) if reference_poses is not None else None
+    reference_option = mujoco.MjvOption()
+    reference_perturb = mujoco.MjvPerturb()
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
     camera.azimuth, camera.elevation = args.azimuth, args.elevation
@@ -106,7 +159,8 @@ def main():
     robot_bodies = np.flatnonzero(model.body_rootid != 0)
     if args.camera == 'fixed':
         centers = []
-        for pose in poses:
+        framing_poses = poses if reference_poses is None else np.concatenate((poses, reference_poses))
+        for pose in framing_poses:
             data.qpos[:] = pose
             mujoco.mj_kinematics(model, data)
             centers.append((data.xpos[robot_bodies].min(0) + data.xpos[robot_bodies].max(0)) / 2)
@@ -121,7 +175,9 @@ def main():
                   mujoco_version=mujoco.__version__, mujoco_gl=os.environ['MUJOCO_GL'],
                   geometry='Compiled physical collision geometry; robot blue and terrain olive',
                   ffmpeg=ffmpeg, format='mp4' if ffmpeg else 'png_frames',
-                  terminal_state_included=True, physics_steps=0)
+                  terminal_state_included=True, physics_steps=0,
+                  comparison='Actual blue, reference translucent cream, one physical terrain' if reference_poses is not None else None,
+                  reference_artifact_id=screening['artifact_id'] if reference_poses is not None else None)
     write_status()
     process = None
     frames = args.output / 'frames'
@@ -141,10 +197,27 @@ def main():
                     data.qpos[:] = pose
                     mujoco.mj_kinematics(model, data)
                     mujoco.mj_camlight(model, data)
+                    body_positions = data.xpos[robot_bodies]
+                    if reference_data is not None:
+                        reference_data.qpos[:] = reference_poses[index]
+                        mujoco.mj_kinematics(model, reference_data)
+                        body_positions = np.concatenate((body_positions, reference_data.xpos[robot_bodies]))
                     if args.camera == 'follow':
-                        camera.lookat[:] = (data.xpos[robot_bodies].min(0) + data.xpos[robot_bodies].max(0)) / 2
+                        camera.lookat[:] = (body_positions.min(0) + body_positions.max(0)) / 2
+                        if reference_data is not None:
+                            camera.distance = max(args.distance, float(np.linalg.norm(np.ptp(body_positions, axis=0))) + 1)
                     renderer.update_scene(data, camera=camera)
+                    if reference_data is not None:
+                        actual_geoms = renderer.scene.ngeom
+                        mujoco.mjv_addGeoms(model, reference_data, reference_option, reference_perturb,
+                                           mujoco.mjtCatBit.mjCAT_DYNAMIC, renderer.scene)
+                        for geom in renderer.scene.geoms[actual_geoms:renderer.scene.ngeom]:
+                            geom.rgba[:] = [.95, .88, .68, .45]
                     pixels = renderer.render()
+                    if reference_data is not None:
+                        pixels[:30] = [20, 24, 30]
+                        caption(pixels, 'ACTUAL', 10, [70, 150, 255])
+                        caption(pixels, 'REFERENCE', 120, [245, 225, 175])
                     if process:
                         process.stdin.write(pixels.tobytes())
                     else:
