@@ -10,12 +10,26 @@ import numpy as np
 
 SCRIPTS = Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-from evaluate_source_perceptive import reference_window_activity, select_motion_indices, set_camera_input, source_window, summarize_window
+from evaluate_source_perceptive import reference_window_activity, select_motion_indices, set_camera_input, set_evaluation_conditions, source_window, summarize_window
 from render_source_trajectory import reference_frame_indices
 sys.path.pop(0)
 
 
 class SourceEvaluationWindowTest(unittest.TestCase):
+    def test_evaluation_owns_no_gradient_independent_of_training_gradient(self):
+        for gradient in ({},{'source_depth_gradient':True},{'source_depth_gradient':False}):
+            for reset in ('source-reset','exact-reference'):
+                conditions=dict(source_motion_start_height_offset=.1,
+                    source_ensure_link_below_zero_ground=True,
+                    source_depth_noise=True,residual_action=True,term_penalty=[2.,.02,.1],**gradient)
+                set_evaluation_conditions(conditions,reset)
+                self.assertIs(conditions['source_depth_gradient'],False)
+                self.assertEqual(conditions['source_motion_start_height_offset'],.1 if reset=='source-reset' else 0.)
+                self.assertEqual(conditions['source_ensure_link_below_zero_ground'],reset=='source-reset')
+                self.assertTrue(conditions['source_depth_noise'])
+                self.assertTrue(conditions['residual_action'])
+                self.assertEqual(conditions['term_penalty'],[2.,.02,.1])
+
     def test_camera_input_cli_accepts_only_declared_choices(self):
         command=[sys.executable,'-B',str(SCRIPTS/'evaluate_source_perceptive.py'),'--camera-input']
         environment={**os.environ,'PYTHONPATH':str(SCRIPTS.parent/'src')}

@@ -8,6 +8,15 @@ import numpy as np
 from nablamimic.source_evaluation_metrics import summarize_source_chain
 
 
+def set_evaluation_conditions(config, reset_condition):
+    """Own inference-only gradient and explicitly selected reset conditions."""
+    if not {'source_motion_start_height_offset','source_ensure_link_below_zero_ground'} <= config.keys():
+        raise ValueError('Evaluation requires a current resolved source reset configuration')
+    config.update(source_depth_gradient=False,
+                  source_motion_start_height_offset=.1 if reset_condition == 'source-reset' else 0.,
+                  source_ensure_link_below_zero_ground=reset_condition == 'source-reset')
+
+
 def set_camera_input(policy_observation, camera_input='measured'):
     """Replace only the generated source depth slice before frozen normalization."""
     if policy_observation.ndim != 2 or policy_observation.shape[1] != 744+576:
@@ -88,10 +97,7 @@ def main():
 
     args.output.mkdir(parents=True, exist_ok=False)
     config = json.loads(args.config.read_text())
-    if not {'source_motion_start_height_offset','source_ensure_link_below_zero_ground'} <= config.keys():
-        raise ValueError('Evaluation requires a current resolved source reset configuration')
-    config.update(source_motion_start_height_offset=.1 if args.reset_condition == 'source-reset' else 0.,
-                  source_ensure_link_below_zero_ground=args.reset_condition == 'source-reset')
+    set_evaluation_conditions(config,args.reset_condition)
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
     env, bindings = build_environment(argparse.Namespace(**config))
