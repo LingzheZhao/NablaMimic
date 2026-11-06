@@ -482,7 +482,8 @@ class TorchTrainer:
         if state['observation'] != self.env.observation_contract:
             raise ValueError('Resume policy observation contract differs')
         controls = {'out', 'config', 'resume', 'iters', 'hours', 'save_wall_minutes',
-                    'ckpt_every', 'full_state_at_end', 'initial_checkpoint'}
+                    'ckpt_every', 'full_state_at_end', 'initial_checkpoint',
+                    'actor_checkpoint', 'actor_weights', 'official_actor_checkpoint'}
         current, saved = vars(self.args), state['resolved_config']
         for key in set(current) | set(saved):
             if key not in controls and current.get(key) != saved.get(key):
