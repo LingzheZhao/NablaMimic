@@ -65,8 +65,9 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
     def depth_image(self, state):
         with torch.set_grad_enabled(torch.is_grad_enabled() and self.cfg.source_depth_gradient):
             measured = self._depth_image(state)
-        # Generate the complete sensor/noise first so matched conditions consume
-        # identical random draws. No measured image reaches policy consumers.
+        # Eager execution generates sensor/noise before replacing the image.
+        # Compilation can eliminate that unused computation and its random draws.
+        # Constant-far remains exactly one and carries no measured depth.
         if self.cfg.source_camera_input == 'constant-far':
             return torch.ones_like(measured)
         return measured
