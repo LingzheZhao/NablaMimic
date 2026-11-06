@@ -1,4 +1,4 @@
-"""Terminal-inclusive source executions and time-separated world-model windows.
+"""Terminal-inclusive source executions and declared world-model window splits.
 
 Every state array has T+1 rows and every transition array has T rows. A window
 with transition bounds [start, stop) contains state rows [start, stop], so next
@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCHEMA = "nablamimic_source_world_model_v1"
+SCHEMA = "nablamimic_source_world_model_v2"
 STATE_SHAPES = {
     "qpos": (36,), "qvel": (35,), "warm": (35,), "torso_state": (13,),
     "body_pos": (14, 3), "body_quat": (14, 4), "history": (8, 93),
@@ -116,6 +116,45 @@ def temporal_windows(lengths, window_controls, heldout_fraction, gap_controls):
     return {name: np.asarray(value, dtype=np.int64).reshape(-1, 3) for name, value in rows.items()}, splits
 
 
+def episode_schedule(episode_seeds, motion_count):
+    """Visit every motion for each declared seed, retaining the supplied order."""
+    if (not episode_seeds or any(type(seed) is not int or not 0 <= seed < 2**32 for seed in episode_seeds)
+            or len(set(episode_seeds)) != len(episode_seeds)):
+        raise ValueError("Episode seeds must be distinct integers in [0, 2**32)")
+    if type(motion_count) is not int or motion_count < 1:
+        raise ValueError("Motion count must be a positive integer")
+    return [(seed, clip) for seed in episode_seeds for clip in range(motion_count)]
+
+
+def split_windows(episodes, protocol):
+    """Build current-format temporal or whole-episode window indices."""
+    lengths = [episode["transitions"] for episode in episodes]
+    window_controls = protocol["window_controls"]
+    if protocol["split_type"] == "temporal":
+        return temporal_windows(lengths, window_controls, protocol["heldout_fraction"], protocol["gap_controls"])
+    if protocol["split_type"] != "episode":
+        raise ValueError("Window split_type must be temporal or episode")
+    if type(window_controls) is not int or window_controls < 1:
+        raise ValueError("Window controls must be a positive integer")
+    seeds = {episode["seed"] for episode in episodes}
+    heldout = protocol["heldout_seeds"]
+    if (not heldout or len(set(heldout)) != len(heldout)
+            or any(type(seed) is not int for seed in heldout)
+            or not set(heldout) < seeds):
+        raise ValueError("Heldout seeds must be a nonempty proper subset of collected episode seeds")
+    rows = {"train": [], "heldout": []}
+    splits = []
+    for index, (episode, length) in enumerate(zip(episodes, lengths)):
+        if type(length) is not int or length < 0:
+            raise ValueError("Episode transition counts must be nonnegative integers")
+        split = "heldout" if episode["seed"] in heldout else "train"
+        splits.append(dict(train_transition_bounds=[0, length if split == "train" else 0],
+                           heldout_transition_bounds=[0, length if split == "heldout" else 0]))
+        rows[split].extend((index, start, start + window_controls)
+                           for start in range(length - window_controls + 1))
+    return {name: np.asarray(value, dtype=np.int64).reshape(-1, 3) for name, value in rows.items()}, splits
+
+
 class SourceWorldModelDataset:
     """Load only this producer's format, with one in-memory owner per episode.
 
@@ -130,6 +169,9 @@ class SourceWorldModelDataset:
         if self.manifest["schema"] != SCHEMA or self.manifest["status"] != "complete" or split not in ("train", "heldout"):
             raise ValueError("Source world-model dataset schema or split is invalid")
         self.episode_metadata = self.manifest["episodes"]
+        schedule = episode_schedule(self.manifest["episode_seeds"], self.manifest["motion_count"])
+        if [(episode["seed"], episode["clip_index"]) for episode in self.episode_metadata] != schedule:
+            raise ValueError("Episodes must cover every declared seed/motion pair in collection order")
         self._episodes = []
         for episode in self.episode_metadata:
             path = self.root / episode["file"]
@@ -140,12 +182,9 @@ class SourceWorldModelDataset:
             if validate_episode(arrays) != episode["transitions"]:
                 raise ValueError("Episode transition count differs from the manifest")
             self._episodes.append(arrays)
-        protocol = self.manifest["temporal_split"]
-        expected, splits = temporal_windows(
-            [episode["transitions"] for episode in self.episode_metadata],
-            protocol["window_controls"], protocol["heldout_fraction"], protocol["gap_controls"])
+        expected, splits = split_windows(self.episode_metadata, self.manifest["window_split"])
         if splits != [episode["split"] for episode in self.episode_metadata]:
-            raise ValueError("Episode split bounds differ from the declared temporal protocol")
+            raise ValueError("Episode split bounds differ from the declared window protocol")
         with np.load(self.root / "windows.npz", allow_pickle=False) as archive:
             if set(archive.files) != {"train", "heldout"}:
                 raise ValueError("Window index must contain the two declared splits")
@@ -157,7 +196,7 @@ class SourceWorldModelDataset:
         self.split = split
 
     def split_view(self, split):
-        """Borrow this dataset's loaded episodes and checked temporal indices."""
+        """Borrow this dataset's loaded episodes and checked split indices."""
         if split not in self._window_indices:
             raise ValueError("Source world-model split must be train or heldout")
         view = type(self).__new__(type(self))

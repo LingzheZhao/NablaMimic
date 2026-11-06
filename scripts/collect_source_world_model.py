@@ -8,7 +8,7 @@ import numpy as np
 
 from nablamimic.source_world_model_data import (
     SCHEMA, STATE_KEYS, STATE_SHAPES, TRANSITION_KEYS, TRANSITION_SHAPES,
-    temporal_windows, validate_episode, validity_masks,
+    episode_schedule, split_windows, validate_episode, validity_masks,
 )
 
 
@@ -22,10 +22,12 @@ def build_parser():
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--sensor-noise", choices=("off", "on"), required=True)
     parser.add_argument("--action-noise-std", type=float, default=0.)
-    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--episode-seeds", type=int, nargs="+", required=True)
+    parser.add_argument("--split-type", choices=("temporal", "episode"), required=True)
+    parser.add_argument("--heldout-seeds", type=int, nargs="+")
     parser.add_argument("--window-controls", type=int, default=32)
-    parser.add_argument("--heldout-fraction", type=float, default=.2)
-    parser.add_argument("--split-gap-controls", type=int, default=32)
+    parser.add_argument("--heldout-fraction", type=float)
+    parser.add_argument("--split-gap-controls", type=int)
     parser.add_argument("--artifact-id", required=True)
     parser.add_argument("--checkpoint-artifact-id", required=True)
     parser.add_argument("--code-revision", required=True)
@@ -33,6 +35,22 @@ def build_parser():
     parser.add_argument("--environment-artifact-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
+
+
+def collection_protocol(args):
+    """Resolve one explicit split protocol before constructing a simulator."""
+    schedule = episode_schedule(args.episode_seeds, 10)
+    protocol = dict(split_type=args.split_type, window_controls=args.window_controls)
+    if args.split_type == "episode":
+        if args.heldout_fraction is not None or args.split_gap_controls is not None:
+            raise ValueError("Whole-episode splitting uses heldout seeds without temporal fraction or gap")
+        protocol["heldout_seeds"] = args.heldout_seeds
+    else:
+        if args.heldout_seeds is not None or args.heldout_fraction is None or args.split_gap_controls is None:
+            raise ValueError("Temporal splitting requires fraction and gap without heldout seeds")
+        protocol.update(heldout_fraction=args.heldout_fraction, gap_controls=args.split_gap_controls)
+    split_windows([dict(seed=seed, transitions=0) for seed, _ in schedule], protocol)
+    return schedule, protocol
 
 
 def observe(env, state, sensor_noise):
@@ -101,7 +119,7 @@ def write_manifest(path, manifest):
 
 def main():
     args = build_parser().parse_args()
-    temporal_windows([], args.window_controls, args.heldout_fraction, args.split_gap_controls)
+    schedule, protocol = collection_protocol(args)
     if not np.isfinite(args.action_noise_std) or args.action_noise_std < 0:
         raise ValueError("Action exploration standard deviation must be finite and nonnegative")
     for name in ("artifact_id", "checkpoint_artifact_id", "code_revision", "engine_revision", "environment_artifact_id"):
@@ -147,16 +165,13 @@ def main():
         raise ValueError("Noise-on collection requires the declared source camera noise")
     if args.sensor_noise == "off":
         env.camera_noise = None
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    exploration = torch.Generator(device=env.device).manual_seed(args.seed)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "episodes").mkdir()
     manifest = dict(schema=SCHEMA, status="collecting", artifact_id=args.artifact_id,
         code_revision=args.code_revision, engine_revision=args.engine_revision,
         environment_artifact_id=args.environment_artifact_id,
-        producer="collect_source_world_model.py", collection_seed=args.seed,
-        randomness="One global camera RNG stream over ordered episodes; independent action-noise generator with the same declared seed",
+        producer="collect_source_world_model.py", episode_seeds=args.episode_seeds, motion_count=len(entries),
+        randomness="At each episode reset, reseed the global camera RNG and an independent action-noise generator with the episode seed; every seed visits all motions",
         config=dict(path=str(args.config), input_resolved=original_config,
             collection_resolved={key: str(value) if isinstance(value, Path) else value for key, value in config.items()}),
         collection_conditions=dict(physics_backend=args.backend, ray_backend=args.ray_backend,
@@ -180,14 +195,17 @@ def main():
         measured_forces=dict(sampling_hz=200., point="Each physics input state",
             values="Actual world contact forces; terrain-only and all-contact fields retain distinct meanings",
             backend=bindings["evaluation_physics"] if args.backend == "mujoco" else bindings["engine"]),
-        temporal_split=dict(window_controls=args.window_controls, heldout_fraction=args.heldout_fraction,
-            gap_controls=args.split_gap_controls, definition="Train prefix ends gap controls before heldout suffix of actual executed transitions",
-            bounds="Half-open transition intervals; a window's state interval includes its terminal row"),
+        window_split=protocol,
+        split_bounds="Half-open transition intervals; a window's state interval includes its terminal row; episode splits assign every executed transition to exactly one split",
         episodes=[], failed_conditions=[])
     write_manifest(args.output / "manifest.json", manifest)
     with torch.no_grad():
-        for episode, (name, entry) in enumerate(entries):
-            frame = torch.tensor([int(env.starts[episode])], device=env.device, dtype=torch.int32)
+        for episode, (seed, clip_index) in enumerate(schedule):
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            exploration = torch.Generator(device=env.device).manual_seed(seed)
+            name, entry = entries[clip_index]
+            frame = torch.tensor([int(env.starts[clip_index])], device=env.device, dtype=torch.int32)
             noise = {key: torch.zeros_like(value) for key, value in env.sample_reset_noise(1).items()}
             if args.backend == "mujoco":
                 env.mujoco_adapter.reset_clock()
@@ -196,7 +214,7 @@ def main():
             states = [snapshot(env, state, observed, 0)]
             transitions = []
             reason = "reference_complete"
-            requested = int(env.lengths[episode]) - 1
+            requested = int(env.lengths[clip_index]) - 1
             for control in range(requested):
                 if bool(env.terminated(state).item()):
                     reason = "tracking_termination"
@@ -236,7 +254,7 @@ def main():
             arrays = episode_arrays(states, transitions)
             relative_path = f"episodes/episode_{episode:02d}.npz"
             np.savez_compressed(args.output / relative_path, **arrays)
-            record = dict(episode_index=episode, clip_index=episode, reference_clip=name,
+            record = dict(episode_index=episode, seed=seed, clip_index=clip_index, reference_clip=name,
                 source_motion_file=entry["motion_file"], terrain_id=entry["terrain_id"], file=relative_path,
                 requested_controls=requested, transitions=len(transitions), states=len(states), stop_reason=reason,
                 reference_complete=len(transitions) == requested and not bool(arrays["tracking_terminated"][-1]),
@@ -252,8 +270,7 @@ def main():
             write_manifest(args.output / "manifest.json", manifest)
     if not all(torch.equal(before, after) for before, after in zip(frozen, nets.tree_leaves(actor))):
         raise ValueError("Collection changed teacher weights or normalization")
-    windows, splits = temporal_windows([episode["transitions"] for episode in manifest["episodes"]],
-        args.window_controls, args.heldout_fraction, args.split_gap_controls)
+    windows, splits = split_windows(manifest["episodes"], protocol)
     for episode, split in zip(manifest["episodes"], splits):
         episode["split"] = split
     np.savez(args.output / "windows.npz", **windows)
