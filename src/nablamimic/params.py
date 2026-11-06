@@ -49,6 +49,12 @@ def resolve_params(argv):
     else:
         use = file_args + rest
         info = {"argv": use, "config_args": file_args, "locked": False}
+    if p0.resume and info["locked"]:
+        # Initialization is a first-start action. Keep the locked argv provenance,
+        # but continuation restores its own complete checkpoint instead.
+        first_start = argparse.ArgumentParser(add_help=False)
+        first_start.add_argument("--initialize-from-ema")
+        _, use = first_start.parse_known_args(use)
     core = ["--config", p0.config, "--out", p0.out] + (["--resume", p0.resume] if p0.resume else [])
     return use + core, info
 
