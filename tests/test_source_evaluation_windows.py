@@ -1,5 +1,7 @@
 """Generated local-window supports, terminal decisions and reference activity."""
 from pathlib import Path
+import os
+import subprocess
 import sys
 import unittest
 
@@ -8,12 +10,56 @@ import numpy as np
 
 SCRIPTS = Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-from evaluate_source_perceptive import reference_window_activity, select_motion_indices, source_window, summarize_window
+from evaluate_source_perceptive import reference_window_activity, select_motion_indices, set_camera_input, source_window, summarize_window
 from render_source_trajectory import reference_frame_indices
 sys.path.pop(0)
 
 
 class SourceEvaluationWindowTest(unittest.TestCase):
+    def test_camera_input_cli_accepts_only_declared_choices(self):
+        command=[sys.executable,'-B',str(SCRIPTS/'evaluate_source_perceptive.py'),'--camera-input']
+        environment={**os.environ,'PYTHONPATH':str(SCRIPTS.parent/'src')}
+        for mode in ('measured','constant-far'):
+            result=subprocess.run([*command,mode,'--help'],env=environment,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+        result=subprocess.run([*command,'invalid','--help'],env=environment,capture_output=True,text=True)
+        self.assertEqual(result.returncode,2)
+
+    def test_default_measured_camera_preserves_observation_values(self):
+        observation=np.arange(2*1320,dtype=np.float32).reshape(2,1320)
+        original=observation.copy()
+        set_camera_input(observation)
+        np.testing.assert_array_equal(observation,original)
+        set_camera_input(observation,'measured')
+        np.testing.assert_array_equal(observation,original)
+
+    def test_constant_far_replaces_only_depth_in_the_shared_observation(self):
+        observation=np.arange(2*1320,dtype=np.float32).reshape(2,1320)
+        observation[:,744:]=np.tile([0.,1.],288)
+        original=observation.copy()
+        goal=np.arange(2*670,dtype=np.float32).reshape(2,670)
+        original_goal=goal.copy()
+        set_camera_input(observation,'constant-far')
+        np.testing.assert_array_equal(observation[:,:744],original[:,:744])
+        np.testing.assert_array_equal(observation[:,744:],np.ones((2,576)))
+        np.testing.assert_array_equal(goal,original_goal)
+        # Both the actor's depth view and the trajectory's saved depth use this owner.
+        actor_depth=observation[:,744:].reshape(2,1,18,32)
+        saved_depth=observation[0,744:]
+        np.testing.assert_array_equal(actor_depth[0].ravel(),saved_depth)
+
+    def test_camera_input_zero_one_boundaries_and_current_schema(self):
+        for value in (0.,1.):
+            observation=np.full((1,1320),value,dtype=np.float32)
+            set_camera_input(observation,'constant-far')
+            np.testing.assert_array_equal(observation[:,:744],value)
+            np.testing.assert_array_equal(observation[:,744:],1.)
+        for shape in ((1320,),(1,1319),(1,1321),(1,1,1320)):
+            with self.assertRaises(ValueError):
+                set_camera_input(np.zeros(shape),'constant-far')
+        with self.assertRaises(ValueError):
+            set_camera_input(np.zeros((1,1320)),'invalid')
+
     def test_motion_selection_defaults_to_all_original_indices(self):
         self.assertEqual(select_motion_indices(None,10),list(range(10)))
 

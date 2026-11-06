@@ -8,6 +8,16 @@ import numpy as np
 from nablamimic.source_evaluation_metrics import summarize_source_chain
 
 
+def set_camera_input(policy_observation, camera_input='measured'):
+    """Replace only the generated source depth slice before frozen normalization."""
+    if policy_observation.ndim != 2 or policy_observation.shape[1] != 744+576:
+        raise ValueError('Source policy observation requires history744 followed by depth576')
+    if camera_input == 'constant-far':
+        policy_observation[:,744:] = 1.
+    elif camera_input != 'measured':
+        raise ValueError('Camera input must be measured or constant-far')
+
+
 def select_motion_indices(indices, motion_count):
     """Select original clip IDs in the complete library's traversal order."""
     if indices is None:
@@ -61,6 +71,8 @@ def main():
     parser.add_argument('--motion-index', type=int, action='append',
                         help='Original clip ID to evaluate, repeat to select several, default all in library order')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
+    parser.add_argument('--camera-input', choices=('measured','constant-far'), default='measured',
+                        help='Evaluation depth input after normal camera generation and noise sampling')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
     parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'), required=True)
@@ -141,8 +153,9 @@ def main():
                 quaternion = state['xquat'][0,env.torso_id]
                 up_dots.append(float((1-2*(quaternion[1]**2+quaternion[2]**2)).item()))
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
-                history,goal = env.policy_obs(state,observation_noise['goal'])
-                action = actor(history,goal) if args.weights == 'official' else nets.actor_apply(actor,history,goal)
+                policy_observation,goal = env.policy_obs(state,observation_noise['goal'])
+                set_camera_input(policy_observation,args.camera_input)
+                action = actor(policy_observation,goal) if args.weights == 'official' else nets.actor_apply(actor,policy_observation,goal)
                 if args.record_substeps:
                     stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'])
                     substep_rows.append({name:value[0].cpu().numpy() for name,value in substeps.items()})
@@ -151,7 +164,7 @@ def main():
                 done = bool(env.terminated(stepped).item())
                 ended = bool(env.clip_ended(stepped).item())
                 rows.append(dict(qpos=state['qpos'][0].cpu().numpy(),qvel=state['qvel'][0].cpu().numpy(),
-                    action=stepped['prev_a'][0].cpu().numpy(),policy_action=action[0].cpu().numpy(),depth=history[0,744:].cpu().numpy(),
+                    action=stepped['prev_a'][0].cpu().numpy(),policy_action=action[0].cpu().numpy(),depth=policy_observation[0,744:].cpu().numpy(),
                     frame=int(state['frame'][0].item()),tracking_terminated=done,clip_ended=ended))
                 state=stepped
                 if done or ended:
@@ -187,6 +200,10 @@ def main():
         policy_implementation='official release actor with stored std' if args.weights == 'official' else 'native actor',
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
+        camera_input=args.camera_input,
+        camera_input_definition=('Generated measured depth with the selected camera noise'
+            if args.camera_input == 'measured' else
+            'After complete measured camera and noise generation, replace observation columns [744,1320) with 1.0 (source normalized 2m/far), before the frozen checkpoint observation normalizer. Actor and recorded depth consume this same observation'),
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
         selected_motion_indices=selected_motion_indices,
         start_fraction=args.start_fraction, maximum_controls=args.maximum_controls,
