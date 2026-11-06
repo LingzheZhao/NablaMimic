@@ -27,10 +27,14 @@ def comparison_support(metadata):
     shared = ('scene_artifact_id', 'terrain_artifact_id', 'reference_artifact_id',
               'physics_backend', 'ray_backend', 'control_hz', 'start_frame',
               'clip_start_frame', 'start_fraction', 'start_offset', 'requested_controls',
-              'sensor_noise', 'seed', 'camera_input', 'reset', 'physics', 'initial_pose_offset')
+              'sensor_noise', 'seed', 'camera_input', 'reset', 'initial_pose_offset')
     first = metadata[0]
+    # These two Engine fields locate per-job compiled libraries and their JSON.
+    # Keep the complete original metadata in the saved condition records.
+    first_physics = {key: value for key, value in first['physics'].items() if key not in ('path', 'artifact')}
     for row in metadata:
-        if any(row[key] != first[key] for key in shared):
+        physics = {key: value for key, value in row['physics'].items() if key not in ('path', 'artifact')}
+        if any(row[key] != first[key] for key in shared) or physics != first_physics:
             raise ValueError('Conditions must share physical bindings, backends, clock and requested reference window')
         if (row['states'] != row['controls']+1 or not 1 <= row['controls'] <= row['requested_controls']
                 or row['final_frame'] != row['start_frame']+row['controls']):

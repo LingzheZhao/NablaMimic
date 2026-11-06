@@ -1,5 +1,6 @@
 """Generated display support alignment with partial physical trajectories."""
 from pathlib import Path
+from copy import deepcopy
 import sys
 import unittest
 
@@ -30,6 +31,17 @@ class SourcePolicyComparisonTest(unittest.TestCase):
                         dict(states=4), dict(final_frame=999), dict(physics_backend='mujoco')):
             with self.assertRaises(ValueError):
                 comparison_support([reading(10), dict(reading(4), **changed)])
+
+    def test_cache_locations_do_not_change_physics_and_original_metadata_is_preserved(self):
+        physical = dict(timestep=.005, iterations=10, model=dict(artifact_id='scene-model'))
+        rows = [dict(reading(10), physics=dict(physical, path='/job-a/kernel.so', artifact='/job-a/kernel.json')),
+                dict(reading(4), physics=dict(physical, path='/job-b/kernel.so', artifact='/job-b/kernel.json'))]
+        saved = deepcopy(rows)
+        self.assertEqual(comparison_support(rows), 11)
+        self.assertEqual(rows, saved)
+        for changed in (dict(timestep=.01), dict(iterations=20), dict(model=dict(artifact_id='different-model'))):
+            with self.assertRaises(ValueError):
+                comparison_support([rows[0], dict(rows[1], physics=dict(rows[1]['physics'], **changed))])
 
     def test_recorded_input_depth_is_never_repeated_at_terminal(self):
         depth = np.arange(4*576).reshape(4, 576)
