@@ -94,6 +94,23 @@ def reference_window_activity(positions, torso_index, control_dt_s=.02):
         reference_torso_displacement_m=float(np.linalg.norm(positions[-1,torso_index]-positions[0,torso_index])))
 
 
+def offset_initial_state(env, state, xy_offset, yaw_offset):
+    """Apply an evaluation-only world pose offset, then rebuild FK and history."""
+    if tuple(xy_offset)==(0.,0.) and yaw_offset==0.:
+        return state
+    import torch
+    from nablamimic.torch_env import quat_mul
+    qpos=state['qpos'].clone()
+    qpos[:,:2]+=qpos.new_tensor(xy_offset)
+    half=qpos.new_tensor(yaw_offset/2.)
+    yaw=torch.stack((half.cos(),half*0,half*0,half.sin()))
+    qpos[:,3:7]=quat_mul(yaw,qpos[:,3:7])
+    compact={**env.compact(state),'qpos':qpos}
+    shifted=env.restore(compact)
+    shifted['hist']=env.proprio(shifted)[:,None].expand_as(state['hist']).clone()
+    return shifted
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
@@ -108,6 +125,8 @@ def main():
                         help='Evaluation camera geometry or depth input condition')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
+    parser.add_argument('--initial-xy-offset',type=float,nargs=2,default=[0.,0.],metavar=('X','Y'))
+    parser.add_argument('--initial-yaw-offset',type=float,default=0.,help='World Z rotation in radians, left-multiplied onto the root quaternion')
     parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'), required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -115,6 +134,8 @@ def main():
         raise ValueError("Requested source rollout must contain at least one control")
     if not np.isfinite(args.start_fraction) or not 0 <= args.start_fraction < 1:
         raise ValueError('Start fraction must be finite and in [0,1)')
+    if not np.isfinite([*args.initial_xy_offset,args.initial_yaw_offset]).all():
+        raise ValueError('Initial pose offsets must be finite')
     import torch
     from nablamimic.torch_train import build_environment
     from nablamimic import torch_nets as nets
@@ -168,6 +189,7 @@ def main():
             frame = torch.tensor([actual_start],device=env.device,dtype=torch.int32)
             noise = {name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
             state = env.reset(frame,noise)
+            state = offset_initial_state(env,state,args.initial_xy_offset,args.initial_yaw_offset)
             initial_state_error=dict(
                 qpos_reference_absolute_max=float((state['qpos']-env.ref_qpos[frame]).abs().max()),
                 qvel_reference_absolute_max=float((state['qvel']-env.ref_qvel[frame]).abs().max()),
@@ -239,6 +261,8 @@ def main():
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         camera_input=args.camera_input,
         camera_input_definition=CAMERA_INPUT_DEFINITIONS[args.camera_input],camera_geometry=camera_geometry,
+        initial_pose_offset=dict(world_xy_m=args.initial_xy_offset,world_yaw_rad=args.initial_yaw_offset,
+            definition='After reset, translate root world XY and left-multiply root WXYZ quaternion by world Z yaw; preserve qvel coordinates, rebuild FK and zero-noise proprioception history'),
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
         selected_motion_indices=selected_motion_indices,
         start_fraction=args.start_fraction, maximum_controls=args.maximum_controls,
