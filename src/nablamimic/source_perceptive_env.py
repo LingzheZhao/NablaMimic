@@ -12,8 +12,7 @@ from .torch_env import TorchTrackingEnv, gravity_b, quat_inv, quat_mul, quat_rot
 
 
 class SourcePerceptiveEnv(TorchTrackingEnv):
-    def bind_source_camera(self):
-        from nablaengine.depth_geometry import DepthGeometry
+    def bind_source_camera(self, camera_geometry=None):
         from .source_depth_noise import SourceDepthNoise
         self.camera_noise = SourceDepthNoise(self.device) if self.cfg.source_depth_noise else None
         from .env import BM_BODIES
@@ -28,7 +27,11 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
             name in self.m.joint(int(joint)).name for name in ('ankle','wrist'))]
         self.contact_reward_body_ids = [i for i in range(1,self.m.nbody) if self.m.body(i).name not in (
             'left_ankle_roll_link','right_ankle_roll_link','left_wrist_yaw_link','right_wrist_yaw_link')]
-        self.depth_geometry = DepthGeometry.from_model(self.m, device=self.device, dtype=torch.float32, groups=(0, 2))
+        if camera_geometry is None:
+            from nablaengine.depth_geometry import DepthGeometry
+            camera_geometry=DepthGeometry.from_model(self.m,device=self.device,dtype=torch.float32,groups=(0,2))
+        self.depth_geometry=camera_geometry
+        self.camera_state_sync=None
         self.camera_rays = source_raw_camera_rays(self.device)
         self.camera_position = torch.tensor(SOURCE_CAMERA_POSITION, device=self.device)
         offset_rotation = torch.tensor(SOURCE_CAMERA_QUATERNION_WXYZ, device=self.device)
@@ -64,15 +67,18 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
             return self._depth_image(state)
 
     def _depth_image(self, state):
-        torso_q = state['xquat'][:, self.torso_id]
-        origin = state['xpos'][:, self.torso_id]+quat_rotate(self.camera_position, torso_q)
+        if self.camera_state_sync is not None:
+            self.camera_state_sync(state)
+        torso_q = state['xquat'][:, self.torso_id].to(self.camera_rays.dtype)
+        origin = state['xpos'][:, self.torso_id].to(self.camera_rays.dtype)+quat_rotate(self.camera_position, torso_q)
         camera_q = quat_mul(torso_q, self.camera_rotation)
         local = self.camera_rays.flatten(0, 1)
         directions = quat_rotate(local[None], camera_q[:, None])
         origins = origin[:, None].expand_as(directions)
         raycast=(self.depth_geometry.raycast_with_pose_gradients if self.cfg.source_depth_gradient and torch.is_grad_enabled()
                  else self.depth_geometry.raycast)
-        ranges, geometry_ids = raycast(state['xpos'], state['xquat'], origins, directions,
+        ranges, geometry_ids = raycast(state['xpos'].to(self.camera_rays.dtype),
+            state['xquat'].to(self.camera_rays.dtype), origins, directions,
                                                max_distance=1.e6, min_distance=.05, max_hops=24)
         raw_range = ranges.reshape(-1, 27, 48)
         optical=source_optical_depth(raw_range,self.camera_rays,geometry_ids.reshape(-1,27,48))
@@ -256,9 +262,12 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         return result
 
     @torch.no_grad()
-    def step_recorded(self,state,action,proprio_noise=None):
+    def step_recorded(self,state,action,proprio_noise=None,*,measurement_backend=None):
         """Execute the same 3+1 physics and return complete substep records outside state."""
-        from nablaengine import torch_ffi as engine
+        if measurement_backend is None:
+            from nablaengine import torch_ffi as engine
+        else:
+            engine=measurement_backend
         action=self.bound_action(action)
         control=self.ctrl_of(action,state['frame']).contiguous()
         first=engine.forward_measurements(state['qpos'].contiguous(),state['qvel'].contiguous(),
@@ -278,6 +287,9 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         record={name:torch.cat((first[name],last[name]),dim=1) for name in (
             'terrain_wrench','terrain_contact_count','all_contact_wrench','all_contact_count',
             'actuator_torque','substep_info')}
+        if measurement_backend is not None:
+            for name in ('applied_body_wrench_world','body_com_world'):
+                record[name]=torch.cat((first[name],last[name]),dim=1)
         record.update(input_qpos=torch.cat((first_inputs['qpos'],last_inputs['qpos']),dim=1),
                       input_qvel=torch.cat((first_inputs['qvel'],last_inputs['qvel']),dim=1))
         return result,record

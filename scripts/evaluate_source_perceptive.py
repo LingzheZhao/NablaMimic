@@ -115,6 +115,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
+    parser.add_argument('--backend',choices=('engine','mujoco'),default='engine')
+    parser.add_argument('--ray-backend',choices=('native','mujoco'),default='native')
+    parser.add_argument('--device',choices=('cuda','cpu'),default='cuda')
     parser.add_argument('--weights', choices=('ema','live','official'), required=True)
     parser.add_argument('--maximum-controls', type=int, help='Default is all controls remaining after the selected start')
     parser.add_argument('--start-fraction', type=float, default=0., help='Fraction of each clip control span at reset')
@@ -145,7 +148,10 @@ def main():
     set_evaluation_conditions(config,args.reset_condition)
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
-    env, bindings = build_environment(argparse.Namespace(**config))
+    if args.ray_backend=='mujoco' and args.camera_input=='self-only':
+        raise ValueError('MuJoCo camera currently supports measured and constant-far input conditions')
+    env, bindings = build_environment(argparse.Namespace(**config),evaluation_backend=args.backend,
+        ray_backend=args.ray_backend,device=args.device)
     selected_motion_indices = select_motion_indices(args.motion_index,len(env.starts))
     if args.weights == 'official':
         from nablamimic.official_source_policy import OfficialSourcePolicy
@@ -188,6 +194,8 @@ def main():
                 actual_start:actual_start+window['requested_controls']+1].cpu().numpy(),torso_index)
             frame = torch.tensor([actual_start],device=env.device,dtype=torch.int32)
             noise = {name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
+            if args.backend=='mujoco':
+                env.mujoco_adapter.reset_clock()
             state = env.reset(frame,noise)
             state = offset_initial_state(env,state,args.initial_xy_offset,args.initial_yaw_offset)
             initial_state_error=dict(
@@ -213,10 +221,12 @@ def main():
                 up_dots.append(float((1-2*(quaternion[1]**2+quaternion[2]**2)).item()))
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
                 policy_observation,goal = env.policy_obs(state,observation_noise['goal'])
+                policy_observation,goal=policy_observation.to(torch.float32),goal.to(torch.float32)
                 set_camera_input(policy_observation,args.camera_input)
                 action = actor(policy_observation,goal) if args.weights == 'official' else nets.actor_apply(actor,policy_observation,goal)
                 if args.record_substeps:
-                    stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'])
+                    stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'],
+                        measurement_backend=env.mujoco_adapter if args.backend=='mujoco' else None)
                     substep_rows.append({name:value[0].cpu().numpy() for name,value in substeps.items()})
                 else:
                     stepped = env.step(state,action,observation_noise['proprio'])
@@ -256,6 +266,8 @@ def main():
                 start_offset=window['start_offset'],remaining_controls=window['remaining_controls'],
                 stop_reason=reason,initial_state_error=initial_state_error,**reference_activity,**reading))
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
+        physics_backend=args.backend,ray_backend=args.ray_backend,
+        physics=bindings['evaluation_physics'] if args.backend=='mujoco' else bindings['engine'],
         policy_implementation='official release actor with stored std' if args.weights == 'official' else 'native actor',
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,

@@ -596,11 +596,10 @@ def validate_args(args):
         raise ValueError('Three termination-penalty parameters required')
 
 
-def build_environment(args):
+def build_environment(args, *, evaluation_backend="engine", ray_backend="native", device="cuda"):
     """Construct the one physical scene and its checked input bindings."""
     from .env import BM_BODIES, EnvConfig
     from .motion import all_clip_names, load_library
-    from nablaengine import torch_ffi
     config = {}
     if args.motion_lib:
         from .motion_lib import ShardedLibrary
@@ -654,6 +653,19 @@ def build_environment(args):
     if args.task_inputs == 'instinct_perceptive_native':
         from .source_perceptive_env import SourcePerceptiveEnv
         environment_type = SourcePerceptiveEnv
+    adapter=None
+    camera_geometry=None
+    if evaluation_backend=='mujoco':
+        if not source_task:
+            raise ValueError('MuJoCo evaluation requires the prepared source task')
+        from .mujoco_source_adapter import MuJoCoSourceAdapter, MuJoCoSourceEnv
+        environment_type=MuJoCoSourceEnv
+        adapter=MuJoCoSourceAdapter(model,iterations=args.solver_iterations)
+        if ray_backend=='mujoco':
+            from .mujoco_source_camera import MuJoCoRayCamera
+            camera_geometry=MuJoCoRayCamera(adapter)
+    elif evaluation_backend!='engine' or ray_backend!='native':
+        raise ValueError('Unsupported evaluation physics and camera combination')
     env=environment_type(library,EnvConfig(solver_iterations=args.solver_iterations,
         dr=args.task_inputs == 'heightscan_pilot',
         reset_noise=args.task_inputs == 'heightscan_pilot' or args.source_reset_profile == 'source_pose',
@@ -665,11 +677,15 @@ def build_environment(args):
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
         root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise,
         source_depth_gradient=args.source_depth_gradient), model=model,
-        source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None)
+        source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None,
+        device=device,step_fn=adapter.step if adapter is not None else None,
+        kinematics_fn=adapter.kinematics if adapter is not None else None)
     if source_task:
         if args.terrain_sensor is not None:
             raise ValueError('Source camera is constructed from the physical model and takes no heightscan input')
-        env.bind_source_camera()
+        env.bind_source_camera(camera_geometry)
+        if ray_backend=='mujoco':
+            env.camera_state_sync=lambda state: adapter.synchronized_data(state['qpos'],state['qvel'],state['warm'])
         env.perception_contract = dict(sensor='source_depth_camera', image_shape=[1,18,32],
             physical_scene_artifact_id=model_contract['artifact_id'],
             terrain_artifact_id=model_contract['terrain_artifact_id'],
@@ -709,8 +725,12 @@ def build_environment(args):
         if sorted(expected.tolist()) != actual or len(actual) == 0:
             raise ValueError('Prepared foot-pair contract differs from compiled foot/static terrain pairs')
         env.foot_pairs = expected
-    engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
-    config['engine'] = engine
+    if adapter is None:
+        from nablaengine import torch_ffi
+        config['engine']=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
+    else:
+        env.mujoco_adapter=adapter
+        config['evaluation_physics']=adapter.metadata()
     return env, config
 
 
