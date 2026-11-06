@@ -133,8 +133,8 @@ def main():
                     clip=clip, reference_overlay='off')
                 model, poses, _, row = load_source_reading(reading_args)
                 with np.load(trajectory, allow_pickle=False) as arrays:
-                    depth = arrays['depth'] if 'depth' in arrays.files else None
-                if depth is not None and depth.shape != (report['controls'], 576):
+                    depth = arrays['depth']
+                if depth.shape != (report['controls'], 576):
                     raise ValueError('Recorded actor depth must have controls by 576 shape')
                 loaded.append((label, model, poses, depth))
                 reports.append(report)
