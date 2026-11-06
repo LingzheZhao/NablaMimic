@@ -11,8 +11,8 @@ from nablamimic.source_evaluation_metrics import summarize_source_chain
 
 CAMERA_INPUT_DEFINITIONS = {
     'measured': 'Generated measured depth with the selected camera noise',
-    'constant-far': ('After complete measured camera and noise generation, replace observation columns [744,1320) '
-        'with 1.0 (source normalized 2m/far), before the frozen checkpoint observation normalizer. '
+    'constant-far': ('The environment generates the complete measured camera and noise, then supplies a constant '
+        'processed image of 1.0 (source normalized 2m/far), before the frozen checkpoint observation normalizer. '
         'Actor and recorded depth consume this same observation'),
     'self-only': ('Raycast only the original visible geoms with body_id != 0 using actual dynamic body poses. '
         'Static world camera occluders are excluded. Physical collision geometry, geom IDs, and the original '
@@ -44,14 +44,18 @@ def set_evaluation_conditions(config, reset_condition):
                   source_ensure_link_below_zero_ground=reset_condition == 'source-reset')
 
 
-def set_camera_input(policy_observation, camera_input='measured'):
-    """Replace only the generated source depth slice before frozen normalization."""
-    if policy_observation.ndim != 2 or policy_observation.shape[1] != 744+576:
-        raise ValueError('Source policy observation requires history744 followed by depth576')
-    if camera_input == 'constant-far':
-        policy_observation[:,744:] = 1.
-    elif camera_input not in ('measured','self-only'):
-        raise ValueError('Camera input must be measured, constant-far or self-only')
+def resolve_camera_input(config, checkpoint_observation, override):
+    """Validate training provenance before selecting an explicit inference condition."""
+    trained=config['source_camera_input']
+    if trained not in ('measured','constant-far'):
+        raise ValueError('Training camera input must be measured or constant-far')
+    if checkpoint_observation['camera_input'] != trained:
+        raise ValueError('Checkpoint training camera input differs from the resolved configuration')
+    if override is not None and override not in CAMERA_INPUT_DEFINITIONS:
+        raise ValueError('Unknown inference camera input override')
+    effective=trained if override is None else override
+    return dict(training_camera_input=trained,inference_camera_input_override=override,
+                camera_input=effective,source_camera_input='measured' if effective=='self-only' else effective)
 
 
 def select_motion_indices(indices, motion_count):
@@ -127,8 +131,8 @@ def main():
     parser.add_argument('--motion-index', type=int, action='append',
                         help='Original clip ID to evaluate, repeat to select several, default all in library order')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
-    parser.add_argument('--camera-input', choices=tuple(CAMERA_INPUT_DEFINITIONS), default='measured',
-                        help='Evaluation camera geometry or depth input condition')
+    parser.add_argument('--camera-input', choices=tuple(CAMERA_INPUT_DEFINITIONS), default=None,
+                        help='Explicit inference override. Default preserves the checkpoint training input mode')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
     parser.add_argument('--push-force-world', type=float, nargs=3, default=[0.,0.,0.], metavar=('X','Y','Z'))
@@ -177,17 +181,23 @@ def main():
             raise ValueError('Official source policy requires absolute actions')
         checkpoint = torch.load(args.checkpoint, map_location=env.device, weights_only=True)
         actor = OfficialSourcePolicy(checkpoint).to(env.device)
+        camera_condition=resolve_camera_input(config,dict(camera_input='measured'),args.camera_input)
     else:
         actor = None
     if args.weights != 'official':
         with args.checkpoint.open('rb') as handle:
             checkpoint = pickle.load(handle)
+        camera_condition=resolve_camera_input(config,checkpoint['observation'],args.camera_input)
         if checkpoint['observation'] != env.observation_contract or checkpoint['perception'] != env.perception_contract:
             raise ValueError('Source actor observation or physical geometry binding differs')
         actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
+    training_observation=env.observation_contract
+    if args.camera_input is not None:
+        env.cfg=replace(env.cfg,source_camera_input=camera_condition['source_camera_input'])
+    effective_camera_input=camera_condition['camera_input']
     excluded_geom_ids = []
-    camera_input_definition = CAMERA_INPUT_DEFINITIONS[args.camera_input]
-    if args.camera_input == 'self-only':
+    camera_input_definition = CAMERA_INPUT_DEFINITIONS[effective_camera_input]
+    if effective_camera_input == 'self-only':
         original_geoms = env.depth_geometry.geoms
         env.depth_geometry = self_only_camera_geometry(env.depth_geometry,env.device)
         retained_ids = {geom.geom_id for geom in env.depth_geometry.geoms}
@@ -245,7 +255,6 @@ def main():
                 observation_noise = {name:torch.zeros_like(value) for name,value in env.sample_observation_noise(1).items()}
                 policy_observation,goal = env.policy_obs(state,observation_noise['goal'])
                 policy_observation,goal=policy_observation.to(torch.float32),goal.to(torch.float32)
-                set_camera_input(policy_observation,args.camera_input)
                 action = actor(policy_observation,goal) if args.weights == 'official' else nets.actor_apply(actor,policy_observation,goal)
                 if args.record_substeps:
                     stepped,substeps=env.step_recorded(state,action,observation_noise['proprio'],
@@ -306,7 +315,8 @@ def main():
         policy_implementation='official release actor with stored std' if args.weights == 'official' else 'native actor',
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
-        camera_input=args.camera_input,
+        camera_input=effective_camera_input,training_camera_input=camera_condition['training_camera_input'],
+        inference_camera_input_override=camera_condition['inference_camera_input_override'],
         camera_input_definition=camera_input_definition,camera_geometry=camera_geometry,
         initial_pose_offset=dict(world_xy_m=args.initial_xy_offset,world_yaw_rad=args.initial_yaw_offset,
             definition='After reset, translate root world XY and left-multiply root WXYZ quaternion by world Z yaw; preserve qvel coordinates, rebuild FK and zero-noise proprioception history'),
@@ -327,7 +337,7 @@ def main():
             wrench_units='world force N and moment about world origin N m',torque_units='executed generalized actuator torque N m'),
         strict_passes=sum(row['strict_pass'] for row in reports),
         perception=env.perception_contract,
-        observation=env.observation_contract,reports=reports),indent=2))
+        observation=training_observation,inference_observation=env.observation_contract,reports=reports),indent=2))
 
 
 if __name__=='__main__':

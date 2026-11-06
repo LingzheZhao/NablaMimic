@@ -64,7 +64,12 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
 
     def depth_image(self, state):
         with torch.set_grad_enabled(torch.is_grad_enabled() and self.cfg.source_depth_gradient):
-            return self._depth_image(state)
+            measured = self._depth_image(state)
+        # Generate the complete sensor/noise first so matched conditions consume
+        # identical random draws. No measured image reaches policy consumers.
+        if self.cfg.source_camera_input == 'constant-far':
+            return torch.ones_like(measured)
+        return measured
 
     def _depth_image(self, state):
         if self.camera_state_sync is not None:
@@ -116,6 +121,10 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
                     reference_time_offsets_s=[i*.1 for i in range(10)],
                     policy_history_order='term-major gravity/angular/joints/joint_velocity/last_action',
                     depth_shape=[1,18,32], depth_feature_dim=32,
+                    camera_input=self.cfg.source_camera_input,
+                    camera_input_definition=('Generated processed depth' if self.cfg.source_camera_input=='measured'
+                        else 'Constant normalized far depth 1.0 after complete sensor/noise generation'),
+                    critic_depth_input=False,
                     actor_architecture='source_cnn_relu_output_goal_history_depth_v2',
                     actor_relative_position=False, normalized_action_limit=self.cfg.action_limit,
                     actuator_control_limits='Apply prepared model actuator_ctrllimited mask; unlimited channels retain the PD target',

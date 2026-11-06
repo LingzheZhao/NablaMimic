@@ -550,6 +550,7 @@ def build_parser():
     parser.add_argument("--source-reset-profile", choices=("nominal", "source_pose"), default="nominal")
     parser.add_argument("--source-motion-start-height-offset", type=float, default=0.)
     parser.add_argument("--source-ensure-link-below-zero-ground", action="store_true")
+    parser.add_argument("--source-camera-input", choices=("measured","constant-far"), default="measured")
     parser.add_argument("--source-depth-noise", action="store_true")
     parser.add_argument("--source-depth-gradient", action="store_true")
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
@@ -568,6 +569,8 @@ def build_parser():
 def validate_args(args):
     if not math.isfinite(args.source_motion_start_height_offset):
         raise ValueError("Source reset height offset must be finite")
+    if args.source_camera_input != 'measured' and args.task_inputs != 'instinct_perceptive_native':
+        raise ValueError('Source camera input conditions require the source perceptive task')
     if args.source_depth_gradient and args.task_inputs != 'instinct_perceptive_native':
         raise ValueError('Source depth gradient requires the source camera task')
     if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
@@ -675,7 +678,8 @@ def build_environment(args, *, evaluation_backend="engine", ray_backend="native"
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
-        root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise,
+        root_position_weight=args.root_position_weight, source_camera_input=args.source_camera_input,
+        source_depth_noise=args.source_depth_noise,
         source_depth_gradient=args.source_depth_gradient), model=model,
         source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None,
         device=device,step_fn=adapter.step if adapter is not None else None,

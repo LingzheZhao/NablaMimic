@@ -75,6 +75,7 @@ class EnvConfig:
     reference_root_displacement: bool = False
     actor_anchor_position: bool = False
     root_position_weight: float = 0.5
+    source_camera_input: str = "measured"
     source_depth_noise: bool = False
     source_depth_gradient: bool = False
     source_reset_profile: str = "nominal"
@@ -83,6 +84,10 @@ class EnvConfig:
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions
+
+    def __post_init__(self):
+        if self.source_camera_input not in ('measured','constant-far'):
+            raise ValueError('Source camera input must be measured or constant-far')
 
 
 class Xi(NamedTuple):

@@ -20,14 +20,23 @@ from render_source_trajectory import load_source_reading
 from render_terrain_trajectory import caption, render_poses, write_png
 
 
-def comparison_support(metadata):
+def comparison_support(metadata, camera_input_comparison='matched'):
     """Require one shared requested window, retaining each executed support."""
     if len(metadata) < 2:
         raise ValueError('A comparison requires at least two recorded conditions')
+    camera_inputs = {row['camera_input'] for row in metadata}
+    if camera_input_comparison == 'matched':
+        if len(camera_inputs) != 1:
+            raise ValueError('Different camera inputs require an explicit comparison declaration')
+    elif camera_input_comparison == 'measured-vs-constant-far':
+        if camera_inputs != {'measured', 'constant-far'}:
+            raise ValueError('The declared camera comparison requires measured and constant-far inputs')
+    else:
+        raise ValueError('Unknown camera input comparison declaration')
     shared = ('scene_artifact_id', 'terrain_artifact_id', 'reference_artifact_id',
               'physics_backend', 'ray_backend', 'control_hz', 'start_frame',
               'clip_start_frame', 'start_fraction', 'start_offset', 'requested_controls',
-              'sensor_noise', 'seed', 'camera_input', 'reset', 'initial_pose_offset')
+              'sensor_noise', 'seed', 'camera_geometry', 'reset', 'initial_pose_offset')
     first = metadata[0]
     # These two Engine fields locate per-job compiled libraries and their JSON.
     # Keep the complete original metadata in the saved condition records.
@@ -81,6 +90,8 @@ def main():
     for name in ('model', 'scene-contract', 'reference', 'output', 'ffmpeg'):
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--condition', nargs=2, action='append', required=True, metavar=('LABEL', 'EVALUATION_DIR'))
+    parser.add_argument('--camera-input-comparison', choices=('matched', 'measured-vs-constant-far'), default='matched',
+                        help='Explicitly declare measured versus constant-far actor inputs with identical camera geometry')
     parser.add_argument('--clip', type=int, action='append')
     parser.add_argument('--code-revision', required=True)
     parser.add_argument('--distance', type=float, default=3.)
@@ -111,6 +122,7 @@ def main():
         display_after_stop='Blank STOP panel only; no continuation or repeated terminal physical pose',
         depth='Recorded processed actor input [0,1], far white; terminal state has no recorded depth',
         metrics_support='Each condition own terminal-inclusive physical support; N is its executed controls',
+        camera_input_comparison=args.camera_input_comparison,
         physics_steps=0, motions=[], commands=[])
 
     def save():
@@ -144,8 +156,10 @@ def main():
                 reports.append(report)
                 metadata.append(dict(row, label=label, evaluation_result=str(root/'result.json'),
                     trajectory=str(trajectory), depth_recorded=depth is not None, report=report,
-                    **{key: evaluation[key] for key in ('seed', 'camera_input', 'reset', 'physics', 'initial_pose_offset')}))
-            total = comparison_support(metadata)
+                    **{key: evaluation[key] for key in ('seed', 'camera_input', 'camera_input_definition',
+                        'camera_geometry', 'training_camera_input', 'inference_camera_input_override',
+                        'observation', 'inference_observation', 'reset', 'physics', 'initial_pose_offset')}))
+            total = comparison_support(metadata, args.camera_input_comparison)
             videos, stops = [], []
             for index, ((label, model, poses, depth), report, row) in enumerate(zip(loaded, reports, metadata)):
                 output = directory/f'condition-{index:02d}'
