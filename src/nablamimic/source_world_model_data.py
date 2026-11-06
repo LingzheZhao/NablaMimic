@@ -152,8 +152,23 @@ class SourceWorldModelDataset:
             for name in expected:
                 if not np.array_equal(archive[name], expected[name]):
                     raise ValueError("Window indices differ from the declared episode/time splits")
-        self.window_index = expected[split]
+        self._window_indices = expected
+        self.window_index = self._window_indices[split]
         self.split = split
+
+    def split_view(self, split):
+        """Borrow this dataset's loaded episodes and checked temporal indices."""
+        if split not in self._window_indices:
+            raise ValueError("Source world-model split must be train or heldout")
+        view = type(self).__new__(type(self))
+        view.root = self.root
+        view.manifest = self.manifest
+        view.episode_metadata = self.episode_metadata
+        view._episodes = self._episodes
+        view._window_indices = self._window_indices
+        view.window_index = self._window_indices[split]
+        view.split = split
+        return view
 
     def __len__(self):
         return len(self.window_index)

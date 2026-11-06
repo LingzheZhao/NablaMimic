@@ -104,3 +104,27 @@ def test_tampered_temporal_index_is_rejected(tmp_path):
     np.savez(tmp_path / "windows.npz", **windows)
     with pytest.raises(ValueError, match="Window indices"):
         SourceWorldModelDataset(tmp_path)
+
+
+def test_split_view_borrows_checked_episode_owner(tmp_path, monkeypatch):
+    write_dataset(tmp_path, [generated_episode(200), generated_episode(210, first_frame=1000)])
+    train = SourceWorldModelDataset(tmp_path, "train")
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("A split view must borrow already checked data")
+
+    monkeypatch.setattr(np, "load", unexpected_read)
+    monkeypatch.setattr("nablamimic.source_world_model_data.validate_episode", unexpected_read)
+    monkeypatch.setattr("nablamimic.source_world_model_data.temporal_windows", unexpected_read)
+    heldout = train.split_view("heldout")
+    assert heldout._episodes is train._episodes
+    assert heldout._episodes[0]["qpos"] is train._episodes[0]["qpos"]
+    assert heldout.manifest is train.manifest
+    assert heldout.episode_metadata is train.episode_metadata
+    assert heldout._window_indices is train._window_indices
+    assert heldout.window_index is train._window_indices["heldout"]
+    assert len(heldout) == 20 and heldout[0]["window_start"] == 160
+    assert train[-1]["episode_index"] == 1 and heldout[-1]["frame"][-1] == 1210
+    assert heldout.split_view("train").window_index is train.window_index
+    with pytest.raises(ValueError, match="split"):
+        train.split_view("validation")

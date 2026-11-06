@@ -1,0 +1,10 @@
+model_hidden: [256, 256]
+fit_horizon: 8
+forecast_horizons: [1, 8, 32]
+statistics_windows: 256
+contact_force_threshold_n: 1.0
+actor_learning_rate: 0.00001
+heightmap_resolution_m: 0.1
+scan_max_distance_m: 3.0
+margin_m: 2.0
+z_top_m: 10.0
