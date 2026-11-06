@@ -149,10 +149,11 @@ def render_poses(model, poses, reference_poses, args, control_hz, *, follow_body
                         for geom in renderer.scene.geoms[actual_geoms:renderer.scene.ngeom]:
                             geom.rgba[:] = [.95, .88, .68, .45]
                     pixels = renderer.render()
-                    if reference_data is not None:
+                    if reference_data is not None or show_elapsed:
                         pixels[:30] = [20, 24, 30]
                         caption(pixels, 'ACTUAL', 10, [70, 150, 255])
-                        caption(pixels, 'REFERENCE', 120, [245, 225, 175])
+                        if reference_data is not None:
+                            caption(pixels, 'REFERENCE', 120, [245, 225, 175])
                         if show_elapsed:
                             caption(pixels, f'T {index/control_hz:.2f}S', 260, [235, 235, 235])
                     if process:

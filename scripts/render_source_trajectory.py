@@ -1,9 +1,9 @@
-"""Render a source-policy evaluation chain with its aligned complete-library reference.
+"""Render a source-policy evaluation chain with an optional aligned reference.
 
 Consumes evaluate_source_perceptive result.json and one recorded clip trajectory.
 The camera follows the actual free-root body from the scene contract. Captions
-identify actual/reference geometry and elapsed time. Both are in the declared
-world frame, with source visible groups 0 and 2. Rendering uses kinematics only.
+identify actual geometry, optional reference geometry and elapsed time. Both use
+the declared world frame and source visible groups 0 and 2. Rendering uses kinematics only.
 """
 import argparse
 import json
@@ -105,9 +105,12 @@ def load_source_reading(args):
                     start_fraction=reading['start_fraction'], start_offset=reading['start_offset'],
                     requested_controls=reading['requested_controls'],remaining_controls=reading['remaining_controls'],
                     final_frame=int(final_frame[0]), terminal_state_included=True,
-                    geometry_groups=[0, 2], comparison='Actual blue and reference translucent cream in the same world frame',
+                    physics_backend=evaluation['physics_backend'], ray_backend=evaluation['ray_backend'],
+                    geometry_groups=[0, 2], reference_overlay=args.reference_overlay,
+                    comparison=('Actual blue and reference translucent cream in the same world frame'
+                                if args.reference_overlay == 'on' else 'Recorded actual blue robot in the physical world frame'),
                     camera_follows='Actual '+root, physics_steps=0)
-    return model, poses, reference_poses, metadata
+    return model, poses, reference_poses if args.reference_overlay == 'on' else None, metadata
 
 
 def main():
@@ -117,6 +120,8 @@ def main():
     parser.add_argument('--clip', type=int, required=True)
     parser.add_argument('--code-revision', required=True)
     parser.add_argument('--ffmpeg', type=Path)
+    parser.add_argument('--reference-overlay', choices=('on', 'off'), default='on',
+                        help='Overlay the aligned reference robot, or show only the recorded actual robot')
     parser.add_argument('--camera', choices=('follow', 'fixed'), default='follow')
     parser.add_argument('--distance', type=float, default=4.)
     parser.add_argument('--azimuth', type=float, default=135.)
