@@ -1,11 +1,35 @@
 """Terminal-inclusive full-reference and local-window source-task physical reads."""
 import argparse
+from dataclasses import replace
 import json
 import pickle
 from pathlib import Path
 
 import numpy as np
 from nablamimic.source_evaluation_metrics import summarize_source_chain
+
+
+CAMERA_INPUT_DEFINITIONS = {
+    'measured': 'Generated measured depth with the selected camera noise',
+    'constant-far': ('After complete measured camera and noise generation, replace observation columns [744,1320) '
+        'with 1.0 (source normalized 2m/far), before the frozen checkpoint observation normalizer. '
+        'Actor and recorded depth consume this same observation'),
+    'self-only': ('Raycast only the original visible geoms with body_id != 0 using actual dynamic body poses. '
+        'Static world camera occluders are excluded. Physical collision geometry, geom IDs, and the original '
+        'checkpoint perception binding are retained. Miss conversion, noise and image processing run normally'),
+}
+
+
+def self_only_camera_geometry(geometry, device):
+    """Construct a separate sensor owner retaining original non-world geom IDs."""
+    geoms = tuple(geom for geom in geometry.geoms if geom.body_id != 0)
+    if not geoms:
+        raise ValueError('Self-only camera requires visible non-world geometry')
+    backend = None
+    if geometry.cuda_backend is not None:
+        from nablaengine.depth_cuda import CudaDepthGeometry
+        backend = CudaDepthGeometry(geoms,geometry.body_count,device)
+    return replace(geometry,geoms=geoms,cuda_backend=backend)
 
 
 def set_evaluation_conditions(config, reset_condition):
@@ -23,8 +47,8 @@ def set_camera_input(policy_observation, camera_input='measured'):
         raise ValueError('Source policy observation requires history744 followed by depth576')
     if camera_input == 'constant-far':
         policy_observation[:,744:] = 1.
-    elif camera_input != 'measured':
-        raise ValueError('Camera input must be measured or constant-far')
+    elif camera_input not in ('measured','self-only'):
+        raise ValueError('Camera input must be measured, constant-far or self-only')
 
 
 def select_motion_indices(indices, motion_count):
@@ -80,8 +104,8 @@ def main():
     parser.add_argument('--motion-index', type=int, action='append',
                         help='Original clip ID to evaluate, repeat to select several, default all in library order')
     parser.add_argument('--sensor-noise', choices=('on','off'), required=True)
-    parser.add_argument('--camera-input', choices=('measured','constant-far'), default='measured',
-                        help='Evaluation depth input after normal camera generation and noise sampling')
+    parser.add_argument('--camera-input', choices=tuple(CAMERA_INPUT_DEFINITIONS), default='measured',
+                        help='Evaluation camera geometry or depth input condition')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
     parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'), required=True)
@@ -118,6 +142,13 @@ def main():
         if checkpoint['observation'] != env.observation_contract or checkpoint['perception'] != env.perception_contract:
             raise ValueError('Source actor observation or physical geometry binding differs')
         actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
+    excluded_geom_ids = []
+    if args.camera_input == 'self-only':
+        excluded_geom_ids = [geom.geom_id for geom in env.depth_geometry.geoms if geom.body_id == 0]
+        env.depth_geometry = self_only_camera_geometry(env.depth_geometry,env.device)
+    camera_geometry = dict(retained_geom_ids=[geom.geom_id for geom in env.depth_geometry.geoms],
+        excluded_static_geom_ids=excluded_geom_ids,
+        body_count=env.depth_geometry.body_count,physical_geoms=env.m.ngeom,physical_pairs=env.m.npair)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if args.sensor_noise == 'on' and env.camera_noise is None:
@@ -207,9 +238,7 @@ def main():
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         camera_input=args.camera_input,
-        camera_input_definition=('Generated measured depth with the selected camera noise'
-            if args.camera_input == 'measured' else
-            'After complete measured camera and noise generation, replace observation columns [744,1320) with 1.0 (source normalized 2m/far), before the frozen checkpoint observation normalizer. Actor and recorded depth consume this same observation'),
+        camera_input_definition=CAMERA_INPUT_DEFINITIONS[args.camera_input],camera_geometry=camera_geometry,
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',
         selected_motion_indices=selected_motion_indices,
         start_fraction=args.start_fraction, maximum_controls=args.maximum_controls,

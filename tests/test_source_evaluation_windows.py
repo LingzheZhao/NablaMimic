@@ -1,21 +1,65 @@
 """Generated local-window supports, terminal decisions and reference activity."""
 from pathlib import Path
+from dataclasses import dataclass
 import os
 import subprocess
 import sys
 import unittest
 
 import numpy as np
+import mujoco
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-from evaluate_source_perceptive import reference_window_activity, select_motion_indices, set_camera_input, set_evaluation_conditions, source_window, summarize_window
+from evaluate_source_perceptive import CAMERA_INPUT_DEFINITIONS, reference_window_activity, select_motion_indices, self_only_camera_geometry, set_camera_input, set_evaluation_conditions, source_window, summarize_window
 from render_source_trajectory import reference_frame_indices
 sys.path.pop(0)
 
 
 class SourceEvaluationWindowTest(unittest.TestCase):
+    def test_self_only_camera_excludes_world_and_preserves_dynamic_geoms_and_ids(self):
+        model=mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+          <geom name="terrain" type="plane" size="1 1 .1" group="0"/>
+          <body name="robot"><freejoint/>
+            <geom name="robot_visual" type="sphere" size=".1" group="2"/>
+            <geom name="robot_collision" type="sphere" size=".1" group="3"/>
+            <body name="hand" pos=".3 0 0"><geom name="hand_visual" type="sphere" size=".05" group="2"/></body>
+          </body>
+          <geom name="static_visual" type="box" size=".1 .1 .1" group="2"/>
+        </worldbody></mujoco>''')
+        @dataclass(frozen=True)
+        class VisibleGeom:
+            geom_id: int
+            body_id: int
+        @dataclass(frozen=True)
+        class Geometry:
+            geoms: tuple
+            body_count: int
+            cuda_backend: object = None
+        visible=tuple(VisibleGeom(i,int(model.geom_bodyid[i])) for i in range(model.ngeom)
+                      if model.geom_group[i] in (0,2) and model.geom_rgba[i,3] != 0)
+        original=Geometry(visible,model.nbody)
+        selected=self_only_camera_geometry(original,'cpu')
+        self.assertIsNot(selected,original)
+        self.assertEqual(original.geoms,visible)
+        self.assertEqual(selected.body_count,model.nbody)
+        self.assertEqual([geom.geom_id for geom in selected.geoms],
+                         [model.geom('robot_visual').id,model.geom('hand_visual').id])
+        self.assertTrue(all(geom.body_id != 0 for geom in selected.geoms))
+        self.assertTrue(all(any(geom is old for old in visible) for geom in selected.geoms))
+        self.assertEqual(model.ngeom,5)
+        with self.assertRaises(ValueError):
+            self_only_camera_geometry(Geometry((visible[0],),model.nbody),'cpu')
+
+    def test_self_only_depth_is_not_replaced_after_camera_generation(self):
+        observation=np.arange(1320,dtype=np.float32)[None]
+        original=observation.copy()
+        set_camera_input(observation,'self-only')
+        np.testing.assert_array_equal(observation,original)
+        self.assertIn('Static world camera occluders are excluded',CAMERA_INPUT_DEFINITIONS['self-only'])
+        self.assertIn('noise and image processing run normally',CAMERA_INPUT_DEFINITIONS['self-only'])
+
     def test_evaluation_owns_no_gradient_independent_of_training_gradient(self):
         for gradient in ({},{'source_depth_gradient':True},{'source_depth_gradient':False}):
             for reset in ('source-reset','exact-reference'):
@@ -33,7 +77,7 @@ class SourceEvaluationWindowTest(unittest.TestCase):
     def test_camera_input_cli_accepts_only_declared_choices(self):
         command=[sys.executable,'-B',str(SCRIPTS/'evaluate_source_perceptive.py'),'--camera-input']
         environment={**os.environ,'PYTHONPATH':str(SCRIPTS.parent/'src')}
-        for mode in ('measured','constant-far'):
+        for mode in ('measured','constant-far','self-only'):
             result=subprocess.run([*command,mode,'--help'],env=environment,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
         result=subprocess.run([*command,'invalid','--help'],env=environment,capture_output=True,text=True)
