@@ -1,7 +1,8 @@
 """Source perceptive task observation layout on native Nabla physics state.
 
 Camera geometry is bound to the prepared model once. Images are ray-cast without
-pose derivatives. The trainable CNN receives native actor-regression gradients.
+pose derivatives by default. An explicit training option enables fixed-hit pose
+derivatives. The CNN receives native actor-regression gradients.
 """
 import torch
 
@@ -55,15 +56,20 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         rotation = torch.cat((rotation[..., :, 0], rotation[..., :, 2]), -1)*valid[..., None]
         return torch.cat((jp.flatten(1), jv.flatten(1), position.flatten(1), rotation.flatten(1)), -1)
 
-    @torch.no_grad()
     def depth_image(self, state):
+        with torch.set_grad_enabled(torch.is_grad_enabled() and self.cfg.source_depth_gradient):
+            return self._depth_image(state)
+
+    def _depth_image(self, state):
         torso_q = state['xquat'][:, self.torso_id]
         origin = state['xpos'][:, self.torso_id]+quat_rotate(self.camera_position, torso_q)
         camera_q = quat_mul(torso_q, self.camera_rotation)
         local = self.camera_rays.flatten(0, 1)
         directions = quat_rotate(local[None], camera_q[:, None])
         origins = origin[:, None].expand_as(directions)
-        ranges, geometry_ids = self.depth_geometry.raycast(state['xpos'], state['xquat'], origins, directions,
+        raycast=(self.depth_geometry.raycast_with_pose_gradients if self.cfg.source_depth_gradient and torch.is_grad_enabled()
+                 else self.depth_geometry.raycast)
+        ranges, geometry_ids = raycast(state['xpos'], state['xquat'], origins, directions,
                                                max_distance=1.e6, min_distance=.05, max_hops=24)
         raw_range = ranges.reshape(-1, 27, 48)
         optical=source_optical_depth(raw_range,self.camera_rays,geometry_ids.reshape(-1,27,48))

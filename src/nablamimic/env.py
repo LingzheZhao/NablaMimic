@@ -76,6 +76,7 @@ class EnvConfig:
     actor_anchor_position: bool = False
     root_position_weight: float = 0.5
     source_depth_noise: bool = False
+    source_depth_gradient: bool = False
     source_reset_profile: str = "nominal"
     source_motion_start_height_offset: float = 0.0
     source_ensure_link_below_zero_ground: bool = False

@@ -100,10 +100,10 @@ def actor_decode(actor, latent, history, anchor):
     return mlp_apply(actor['dec'], torch.cat((latent, history, anchor), dim=-1))
 
 
-def actor_apply(actor, history, goal):
+def actor_apply(actor, history, goal, *, differentiate_depth=False):
     if 'source_perceptive' in actor:
         from .perceptive_task_inputs import source_actor_apply
-        return source_actor_apply(actor, history, goal)
+        return source_actor_apply(actor, history, goal, differentiate_depth=differentiate_depth)
     if 'obs_norm' in actor:
         norm = tuple(value.detach() for value in actor['obs_norm'])
         normalized = normalize(norm, torch.cat((history, goal), dim=-1))

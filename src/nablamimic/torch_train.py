@@ -54,7 +54,8 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
             z = torch.where((reset_age >= 0)[:, None], reset_z, latent)
             policy_action = nets.actor_decode(actor, z, history, goal[:, -6:])
         else:
-            policy_action = nets.actor_apply(actor, history, goal)
+            policy_action = nets.actor_apply(actor, history, goal,
+                differentiate_depth=env.cfg.source_depth_gradient)
         policy_action = env.bound_action(policy_action)
         action = policy_action + action_noise
         if act_clip is not None:
@@ -555,6 +556,7 @@ def build_parser():
     parser.add_argument("--source-motion-start-height-offset", type=float, default=0.)
     parser.add_argument("--source-ensure-link-below-zero-ground", action="store_true")
     parser.add_argument("--source-depth-noise", action="store_true")
+    parser.add_argument("--source-depth-gradient", action="store_true")
     parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
     parser.add_argument("--root-position-weight", type=float, default=.5)
     parser.add_argument("--actor-checkpoint", type=Path)
@@ -571,6 +573,8 @@ def build_parser():
 def validate_args(args):
     if not math.isfinite(args.source_motion_start_height_offset):
         raise ValueError("Source reset height offset must be finite")
+    if args.source_depth_gradient and args.task_inputs != 'instinct_perceptive_native':
+        raise ValueError('Source depth gradient requires the source camera task')
     if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
         raise ValueError("Source perceptive task requires its scene-bound sharded library")
     if sum(bool(value) for value in (args.actor_checkpoint, args.official_actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
@@ -664,7 +668,8 @@ def build_environment(args):
         residual_action=args.residual_action,action_rate_space=args.action_rate_space,
         future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
         action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
-        root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise), model=model,
+        root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise,
+        source_depth_gradient=args.source_depth_gradient), model=model,
         source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None)
     if source_task:
         if args.terrain_sensor is not None:
@@ -682,6 +687,8 @@ def build_environment(args):
         env.perception_contract['physical_frame'] = model_contract['frame']
     config['perception'] = env.perception_contract
     config['observation'] = env.observation_contract
+    config['depth_gradient_definition'] = ('Fixed selected triangle-plane pose derivative with unchanged raycast values'
+        if args.source_depth_gradient else 'Camera image input stops gradient; CNN parameters remain trainable')
     if source_task:
         config['action'] = env.action_contract
         config['reset'] = dict(profile=args.source_reset_profile,

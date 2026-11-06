@@ -137,6 +137,33 @@ class PerceptiveTaskInputsTest(unittest.TestCase):
         self.assertGreater(float(goal_gradient.abs().sum()),0)
         self.assertGreater(float(encoder_gradient.abs().sum()),0)
 
+    def test_source_depth_gradient_switch_preserves_forward_and_other_gradients(self):
+        torch.manual_seed(7)
+        actor=source_actor_init('cpu')
+        for parameter in nets.tree_leaves(nets.actor_trainable(actor)):
+            parameter.requires_grad_()
+        outputs=[]
+        for enabled in (False,True):
+            history=torch.rand(2,744,requires_grad=True)
+            depth=torch.rand(2,576,requires_grad=True)
+            goal=torch.rand(2,670,requires_grad=True)
+            if not enabled:
+                saved=(history.detach().clone(),depth.detach().clone(),goal.detach().clone())
+            else:
+                history,depth,goal=[value.requires_grad_() for value in saved]
+            output=nets.actor_apply(actor,torch.cat((history,depth),-1),goal,
+                                    differentiate_depth=enabled)
+            outputs.append(output.detach())
+            gradients=torch.autograd.grad(output.square().mean(),
+                (depth,history,goal,actor['enc']['convolutions.0.weight']),allow_unused=True)
+            if enabled:
+                self.assertGreater(float(gradients[0].abs().sum()),0)
+            elif gradients[0] is not None:
+                torch.testing.assert_close(gradients[0],torch.zeros_like(depth),rtol=0,atol=0)
+            for gradient in gradients[1:]:
+                self.assertGreater(float(gradient.abs().sum()),0)
+        torch.testing.assert_close(outputs[0],outputs[1],rtol=0,atol=0)
+
     def test_term_major_history_and_actor_encoder_gradient(self):
         goal = torch.zeros(2,670)
         depth = torch.ones(2,1,18,32)*.5

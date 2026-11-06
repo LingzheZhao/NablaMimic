@@ -100,15 +100,16 @@ def source_actor_init(device):
                                  count=torch.zeros((),dtype=torch.int64,device=device)))
 
 
-def source_actor_apply(actor, history_and_depth, goal):
+def source_actor_apply(actor, history_and_depth, goal, *, differentiate_depth=False):
     history, depth = history_and_depth[:, :744], history_and_depth[:, 744:].reshape(-1,1,18,32)
     packed = torch.cat((goal, depth.flatten(1), history), -1)
     norm = actor['source_norm']
     packed = (packed-norm['mean'])/(torch.sqrt(norm['variance'])+.01)
     goal, depth, history = packed[:,:670], packed[:,670:1246].reshape(-1,1,18,32), packed[:,1246:]
     # Concatenating physical observations can give this image slice a grad_fn.
-    # The camera has no pose VJP, while CNN weights retain regression gradients.
-    depth = depth.detach()
+    # Stop the default camera input VJP while retaining CNN regression gradients.
+    if not differentiate_depth:
+        depth = depth.detach()
     parameters = actor['enc']
     for index in (0,2):
         depth = F.relu(F.conv2d(depth, parameters[f'convolutions.{index}.weight'],
