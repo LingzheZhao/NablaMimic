@@ -128,6 +128,9 @@ def main():
                         help='Evaluation camera geometry or depth input condition')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--record-substeps', action='store_true')
+    parser.add_argument('--push-force-world', type=float, nargs=3, default=[0.,0.,0.], metavar=('X','Y','Z'))
+    parser.add_argument('--push-start-control', type=int, default=150)
+    parser.add_argument('--push-duration-controls', type=int, default=5)
     parser.add_argument('--initial-xy-offset',type=float,nargs=2,default=[0.,0.],metavar=('X','Y'))
     parser.add_argument('--initial-yaw-offset',type=float,default=0.,help='World Z rotation in radians, left-multiplied onto the root quaternion')
     parser.add_argument('--reset-condition', choices=('exact-reference','source-reset'), required=True)
@@ -139,6 +142,15 @@ def main():
         raise ValueError('Start fraction must be finite and in [0,1)')
     if not np.isfinite([*args.initial_xy_offset,args.initial_yaw_offset]).all():
         raise ValueError('Initial pose offsets must be finite')
+    from nablamimic.source_force_pulse import TorsoWorldForcePulse
+    # Validate before loading any policy or physics artifact.
+    pulse = TorsoWorldForcePulse(1, tuple(args.push_force_world),
+                                args.push_start_control, args.push_duration_controls)
+    push_enabled = any(pulse.force_world)
+    if push_enabled and args.backend != 'mujoco':
+        raise ValueError('Nonzero world-force pulses require the MuJoCo backend')
+    if push_enabled and not args.record_substeps:
+        raise ValueError('World-force pulses require --record-substeps for 200 Hz force evidence')
     import torch
     from nablamimic.torch_train import build_environment
     from nablamimic import torch_nets as nets
@@ -152,6 +164,9 @@ def main():
         raise ValueError('MuJoCo camera currently supports measured and constant-far input conditions')
     env, bindings = build_environment(argparse.Namespace(**config),evaluation_backend=args.backend,
         ray_backend=args.ray_backend,device=args.device)
+    if args.backend == 'mujoco':
+        env.mujoco_adapter.applied_body_wrench_world = TorsoWorldForcePulse(
+            int(env.torso_id), pulse.force_world, pulse.start_control, pulse.duration_controls)
     selected_motion_indices = select_motion_indices(args.motion_index,len(env.starts))
     if args.weights == 'official':
         from nablamimic.official_source_policy import OfficialSourcePolicy
@@ -267,6 +282,18 @@ def main():
                 stop_reason=reason,initial_state_error=initial_state_error,**reference_activity,**reading))
     (args.output/'result.json').write_text(json.dumps(dict(checkpoint=str(args.checkpoint),weights=args.weights,
         physics_backend=args.backend,ray_backend=args.ray_backend,
+        push_force=dict(enabled=push_enabled,force_world_N=list(pulse.force_world),
+            torque_world_Nm=[0.,0.,0.],body_name=env.m.body(int(env.torso_id)).name,
+            application_point='torso body center of mass',
+            clock='Episode control index from reset, independent of reference start frame; no reset at pulse',
+            start_control=pulse.start_control,duration_controls=pulse.duration_controls,
+            start_substep=4*pulse.start_control,duration_substeps=4*pulse.duration_controls,
+            physics_dt_s=float(env.m.opt.timestep),
+            requested_impulse_world_Ns=[v*4*pulse.duration_controls*env.m.opt.timestep for v in pulse.force_world],
+            applied_wrench_measured=args.backend=='mujoco' and args.record_substeps,
+            actual_time_support='Executed substeps only; an early termination may precede or truncate pulse',
+            applied_wrench_definition='World force N then torque about body COM N m; substep_applied_body_wrench_world and substep_body_com_world',
+            unavailable_reason=None if args.backend=='mujoco' and args.record_substeps else 'Applied wrench was not measured'),
         physics=bindings['evaluation_physics'] if args.backend=='mujoco' else bindings['engine'],
         policy_implementation='official release actor with stored std' if args.weights == 'official' else 'native actor',
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
