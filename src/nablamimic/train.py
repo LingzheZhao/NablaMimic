@@ -940,7 +940,7 @@ def main(argv=None):
         probs = p_probs(bin_q, aux)
         jax.block_until_ready(critic)
         env_steps += n * nd * args.horizon
-        if args.sampler_exposure_log and (it % 10 == 0 or it == args.iters - 1):
+        if args.sampler_exposure_log:
             native_p = np.asarray(native_probability(first(bin_q), aux))
             actual_p = np.asarray(first(probs))
             valid_owner = owner[np.asarray(env.valid)]
@@ -950,7 +950,7 @@ def main(argv=None):
                 reset_probability_mass=np.bincount(valid_owner, weights=actual_p[np.asarray(env.valid)], minlength=n_sampler_clips).tolist(),
                 counts={name: values.tolist() for name, values in exposure_counts.items()},
                 initial_collector_state_counts=None if initial_collector_counts is None else initial_collector_counts.tolist(),
-                scope="Cumulative after initial_update. Selected collector resets exclude unused reset proposals and initialization probes. Collector transitions use incoming frame; inserted replay states use saved next frame. Actor starts and native rollout outs.frame visits counted separately.")
+                scope="Cumulative complete returned updates after initial_update; unreturned interrupted work is unknown. Selected collector resets exclude unused reset proposals and initialization probes. Collector transitions use incoming frame; inserted replay states use saved next frame. Actor starts and native rollout outs.frame visits counted separately.")
             exposure_log.write(json.dumps(record) + "\n")
             exposure_log.flush()
         if it % 10 == 0:
@@ -992,6 +992,9 @@ def main(argv=None):
             gnorms, dqs, dq_qs, clips, col_terms = [], [], [], [], []
         if it % 500 == 0 or it == args.iters - 1:
             save(out / "params.pkl", it, time.time() - t_start, env_steps)
+    if args.sampler_exposure_log:
+        exposure_log.flush()
+        exposure_log.close()
     (out / "DONE").write_text(str(it))
 
 
