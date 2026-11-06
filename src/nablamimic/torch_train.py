@@ -777,7 +777,7 @@ def main(argv=None):
         nets.copy_tree_(actor, selected_actor)
         config['actor_initialization'] = dict(checkpoint_path=str(args.actor_checkpoint),
             completed_updates=source_actor['completed_updates'], weights=args.actor_weights,
-            remaining_state='fresh critic, optimizer, normalizer, replay, collector and EMA counters')
+            remaining_state='fresh critic, optimizer, critic normalizer, replay, collector and EMA counters')
         write_json(output/'config.json', config)
     if args.official_actor_checkpoint:
         from .official_source_policy import native_actor_from_official
