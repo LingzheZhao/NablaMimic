@@ -177,6 +177,9 @@ def main():
         config[key] = Path(config[key])
     if config['task_inputs'] != 'instinct_perceptive_native' or config['clips'] != ['all']:
         raise ValueError('Checker requires the complete prepared source reference library')
+    (args.output/'config.runtime.json').write_text(json.dumps({
+        key:str(value) if isinstance(value,Path) else value for key,value in config.items()},indent=2)+'\n')
+    reference_contract = json.loads((Path(config['motion_lib'])/'screening.json').read_text())
     with args.checkpoint.open('rb') as handle:
         checkpoint = pickle.load(handle)
     environments,bindings = {},{}
@@ -192,6 +195,9 @@ def main():
         raise ValueError('Requested global reference frames must be distinct and within the complete library')
     if not np.array_equal(engine.starts,mjc.starts) or engine.n_frames != mjc.n_frames:
         raise ValueError('Physics backends must use the same reference frame binding')
+    if any(reference_contract['target_artifact_id'] != value['physical_model']['artifact_id']
+           for value in bindings.values()):
+        raise ValueError('Reference artifact contract differs from the constructed physical scene')
     native_geometry = mjc.depth_geometry
     mujoco_geometry = MuJoCoRayCamera(mjc.mujoco_adapter)
     mjc.camera_state_sync = lambda state:mjc.mujoco_adapter.synchronized_data(state['qpos'],state['qvel'],state['warm'])
@@ -201,6 +207,8 @@ def main():
     np.random.seed(args.seed)
     normalizer = checkpoint['actor_ema']['source_norm']
     protocol = dict(config=str(args.config),checkpoint=str(args.checkpoint),weights='ema',
+        model=str(config['terrain_model']),model_contract=str(config['terrain_model_contract']),
+        reference_library=str(config['motion_lib']),reference_artifact_id=reference_contract['artifact_id'],
         completed_updates=checkpoint['completed_updates'],code_revision=args.code_revision,
         engine_code_revision=args.engine_code_revision,frames=args.frames,seed=args.seed,
         torch_version=torch.__version__,gpu_model=torch.cuda.get_device_name(args.device),
