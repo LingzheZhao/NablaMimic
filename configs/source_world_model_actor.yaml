@@ -1,0 +1,14 @@
+horizon: 32
+learning_rate: 0.000001
+gradient_norm_limit: 0.1
+body_position_weight: 1.0
+body_velocity_weight: 0.1
+torso_orientation_weight: 0.1
+joint_position_weight: 0.1
+joint_velocity_weight: 0.01
+termination_weight: 1.0
+action_smoothness_weight: 0.001
+teacher_action_weight: 1.0
+height_margin_start_m: 0.15
+gravity_margin_start: 0.5
+history_perturbation: 0.01
