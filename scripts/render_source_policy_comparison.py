@@ -50,8 +50,8 @@ def depth_for_state(depth, index, controls):
 
 
 def metrics_text(report):
-    return (f"BODY {report['mean_world_body_error_m']:.3f}M "
-            f"TORSO {report['mean_torso_error_m']:.3f}M "
+    return (f"MEAN BODY {report['mean_world_body_error_m']:.3f}M "
+            f"MEAN TORSO {report['mean_torso_error_m']:.3f}M "
             f"COMPLETE {int(report['reference_complete'])} STRICT {int(report['strict_pass'])} N {report['controls']}")
 
 

@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from render_source_policy_comparison import comparison_support, depth_for_state, frame_labels
+from render_source_policy_comparison import comparison_support, depth_for_state, frame_labels, metrics_text
 sys.path.pop(0)
 
 
@@ -52,6 +52,7 @@ class SourcePolicyComparisonTest(unittest.TestCase):
     def test_labels_and_saved_depth_render_without_font_dependencies(self):
         report = dict(controls=4, mean_world_body_error_m=.1, mean_torso_error_m=.2,
                       reference_complete=False, strict_pass=False)
+        self.assertLessEqual(10+12*len(metrics_text(dict(report, controls=553))), 960)
         depth = np.ones((4, 576))
         transform = frame_labels('RENDERFITV2', report, depth)
         pixels = transform(np.zeros((720, 960, 3), dtype=np.uint8), 0)
