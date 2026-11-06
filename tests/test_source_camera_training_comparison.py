@@ -64,6 +64,8 @@ def generated_readings(tmp_path):
                 camera_geometry=dict(retained_geom_ids=[0,1],physical_geoms=2),
                 reset=dict(profile='source_pose',motion_start_height_offset_m=.1,ensure_link_below_zero_ground=True),
                 initial_pose_offset=dict(world_xy_m=[0.,0.],world_yaw_rad=0.),
+                push_force=dict(enabled=False,force_world_N=[0.,0.,0.],torque_world_Nm=[0.,0.,0.],
+                    requested_impulse_world_Ns=[0.,0.,0.]),
                 physics=dict(timestep=.005,iterations=10,path=str(root/'library.so'),artifact=str(root/'contract.json')),
                 reports=[reading])
             (root/'result.json').write_text(json.dumps(evaluation))
@@ -146,6 +148,29 @@ def test_unmatched_checkpoint_and_inference_conditions_are_rejected(tmp_path,fie
     evaluation = json.loads(path.read_text())
     evaluation[field] = value
     path.write_text(json.dumps(evaluation))
+    with pytest.raises(ValueError,match=error):
+        compare_evaluations(roots,paths,checkpoints,'engine',reference,'generated-reference',1e-6)
+
+
+@pytest.mark.parametrize('field,subfield,value,error',[
+    ('sensor_noise',None,'off','camera noise on'),
+    ('initial_pose_offset','world_xy_m',[.05,0.],'zero initial world'),
+    ('initial_pose_offset','world_yaw_rad',.1,'zero initial world'),
+    ('push_force','enabled',True,'disabled zero-force'),
+    ('push_force','force_world_N',[50.,0.,0.],'disabled zero-force'),
+    ('push_force','torque_world_Nm',[0.,0.,1.],'disabled zero-force'),
+    ('push_force','requested_impulse_world_Ns',[5.,0.,0.],'disabled zero-force'),
+])
+def test_matching_non_target_physical_conditions_are_rejected(tmp_path,field,subfield,value,error):
+    roots,paths,checkpoints,reference = generated_readings(tmp_path)
+    for group in GROUPS:
+        path = roots[group]/'motion-00'/'result.json'
+        evaluation = json.loads(path.read_text())
+        if subfield is None:
+            evaluation[field] = value
+        else:
+            evaluation[field][subfield] = value
+        path.write_text(json.dumps(evaluation))
     with pytest.raises(ValueError,match=error):
         compare_evaluations(roots,paths,checkpoints,'engine',reference,'generated-reference',1e-6)
 

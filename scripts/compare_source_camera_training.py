@@ -150,6 +150,15 @@ def compare_evaluations(roots, checkpoint_paths, checkpoints, backend, reference
             if (evaluation['training_camera_input'] != group or evaluation['camera_input'] != group
                     or evaluation['inference_camera_input_override'] is not None):
                 raise ValueError('Training comparison requires each actor to retain its trained camera condition')
+            if evaluation['sensor_noise'] != 'on':
+                raise ValueError('Training comparison requires source camera noise on')
+            offset = evaluation['initial_pose_offset']
+            if not np.array_equal(offset['world_xy_m'], [0.,0.]) or offset['world_yaw_rad'] != 0.:
+                raise ValueError('Training comparison requires zero initial world XY and yaw offsets')
+            push = evaluation['push_force']
+            if push['enabled'] is not False or any(not np.array_equal(push[key], [0.,0.,0.])
+                    for key in ('force_world_N','torque_world_Nm','requested_impulse_world_Ns')):
+                raise ValueError('Training comparison requires an explicitly disabled zero-force pulse')
             if (evaluation['seed'] != 2 or evaluation['start_fraction'] != 0
                     or evaluation['maximum_controls'] is not None
                     or any(evaluation[key] != 'zero' for key in ('reset_noise','proprioception_noise','goal_noise'))):
