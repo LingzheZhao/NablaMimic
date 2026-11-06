@@ -8,3 +8,6 @@ heightmap_resolution_m: 0.1
 scan_max_distance_m: 3.0
 margin_m: 2.0
 z_top_m: 10.0
+actor_regression_weight: 1.0
+latent_statistics_rate: 0.01
+latent_variance_floor: 0.000001

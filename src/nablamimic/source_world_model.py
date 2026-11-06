@@ -73,7 +73,8 @@ def state_loss_components(prediction, target):
 class SourceWorldModel(nn.Module):
     """State/latent predictor shared by independently trained visual conditions.
 
-    Normalization belongs to the training split and is stored in model buffers.
+    Physical normalization belongs to the training split. Visual statistics
+    follow the current detached encoder with the source-style EMA update.
     Control is the actual 29-dimensional PD target, never an unbased residual.
     This module accepts physical parameters explicitly, without assigning hidden
     simulator defaults. A zero-dimensional latent supports rendered forecasts.
@@ -84,7 +85,8 @@ class SourceWorldModel(nn.Module):
         self.latent_dim = latent_dim
         self.contact_dim = contact_dim
         self.increment_dim = 12 + 2 * joint_count
-        input_dim = 10 + 3 * joint_count + scan_dim + physics_dim + latent_dim
+        physical_input_dim = 10 + 3 * joint_count + scan_dim + physics_dim
+        input_dim = physical_input_dim + latent_dim
         layers = []
         previous = input_dim
         for width in hidden:
@@ -94,15 +96,40 @@ class SourceWorldModel(nn.Module):
         self.net = nn.Sequential(*layers)
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
-        self.register_buffer('input_mean', torch.zeros(input_dim))
-        self.register_buffer('input_std', torch.ones(input_dim))
+        self.register_buffer('input_mean', torch.zeros(physical_input_dim))
+        self.register_buffer('input_std', torch.ones(physical_input_dim))
         self.register_buffer('increment_scale', torch.ones(self.increment_dim))
+        self.register_buffer('z_mean', torch.zeros(latent_dim))
+        self.register_buffer('z_std', torch.ones(latent_dim))
+        self.register_buffer('dz_std', torch.ones(latent_dim))
+
+    @torch.no_grad()
+    def update_latent_statistics(self, z_current, valid, *, rate=.01):
+        """Update source visual EMA from [batch,time+1,latent] current encodings.
+
+        Target latent mean/sample std use the next-frame encodings. The
+        one-step difference RMS uses [batch,time] validity weights, following
+        InstinctMJ WorldModel.update_z_stats. Singleton targets use zero std.
+        """
+        if self.latent_dim == 0:
+            return
+        targets = z_current[:, 1:].reshape(-1, self.latent_dim)
+        difference = (z_current[:, 1:] - z_current[:, :-1]).reshape(-1, self.latent_dim)
+        weights = valid.reshape(-1, 1)
+        correction = min(1, targets.shape[0] - 1)
+        std = targets.std(0, correction=correction).clamp_min(1e-3)
+        difference_rms = ((difference.square() * weights).sum(0) / weights.sum().clamp_min(1)).sqrt()
+        self.z_mean.lerp_(targets.mean(0), rate)
+        self.z_std.lerp_(std, rate)
+        self.dz_std.lerp_(difference_rms.clamp_min(1e-3), rate)
 
     def forward(self, state, pd_target, scan, physics, latent):
-        features = torch.cat((invariant_features(state), pd_target, scan, physics, latent), -1)
-        output = self.net((features-self.input_mean)/self.input_std)
+        physical = torch.cat((invariant_features(state), pd_target, scan, physics), -1)
+        features = torch.cat(((physical-self.input_mean)/self.input_std,
+                              (latent-self.z_mean)/self.z_std), -1)
+        output = self.net(features)
         increment, contacts, dz = output.split((self.increment_dim, self.contact_dim, self.latent_dim), -1)
-        return integrate_increments(state, increment*self.increment_scale), contacts, latent+dz
+        return integrate_increments(state, increment*self.increment_scale), contacts, latent+dz*self.dz_std
 
 
 @torch.no_grad()

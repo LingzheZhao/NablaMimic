@@ -24,7 +24,7 @@ def sample_batch(dataset, indices, device):
     if any(not row['transition_valid'].all() for row in rows):
         raise ValueError('Selected sequence contains a recorded invalid transition; no samples were silently skipped')
     names = ('torso_state', 'qpos', 'qvel', 'policy_observation', 'goal',
-             'depth_clean', 'depth_noisy', 'frame', 'pd_target', 'substep_all_force')
+             'depth_clean', 'depth_noisy', 'frame', 'actor_action', 'transition_valid', 'pd_target', 'substep_all_force')
     return {name: torch.as_tensor(np.stack([row[name] for row in rows]),
                                   device=device, dtype=torch.float32) for name in names}
 
@@ -39,15 +39,17 @@ def initialize_training_statistics(model, vision, batch, context, condition, stu
     for time in range(study['fit_horizon']):
         state = state_of(batch, time)
         scan, physics = context(state)
-        latent = (encode_time(vision, batch, time) if condition == 'latent'
-                  else state[0].new_empty((state[0].shape[0], 0)))
-        features.append(torch.cat((invariant_features(state), batch['pd_target'][:, time], scan, physics, latent), -1))
+        features.append(torch.cat((invariant_features(state), batch['pd_target'][:, time], scan, physics), -1))
         increments.append(increment_targets(state, state_of(batch, time+1)))
     features = torch.cat(features)
     increments = torch.cat(increments)
     model.input_mean.copy_(features.mean(0))
     model.input_std.copy_(features.std(0, unbiased=False).clamp_min(1e-3))
     model.increment_scale.copy_(increments.std(0, unbiased=False).clamp_min(1e-3))
+    if condition == 'latent':
+        z_states = encoded_sequence(vision, batch, study['fit_horizon'])
+        model.update_latent_statistics(z_states, batch['transition_valid'][:, :study['fit_horizon']].bool(),
+                                       rate=study['latent_statistics_rate'])
 
 
 def normalized_state_loss(model, components):
@@ -55,10 +57,40 @@ def normalized_state_loss(model, components):
     return sum(value.mean()/scale.square().mean() for value, scale in zip(components.values(), scales))
 
 
-def sequence_loss(model, vision, batch, horizon, context, *, condition, contact_force_threshold_n):
+def actor_regression_loss(vision, batch, horizon):
+    """Teacher-action regression with a detached current visual feature.
+
+    The target is the frozen collector actor output before exploration noise.
+    This is the declared NablaMimic teacher-action adaptation, independently
+    optimized from the image reconstruction gradients.
+    """
+    observation = batch['policy_observation'][:, :horizon].flatten(0,1)
+    goal = batch['goal'][:, :horizon].flatten(0,1)
+    feature, normalized_goal, normalized_history = vision.encode(observation, goal)
+    predicted = vision.actor_from_features(feature, normalized_goal, normalized_history)
+    target = batch['actor_action'][:, :horizon].flatten(0,1).detach()
+    return torch.nn.functional.mse_loss(predicted, target)
+
+
+@torch.no_grad()
+def encoded_sequence(vision, batch, horizon):
+    depth = batch['depth_noisy'][:, :horizon+1]
+    latent = vision.prediction_target(depth.flatten(0,1))
+    return latent.reshape(depth.shape[0],horizon+1,-1)
+
+
+def sequence_loss(model, vision, batch, horizon, context, *, condition, contact_force_threshold_n,
+                  latent_statistics_rate=None, latent_variance_floor=None):
     state = state_of(batch, 0)
     latent = (encode_time(vision, batch, 0).detach() if condition == 'latent'
               else state[0].new_empty((state[0].shape[0], 0)))
+    if condition == 'latent':
+        if latent_statistics_rate is None or latent_variance_floor is None:
+            raise ValueError('Latent training requires declared statistics rate and variance floor')
+        target_latents = encoded_sequence(vision, batch, horizon)
+        model.update_latent_statistics(target_latents, batch['transition_valid'][:, :horizon].bool(),
+                                       rate=latent_statistics_rate)
+        target_variance = target_latents[:,1:].var(dim=(0,1),unbiased=False).mean().clamp_min(latent_variance_floor)
     losses = []
     for time in range(horizon):
         scan, physics = context(state)
@@ -69,8 +101,8 @@ def sequence_loss(model, vision, batch, horizon, context, *, condition, contact_
         contact_loss = torch.nn.functional.binary_cross_entropy_with_logits(contacts, contact_target)
         latent_loss = contacts.new_zeros(())
         if condition == 'latent':
-            target_latent = vision.prediction_target(batch['depth_noisy'][:, time+1])
-            latent_loss = (latent-target_latent).square().mean()
+            target_latent = target_latents[:,time+1]
+            latent_loss = (latent-target_latent).square().mean()/target_variance
         losses.append(normalized_state_loss(model, components) + contact_loss + latent_loss)
     encoded = encode_time(vision, batch, 0)
     reconstruction = vision.reconstruction_loss(encoded, batch['depth_clean'][:, 0])
@@ -82,6 +114,7 @@ def measure(model, vision, batch, context, condition, study):
     state = state_of(batch, 0)
     latent = (encode_time(vision, batch, 0) if condition == 'latent'
               else state[0].new_empty((state[0].shape[0], 0)))
+    persistence_latent = latent.clone()
     readings = {}
     for time in range(max(study['forecast_horizons'])):
         scan, physics = context(state)
@@ -90,7 +123,13 @@ def measure(model, vision, batch, context, condition, study):
             target = state_of(batch, time+1)
             values = {name: float(value.mean()) for name, value in state_loss_components(state, target).items()}
             if condition == 'latent':
-                values['latent_mse'] = float((latent-encode_time(vision, batch, time+1)).square().mean())
+                target_latent = encode_time(vision, batch, time+1)
+                values['latent_mse'] = float((latent-target_latent).square().mean())
+                values['current_encoder_latent_persistence_mse'] = float((persistence_latent-target_latent).square().mean())
+                variance = target_latent.var(dim=0,unbiased=False).mean().clamp_min(study['latent_variance_floor'])
+                values['current_encoder_target_variance'] = float(variance)
+                values['latent_variance_normalized_mse'] = values['latent_mse']/float(variance)
+                values['latent_persistence_variance_normalized_mse'] = values['current_encoder_latent_persistence_mse']/float(variance)
             else:
                 values['rendered_noisy_to_clean_depth_l1'] = float((context.render(state)-batch['depth_clean'][:, time+1]).abs().mean())
             relative = state[1].transpose(-1,-2) @ target[1]
@@ -101,6 +140,7 @@ def measure(model, vision, batch, context, condition, study):
             values['joint_rmse_rad'] = float((state[4]-target[4]).square().mean().sqrt())
             values['position_mean_m'] = float((state[0]-target[0]).norm(dim=-1).mean())
             readings[str(time+1)] = values
+    readings['teacher_actor_action_mse'] = float(actor_regression_loss(vision, batch, study['fit_horizon']))
     readings['reconstruction_l1'] = float(vision.reconstruction_loss(encode_time(vision, batch, 0),batch['depth_clean'][:, 0]))
     return readings
 
@@ -174,7 +214,8 @@ def main():
     study = yaml.safe_load(args.study_config.read_text())
     required = {'model_hidden','fit_horizon','forecast_horizons','statistics_windows',
                 'contact_force_threshold_n','actor_learning_rate','heightmap_resolution_m',
-                'scan_max_distance_m','margin_m','z_top_m'}
+                'scan_max_distance_m','margin_m','z_top_m','actor_regression_weight',
+                'latent_statistics_rate','latent_variance_floor'}
     if not isinstance(study,dict) or set(study) != required:
         raise ValueError('Study configuration fields differ from the declared schema')
     for name in ('fit_horizon','statistics_windows'):
@@ -190,6 +231,8 @@ def main():
             raise ValueError(f'{name} must be finite and positive')
     if args.updates < 1 or args.batch_size < 1:
         raise ValueError('Updates and batch size must be positive')
+    if study['latent_statistics_rate'] > 1:
+        raise ValueError('Latent statistics EMA rate must be at most one')
     from nablamimic.source_world_model_data import SourceWorldModelDataset
     from nablamimic.source_world_model_render import SourceWorldModelContext
     from nablamimic.torch_train import build_environment
@@ -250,7 +293,10 @@ def main():
                 batch = sample_batch(training, indices, env.device)
                 optimizer.zero_grad(set_to_none=True)
                 loss, reconstruction = sequence_loss(model, vision, batch, study['fit_horizon'], context, condition=condition,
-                    contact_force_threshold_n=study['contact_force_threshold_n'])
+                    contact_force_threshold_n=study['contact_force_threshold_n'],
+                    latent_statistics_rate=study['latent_statistics_rate'], latent_variance_floor=study['latent_variance_floor'])
+                actor_regression = actor_regression_loss(vision, batch, study['fit_horizon'])
+                loss = loss + study['actor_regression_weight']*actor_regression
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite world-model training loss')
                 loss.backward()
@@ -258,6 +304,7 @@ def main():
                 norm = torch.nn.utils.clip_grad_norm_(parameters, 1., error_if_nonfinite=True)
                 optimizer.step()
                 losses.append(dict(loss=float(loss.detach()), reconstruction=float(reconstruction.detach()),
+                                   teacher_actor_action_mse=float(actor_regression.detach()),
                                    gradient_norm=float(norm)))
                 if update % 100 == 0 or update == args.updates:
                     (args.output/'progress.json').write_text(json.dumps(dict(
@@ -269,15 +316,15 @@ def main():
                             numpy_rng=random.bit_generator.state, sampling_step=args.updates,
                             update_indices=update_indices, heldout_indices=heldout_indices), args.output/f'{condition}.pt')
             actor_metadata = dict(parent_checkpoint=str(args.checkpoint), parent_weights='ema',
-                world_model_updates=args.updates, vision_method=condition,
-                pilot_objective=f"{study['fit_horizon']}-step state/contact fit with latent prediction only for latent condition, plus depth reconstruction", ema=False)
+                world_model_updates=args.updates, actor_teacher_regression_updates=args.updates, vision_method=condition,
+                pilot_objective=f"{study['fit_horizon']}-step state/contact fit with latent prediction only for latent condition, plus depth reconstruction and detached-feature teacher-action regression", ema=False)
             def save_actor(name, completed_updates):
                 payload = dict(actor=torch_nets.tree_map(lambda value: value.detach().cpu().numpy(), vision.export_actor()), observation=env.observation_contract,
                     perception=env.perception_contract, completed_updates=completed_updates,
-                    training_metadata=actor_metadata)
+                    training_metadata={**actor_metadata, 'dynamic_head_updates':completed_updates})
                 with (args.output/name).open('wb') as handle:
                     pickle.dump(payload, handle)
-            save_actor(f'{condition}_reconstruction_actor.pkl', 0)
+            save_actor(f'{condition}_fit_actor.pkl', 0)
             policy_batch = sample_batch(training, update_indices[-1], env.device)
             gradient_reading = policy_gradient_reading(model, vision, policy_batch, context, env, condition, study)
             gradient_reading['split'] = 'train'
@@ -286,7 +333,9 @@ def main():
             torch.save(dict(actor=vision.export_actor(), policy_gradient=gradient_reading),
                        args.output/f'{condition}_actor_one_update.pt')
             reports[condition] = dict(initial=initial, persistence=persistence, heldout=final,
-                                     training=losses, policy_gradient=gradient_reading)
+                                     training=losses, policy_gradient=gradient_reading,
+                                     actor_checkpoints=dict(after_fit=f'{condition}_fit_actor.pkl',
+                                         after_one_dynamic_update=f'{condition}_one_update_actor.pkl'))
     except Exception as error:
         failure = error
         failed_conditions.append(dict(condition=args.vision, error_type=type(error).__name__, error=str(error)))
@@ -294,7 +343,7 @@ def main():
         dataset=str(args.dataset), source_checkpoint=str(args.checkpoint), seed=args.seed,
         updates=args.updates, batch_size=args.batch_size, fit_horizon=study['fit_horizon'], forecast_horizons=study['forecast_horizons'],
         model_hidden=study['model_hidden'], control='actual PD target29', physics_condition='fixed nominal model; no randomized parameter vector',
-        execution='Forecast fitting only; simulator policy execution is a separate reading',
+        execution='Learned forecast and detached-feature teacher-action fitting plus one diagnostic dynamic head update; simulator execution is a separate reading',
         physical_binding=bindings['engine'], context=context.metadata,
         source_noise_condition=protocol['source_noise_condition'], measurement_rng_seed=args.seed+1000,
         failed_conditions=failed_conditions, skipped_conditions=[], status='failed' if failed_conditions else 'complete',
