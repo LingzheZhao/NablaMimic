@@ -87,7 +87,7 @@ class SourceWorldModelTrainingTest(unittest.TestCase):
         self.batch['frame'][1] = torch.arange(150,183)
         dataset = SimpleNamespace(window_index=np.asarray([[0,0,32],[1,50,82]]),
             episode_metadata=[dict(seed=2,clip_index=i,reference_clip=f'motion_{i:02d}') for i in range(2)])
-        env = SimpleNamespace(starts=torch.tensor([0,100]),lengths=torch.tensor([101,101]))
+        env = SimpleNamespace(starts=np.asarray([0,100]),lengths=np.asarray([101,101]))
         return trainer.window_reading_metadata(dataset,[0,1],self.batch,env,[0.,.25,.5,.75,1.])
 
     def test_constant_velocity_uses_world_translation_body_rotation_and_joint_velocity(self):
@@ -242,7 +242,7 @@ class SourceWorldModelTrainingTest(unittest.TestCase):
                 reading_phase_boundaries=[0.,.25,.5,.75,1.],checkpoint_every_updates=1)
             study_path = root/'study.yaml'
             study_path.write_text(trainer.yaml.safe_dump(study))
-            env = SimpleNamespace(device=torch.device('cpu'),starts=torch.tensor([0,1000]),lengths=torch.tensor([41,41]),
+            env = SimpleNamespace(device=torch.device('cpu'),starts=np.asarray([0,1000]),lengths=np.asarray([41,41]),
                 m=SimpleNamespace(nbody=31),observation_contract=contract,perception_contract=contract,camera_noise=None)
             bindings = dict(physical_model=dict(artifact_id='generated-physical-model'),engine=dict(artifact_version=5))
             def run(output,updates,resume=None):

@@ -133,7 +133,7 @@ def physical_forecast_metrics(prediction, target):
 def window_reading_metadata(dataset, indices, batch, env, phase_boundaries):
     """Bind selected window indices to recorded episodes and reference phase."""
     frames = batch['frame'][:, 0].detach().cpu().tolist()
-    starts, lengths = env.starts.cpu().tolist(), env.lengths.cpu().tolist()
+    starts, lengths = np.asarray(env.starts), np.asarray(env.lengths)
     result = []
     for index, frame in zip(indices, frames):
         episode_index, start, stop = map(int, dataset.window_index[int(index)])
