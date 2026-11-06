@@ -60,6 +60,22 @@ class SourceEvaluationWindowTest(unittest.TestCase):
         self.assertIn('Static world camera occluders are excluded',CAMERA_INPUT_DEFINITIONS['self-only'])
         self.assertIn('noise and image processing run normally',CAMERA_INPUT_DEFINITIONS['self-only'])
 
+    def test_self_only_eval_helper_constructs_mujoco_sensor_without_dataclass_replacement(self):
+        from types import SimpleNamespace
+        from nablamimic.mujoco_source_camera import MuJoCoRayCamera
+        model=mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+          <geom name="terrain" type="plane" size="1 1 .1" group="0"/>
+          <body><freejoint/><geom name="robot" type="sphere" size=".1" group="2"/></body>
+        </worldbody></mujoco>''')
+        adapter=SimpleNamespace(model=model,data_batch=())
+        original=MuJoCoRayCamera(adapter)
+        selected=self_only_camera_geometry(original,'cpu')
+        self.assertIsNot(selected,original)
+        self.assertIs(selected.adapter,adapter)
+        self.assertTrue(original.include_static)
+        self.assertFalse(selected.include_static)
+        self.assertEqual([geom.geom_id for geom in selected.geoms],[model.geom('robot').id])
+
     def test_evaluation_owns_no_gradient_independent_of_training_gradient(self):
         for gradient in ({},{'source_depth_gradient':True},{'source_depth_gradient':False}):
             for reset in ('source-reset','exact-reference'):

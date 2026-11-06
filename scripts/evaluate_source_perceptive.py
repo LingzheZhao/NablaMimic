@@ -22,6 +22,9 @@ CAMERA_INPUT_DEFINITIONS = {
 
 def self_only_camera_geometry(geometry, device):
     """Construct a separate sensor owner retaining original non-world geom IDs."""
+    from nablamimic.mujoco_source_camera import MuJoCoRayCamera
+    if isinstance(geometry,MuJoCoRayCamera):
+        return MuJoCoRayCamera(geometry.adapter,include_static=False)
     geoms = tuple(geom for geom in geometry.geoms if geom.body_id != 0)
     if not geoms:
         raise ValueError('Self-only camera requires visible non-world geometry')
@@ -160,8 +163,6 @@ def main():
     set_evaluation_conditions(config,args.reset_condition)
     for key in ('terrain_model','terrain_model_contract'):
         config[key] = Path(config[key])
-    if args.ray_backend=='mujoco' and args.camera_input=='self-only':
-        raise ValueError('MuJoCo camera currently supports measured and constant-far input conditions')
     env, bindings = build_environment(argparse.Namespace(**config),evaluation_backend=args.backend,
         ray_backend=args.ray_backend,device=args.device)
     if args.backend == 'mujoco':
@@ -185,9 +186,16 @@ def main():
             raise ValueError('Source actor observation or physical geometry binding differs')
         actor = nets.tree_from_jax(checkpoint['actor_ema' if args.weights=='ema' else 'actor'], env.device)
     excluded_geom_ids = []
+    camera_input_definition = CAMERA_INPUT_DEFINITIONS[args.camera_input]
     if args.camera_input == 'self-only':
-        excluded_geom_ids = [geom.geom_id for geom in env.depth_geometry.geoms if geom.body_id == 0]
+        original_geoms = env.depth_geometry.geoms
         env.depth_geometry = self_only_camera_geometry(env.depth_geometry,env.device)
+        retained_ids = {geom.geom_id for geom in env.depth_geometry.geoms}
+        excluded_geom_ids = [geom.geom_id for geom in original_geoms if geom.geom_id not in retained_ids]
+        if args.ray_backend == 'mujoco':
+            camera_input_definition = ('MuJoCo camera mj_multiRay/mj_ray with flg_static=False excludes '
+                'camera geoms whose body_weldid is zero. Physical collision geometry and original geom IDs '
+                'are retained. Actual dynamic poses, miss conversion, noise and image processing run normally.')
     camera_geometry = dict(retained_geom_ids=[geom.geom_id for geom in env.depth_geometry.geoms],
         excluded_static_geom_ids=excluded_geom_ids,
         body_count=env.depth_geometry.body_count,physical_geoms=env.m.ngeom,physical_pairs=env.m.npair)
@@ -299,7 +307,7 @@ def main():
         action_execution='Environment applies its declared normalized action domain; raw policy_action and executed action are recorded',
         completed_updates=checkpoint['iter'] if args.weights == 'official' else checkpoint['completed_updates'],sensor_noise=args.sensor_noise,seed=args.seed,
         camera_input=args.camera_input,
-        camera_input_definition=CAMERA_INPUT_DEFINITIONS[args.camera_input],camera_geometry=camera_geometry,
+        camera_input_definition=camera_input_definition,camera_geometry=camera_geometry,
         initial_pose_offset=dict(world_xy_m=args.initial_xy_offset,world_yaw_rad=args.initial_yaw_offset,
             definition='After reset, translate root world XY and left-multiply root WXYZ quaternion by world Z yaw; preserve qvel coordinates, rebuild FK and zero-noise proprioception history'),
         reset=bindings['reset'],reset_noise='zero',proprioception_noise='zero',goal_noise='zero',

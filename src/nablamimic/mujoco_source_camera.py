@@ -19,14 +19,16 @@ class MujocoVisibleGeom:
 
 class MuJoCoRayCamera:
     """Read the physics adapter's actual geometry, including robot self occlusion."""
-    def __init__(self, adapter):
+    def __init__(self, adapter, *, include_static=True):
         self.adapter = adapter
         self.model = adapter.model
         self.body_count = self.model.nbody
+        self.include_static = include_static
         self.geom_groups = np.array([1,0,1,0,0,0],dtype=np.uint8)
         self.geoms = tuple(MujocoVisibleGeom(i,int(self.model.geom_bodyid[i]))
             for i in range(self.model.ngeom)
-            if self.model.geom_group[i] in (0,2) and self.model.geom_rgba[i,3] != 0)
+            if self.model.geom_group[i] in (0,2) and self.model.geom_rgba[i,3] != 0
+            and (include_static or self.model.body_weldid[self.model.geom_bodyid[i]] != 0))
 
     def raycast_numpy(self, body_positions, body_quaternions, ray_origins, ray_directions,
                       *, max_distance=1e6, min_distance=.05, max_hops=24, surface_epsilon=1e-5):
@@ -70,7 +72,7 @@ class MuJoCoRayCamera:
             first_ids = np.empty(len(vectors),dtype=np.int32)
             first_ranges = np.empty(len(vectors),dtype=np.float64)
             mujoco.mj_multiRay(self.model,data,point,vectors.reshape(-1),self.geom_groups,
-                               True,-1,first_ids,first_ranges,None,len(vectors),max_distance)
+                               self.include_static,-1,first_ids,first_ranges,None,len(vectors),max_distance)
             for pixel,vector in enumerate(vectors):
                 current = point.copy()
                 traveled = 0.
@@ -88,7 +90,7 @@ class MuJoCoRayCamera:
                     advance = hit+surface_epsilon
                     current += vector*advance
                     traveled += advance
-                    hit = mujoco.mj_ray(self.model,data,current,vector,self.geom_groups,True,-1,geom_id)
+                    hit = mujoco.mj_ray(self.model,data,current,vector,self.geom_groups,self.include_static,-1,geom_id)
         return ranges,geometry_ids
 
     def raycast(self, body_positions, body_quaternions, ray_origins, ray_directions, **limits):

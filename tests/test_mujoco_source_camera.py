@@ -34,6 +34,46 @@ def inputs(adapter, directions):
 
 
 class MuJoCoSourceCameraTest(unittest.TestCase):
+    def test_self_only_official_static_flag_keeps_robot_and_original_physics(self):
+        adapter=fixture();measured=MuJoCoRayCamera(adapter)
+        self_only=MuJoCoRayCamera(adapter,include_static=False)
+        groups=adapter.model.geom_group.copy();qpos=adapter.data_batch[0].qpos.copy()
+        values=inputs(adapter,[[1,0,0],[0,0,-1]])
+        with patch.object(mujoco,'mj_step',side_effect=AssertionError('No physical steps permitted')):
+            with patch.object(mujoco,'mj_multiRay',wraps=mujoco.mj_multiRay) as multi:
+                distance,ids=self_only.raycast_numpy(*values)
+                self.assertIs(multi.call_args.args[5],False)
+        np.testing.assert_allclose(distance,[[.8,1e6]],rtol=0,atol=1e-12)
+        np.testing.assert_array_equal(ids,[[adapter.model.geom('robot_visual').id,-1]])
+        self.assertEqual([geom.geom_id for geom in self_only.geoms],[adapter.model.geom('robot_visual').id])
+        self.assertTrue(measured.include_static)
+        self.assertIs(measured.adapter,self_only.adapter)
+        np.testing.assert_array_equal(adapter.model.geom_group,groups)
+        np.testing.assert_array_equal(adapter.data_batch[0].qpos,qpos)
+        # Near-surface continuation must use the same static exclusion flag.
+        near_values=list(inputs(adapter,[[1,0,0]]));near_values[2][:,:,0]=.79
+        with patch.object(mujoco,'mj_ray',wraps=mujoco.mj_ray) as single:
+            distance,ids=self_only.raycast_numpy(*near_values)
+            self.assertIs(single.call_args.args[5],False)
+        np.testing.assert_allclose(distance,[[.41]],rtol=0,atol=1e-12)
+        np.testing.assert_array_equal(ids,[[adapter.model.geom('robot_visual').id]])
+
+    def test_static_flag_excludes_nonworld_bodies_welded_to_world(self):
+        model=mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+          <body name="fixed" pos=".3 0 0"><geom name="fixed_visual" type="sphere" size=".05" group="2"/></body>
+          <body name="robot" pos="1 0 0"><freejoint/><geom name="robot_visual" type="sphere" size=".2" group="2"/></body>
+        </worldbody></mujoco>''')
+        data=mujoco.MjData(model);mujoco.mj_kinematics(model,data)
+        adapter=SimpleNamespace(model=model,data_batch=(data,))
+        self.assertGreater(model.body('fixed').id,0)
+        self.assertEqual(model.body_weldid[model.body('fixed').id],0)
+        full=MuJoCoRayCamera(adapter);self_only=MuJoCoRayCamera(adapter,include_static=False)
+        full_distance,_=full.raycast_numpy(*inputs(adapter,[[1,0,0]]))
+        distance,ids=self_only.raycast_numpy(*inputs(adapter,[[1,0,0]]))
+        np.testing.assert_allclose(full_distance,[[.25]],rtol=0,atol=1e-12)
+        np.testing.assert_allclose(distance,[[.8]],rtol=0,atol=1e-12)
+        np.testing.assert_array_equal(ids,[[model.geom('robot_visual').id]])
+
     def test_official_rays_include_static_terrain_and_robot_self_occlusion(self):
         adapter=fixture();camera=MuJoCoRayCamera(adapter)
         values=inputs(adapter,[[1,0,0],[0,1,0],[0,0,-1]])
