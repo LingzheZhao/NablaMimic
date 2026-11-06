@@ -16,7 +16,8 @@ def reading(controls):
                 physics_backend='engine', ray_backend='native', control_hz=50., start_frame=100,
                 clip_start_frame=100, start_fraction=0., start_offset=0, requested_controls=10,
                 controls=controls, states=controls+1, final_frame=100+controls,
-                sensor_noise='on', seed=0, camera_input='measured', reset={}, physics={}, initial_pose_offset={})
+                sensor_noise='on', seed=0, camera_input='measured', camera_geometry={},
+                reset={}, physics={}, initial_pose_offset={})
 
 
 class SourcePolicyComparisonTest(unittest.TestCase):
@@ -48,6 +49,34 @@ class SourcePolicyComparisonTest(unittest.TestCase):
         np.testing.assert_array_equal(depth_for_state(depth, 3, 4), depth[3].reshape(18, 32))
         self.assertIsNone(depth_for_state(depth, 4, 4))
         self.assertIsNone(depth_for_state(None, 0, 4))
+
+    def test_camera_input_difference_requires_its_declared_scope(self):
+        rows = [reading(10), dict(reading(4), camera_input='constant-far')]
+        for row in rows:
+            row.update(training_camera_input=row['camera_input'], inference_camera_input_override=None,
+                       observation=dict(camera_input=row['camera_input']),
+                       inference_observation=dict(camera_input=row['camera_input']))
+        original = deepcopy(rows)
+        with self.assertRaisesRegex(ValueError, 'explicit comparison declaration'):
+            comparison_support(rows)
+        self.assertEqual(comparison_support(rows, 'measured-vs-constant-far'), 11)
+        self.assertEqual(rows, original)
+        for changed in (dict(camera_input='self-only'), dict(camera_geometry=dict(excluded_static_geom_ids=[0])),
+                        dict(seed=1), dict(reset=dict(height_m=.2)), dict(physics=dict(timestep=.01)),
+                        dict(reference_artifact_id='other-reference'), dict(control_hz=25.)):
+            with self.assertRaises(ValueError):
+                comparison_support([rows[0], dict(rows[1], **changed)], 'measured-vs-constant-far')
+        with self.assertRaises(ValueError):
+            comparison_support([reading(10), reading(4)], 'measured-vs-constant-far')
+
+    def test_no_depth_trained_title_keeps_the_recorded_constant_far_input(self):
+        report = dict(controls=4, mean_world_body_error_m=.1, mean_torso_error_m=.2,
+                      reference_complete=False, strict_pass=False)
+        depth = np.ones((4, 576))
+        original = depth.copy()
+        pixels = frame_labels('NO DEPTH TRAINED', report, depth)(np.zeros((720, 960, 3), dtype=np.uint8), 3)
+        self.assertTrue((pixels[568:712, 694:950] == 255).all())
+        np.testing.assert_array_equal(depth, original)
 
     def test_labels_and_saved_depth_render_without_font_dependencies(self):
         report = dict(controls=4, mean_world_body_error_m=.1, mean_torso_error_m=.2,

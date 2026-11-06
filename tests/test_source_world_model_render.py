@@ -29,7 +29,7 @@ def camera_fixture(noise=False):
     </worldbody></mujoco>''')
     env = SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
     env.m, env.device = model, 'cpu'
-    env.cfg = SimpleNamespace(dr=False, source_depth_noise=noise, source_depth_gradient=True)
+    env.cfg = SimpleNamespace(dr=False, source_camera_input="measured", source_depth_noise=noise, source_depth_gradient=True)
     env.torso_id = model.body('torso_link').id
     env.depth_geometry = DepthGeometry.from_model(model, device='cpu', backend='torch')
     env.camera_state_sync = None

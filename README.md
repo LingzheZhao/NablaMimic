@@ -85,6 +85,24 @@ options whose strict numerical equivalence is not established. The portable
 [observed-evaluation tools](studies/evaluation/README.md) retain complete per-clip
 trajectories and provide bounded two-thread compression.
 
+### Source-task camera input conditions
+
+For `configs/instinct_perceptive_native.args`, `--source-camera-input measured|constant-far`
+selects the input from the start of training, including every actor observation and
+observation-normalizer update. Both conditions use the same actor and CNN architecture.
+`measured` supplies processed depth. `constant-far` supplies an image of ones before
+observation normalization, removing depth information. Reference goals,
+proprioception and nonvisual privileged critic inputs remain available.
+
+`scripts/evaluate_source_perceptive.py` defaults to the training mode recorded in the
+resolved configuration and checkpoint. For example, a configuration at
+`runs/source/config.json` and its checkpoint retain their trained input mode when
+`--camera-input` is omitted. An explicit `--camera-input measured`, `constant-far` or
+`self-only` selects a frozen-weight inference condition and is recorded separately from
+training provenance. This inference override does not substitute for training a new
+policy under that input condition. Compiled runs can consume random draws differently,
+so a shared seed alone does not establish draw-by-draw pairing.
+
 ## CPU checks
 
 After installing the dependencies and the test extra:

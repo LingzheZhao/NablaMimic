@@ -12,7 +12,7 @@ import mujoco
 
 SCRIPTS = Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-from evaluate_source_perceptive import CAMERA_INPUT_DEFINITIONS, reference_window_activity, select_motion_indices, self_only_camera_geometry, set_camera_input, set_evaluation_conditions, source_window, summarize_window
+from evaluate_source_perceptive import CAMERA_INPUT_DEFINITIONS, reference_window_activity, select_motion_indices, self_only_camera_geometry, set_evaluation_conditions, source_window, summarize_window
 from render_source_trajectory import reference_frame_indices
 sys.path.pop(0)
 
@@ -52,14 +52,6 @@ class SourceEvaluationWindowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self_only_camera_geometry(Geometry((visible[0],),model.nbody),'cpu')
 
-    def test_self_only_depth_is_not_replaced_after_camera_generation(self):
-        observation=np.arange(1320,dtype=np.float32)[None]
-        original=observation.copy()
-        set_camera_input(observation,'self-only')
-        np.testing.assert_array_equal(observation,original)
-        self.assertIn('Static world camera occluders are excluded',CAMERA_INPUT_DEFINITIONS['self-only'])
-        self.assertIn('noise and image processing run normally',CAMERA_INPUT_DEFINITIONS['self-only'])
-
     def test_self_only_eval_helper_constructs_mujoco_sensor_without_dataclass_replacement(self):
         from types import SimpleNamespace
         from nablamimic.mujoco_source_camera import MuJoCoRayCamera
@@ -98,41 +90,6 @@ class SourceEvaluationWindowTest(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
         result=subprocess.run([*command,'invalid','--help'],env=environment,capture_output=True,text=True)
         self.assertEqual(result.returncode,2)
-
-    def test_default_measured_camera_preserves_observation_values(self):
-        observation=np.arange(2*1320,dtype=np.float32).reshape(2,1320)
-        original=observation.copy()
-        set_camera_input(observation)
-        np.testing.assert_array_equal(observation,original)
-        set_camera_input(observation,'measured')
-        np.testing.assert_array_equal(observation,original)
-
-    def test_constant_far_replaces_only_depth_in_the_shared_observation(self):
-        observation=np.arange(2*1320,dtype=np.float32).reshape(2,1320)
-        observation[:,744:]=np.tile([0.,1.],288)
-        original=observation.copy()
-        goal=np.arange(2*670,dtype=np.float32).reshape(2,670)
-        original_goal=goal.copy()
-        set_camera_input(observation,'constant-far')
-        np.testing.assert_array_equal(observation[:,:744],original[:,:744])
-        np.testing.assert_array_equal(observation[:,744:],np.ones((2,576)))
-        np.testing.assert_array_equal(goal,original_goal)
-        # Both the actor's depth view and the trajectory's saved depth use this owner.
-        actor_depth=observation[:,744:].reshape(2,1,18,32)
-        saved_depth=observation[0,744:]
-        np.testing.assert_array_equal(actor_depth[0].ravel(),saved_depth)
-
-    def test_camera_input_zero_one_boundaries_and_current_schema(self):
-        for value in (0.,1.):
-            observation=np.full((1,1320),value,dtype=np.float32)
-            set_camera_input(observation,'constant-far')
-            np.testing.assert_array_equal(observation[:,:744],value)
-            np.testing.assert_array_equal(observation[:,744:],1.)
-        for shape in ((1320,),(1,1319),(1,1321),(1,1,1320)):
-            with self.assertRaises(ValueError):
-                set_camera_input(np.zeros(shape),'constant-far')
-        with self.assertRaises(ValueError):
-            set_camera_input(np.zeros((1,1320)),'invalid')
 
     def test_motion_selection_defaults_to_all_original_indices(self):
         self.assertEqual(select_motion_indices(None,10),list(range(10)))

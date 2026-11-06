@@ -25,7 +25,7 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
     positions = qpos[:, None, :3] + offsets.numpy()[None]
     quaternions = np.zeros((frames, bodies, 4), np.float32)
     quaternions[..., 0] = 1
-    cfg = SimpleNamespace(source_depth_gradient=False, root_position_weight=root_position_weight, actor_anchor_position=actor_anchor_position, action_limit=action_limit, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
+    cfg = SimpleNamespace(source_camera_input="measured", source_depth_gradient=False, root_position_weight=root_position_weight, actor_anchor_position=actor_anchor_position, action_limit=action_limit, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
                           dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8,
                           future_stride=future_stride, reference_root_displacement=reference_root_displacement)
     reference = SimpleNamespace(m=SimpleNamespace(nq=36, nv=35, nu=29), cfg=cfg, nu=29,
