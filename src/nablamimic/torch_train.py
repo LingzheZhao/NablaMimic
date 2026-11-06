@@ -43,7 +43,7 @@ def state_where(done, reset, state):
     return select_reset(done, reset, state)
 
 
-def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True):
+def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, enc_hoist=True, v_bound=None, bootstrap_gradient=True):
     """One differentiable control step; all objective accumulators stay tensors."""
     def body(actor, critic, cnorm, state, reset, acc, discount, total, reset_age,
              latent, reset_latents, action_noise, proprio_noise, goal_noise, delta, probe):
@@ -54,37 +54,35 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
             z = torch.where((reset_age >= 0)[:, None], reset_z, latent)
             policy_action = nets.actor_decode(actor, z, history, goal[:, -6:])
         else:
-            policy_action = nets.actor_apply(actor, history, goal)
+            policy_action = nets.actor_apply(actor, history, goal,
+                differentiate_depth=env.cfg.source_depth_gradient)
+        policy_action = env.bound_action(policy_action)
         action = policy_action + action_noise
         if act_clip is not None:
             action = nets.clip_rows_to_median(action, act_clip, probe)
         action = action + delta
         stepped = env.step(state, action, proprio_noise)
+        action = stepped['prev_a']
         reward, terms = env.reward(stepped, action, state['prev_a'], prev=state)
         if term_penalty is not None:
             weight, height_start, tilt_start = term_penalty
-            hazard = env.hazard_features(stepped)
-            zero = torch.zeros((), device=reward.device, dtype=reward.dtype)
-            penalty = -weight * .02 * (
-                (torch.maximum(env.cfg.term_height-hazard[:, 0]-height_start, zero) /
-                 (env.cfg.term_height-height_start)) ** 2 +
-                (torch.maximum(env.cfg.term_tilt-hazard[:, 2]-tilt_start, zero) /
-                 (env.cfg.term_tilt-tilt_start)) ** 2)
+            penalty = -weight * .02 * env.termination_penalty(stepped,height_start,tilt_start)
             reward = reward + penalty
             terms = {**terms, 'term_pen': penalty}
         terminated = env.terminated(stepped)
         done = terminated | env.clip_ended(stepped) | (stepped['ep'] >= max_episode_steps)
         cobs = env.critic_obs(stepped)
-        value = nets.critic_apply(critic, nets.normalize(cnorm, cobs))[:, 0]
+        raw_value = nets.critic_apply(critic, nets.normalize(cnorm, cobs))[:, 0]
+        value = nets.bootstrap_value(raw_value, v_bound, gradient=bootstrap_gradient)
         reward = torch.where(torch.isfinite(reward), reward, 0.0)
         value = torch.where(torch.isfinite(value), value, 0.0)
         next_acc = acc + discount * reward
         next_discount = discount * gamma
         total = total + torch.where(done, next_acc + next_discount * value * (~terminated), 0.0)
-        next_state = state_where(done, reset, stepped)
+        next_state = state_where(done, env.reset_for_mask(reset, done), stepped)
         reset_age = torch.where(done, 0, torch.where(reset_age >= 0, reset_age + 1, -1))
         outputs = dict(cobs=cobs.detach(), cobs_pre=env.critic_obs(state).detach(),
-                       r=reward.detach(), term=terminated, done=done, v2=value.detach(),
+                       r=reward.detach(), term=terminated, done=done, v2=value.detach(), v2_raw=raw_value.detach(),
                        frame=stepped['frame'], terms={k: v.detach() for k, v in terms.items()},
                        hist=history.detach().to(torch.bfloat16), goal=goal.detach().to(torch.bfloat16),
                        a_pi=policy_action.detach())
@@ -93,7 +91,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
     return body
 
 
-def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode):
+def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode, v_bound=None, bootstrap_gradient=True):
     """Eager host orchestration around compiled body calls, captured as one graph."""
     def window(start, reset, action_noise, proprio_noise, goal_noise, delta, probe):
         continuous_latents, reset_latents = encode(actor, start['frame'], reset['frame'])
@@ -111,10 +109,13 @@ def make_window(env, actor, critic, cnorm, horizon, gamma, body, encode):
                                   proprio_noise[0, t]), goal_noise[t], delta[t], probe)
             records.append(row)
         state, acc, discount, total, _ = carry
-        last_value = nets.critic_apply(critic, nets.normalize(cnorm, env.critic_obs(state)))[:, 0]
+        last_value_raw = nets.critic_apply(critic, nets.normalize(cnorm, env.critic_obs(state)))[:, 0]
+        last_value = nets.bootstrap_value(last_value_raw, v_bound, gradient=bootstrap_gradient)
         objective = -(total + acc + discount * torch.where(torch.isfinite(last_value), last_value, 0.0)).mean()
         gradients, clip_statistics = torch.autograd.grad(objective, (delta, probe))
         outputs = nets.tree_map(lambda *rows: torch.stack(rows), *records)
+        outputs['window_value_raw'] = last_value_raw.detach()
+        outputs['window_value_used'] = last_value.detach()
         return objective.detach(), gradients.detach(), clip_statistics.detach()/horizon, outputs
     return window
 
@@ -174,6 +175,7 @@ class TorchTrainer:
         self.device = env.device
         self.n, self.nc, self.h = args.num_envs, args.collect_envs or args.num_envs, args.horizon
         self.m = self.n*self.h
+        self.value_bound = nets.discounted_return_bound(env.max_reward,args.gamma,args.max_episode_steps) if args.v_bound else None
         self.actor_params = nets.actor_trainable(actor)
         self.actor_opt, self.critic_opt = nets.adam_init(self.actor_params), nets.adam_init(critic)
         self.ema, self.ema_count = nets.init_policy_ema(actor)
@@ -206,16 +208,19 @@ class TorchTrainer:
 
         def encode(actor_, frames, reset_frames):
             offsets = torch.arange(self.h, device=self.device)[:, None]
+            if args.task_inputs == 'instinct_perceptive_native':
+                zeros = torch.zeros((self.h, self.n, 1), device=env.device)
+                return zeros, zeros
             def sequence(frame):
                 f = torch.minimum(frame[None]+offsets, env.ref_last[frame][None])
                 return nets.actor_encode(actor_, env.goal_ref(f.reshape(-1))).reshape(self.h, self.n, -1)
             return sequence(frames), sequence(reset_frames)
 
         body = make_control_body(env, args.gamma, args.max_episode_steps, args.act_cot_clip,
-                                 tuple(args.term_penalty), enc_hoist=True)
+                                 tuple(args.term_penalty), enc_hoist=args.task_inputs == 'heightscan_pilot', v_bound=self.value_bound, bootstrap_gradient=args.bootstrap_gradient)
         self.body = compile_fullgraph(body) if args.execution != 'eager' else body
         self.encode = compile_fullgraph(encode) if args.execution != 'eager' else encode
-        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode)
+        self.window = make_window(env, actor, critic, self.cnorm, self.h, args.gamma, self.body, self.encode, self.value_bound, args.bootstrap_gradient)
         self.target_fn = lambda a, g: nets.action_targets(
             a, g, env.action_scale, args.action_target[2], args.act_cot_clip,
             outer_step=self.outer_step, decay_steps=args.lr_decay_steps,
@@ -266,7 +271,7 @@ class TorchTrainer:
                 fn(*inputs)
         self.reset_setup_state()
         torch.cuda.synchronize()
-        self.setup_record = dict(seconds=time.monotonic()-setup_started, execution=args.execution,
+        self.setup_record = dict(bootstrap_bound=self.value_bound, seconds=time.monotonic()-setup_started, execution=args.execution,
                                  compilation_scope='per-control differentiable body, encoder, targets, TD, optimizers, collector transition, statistics; collector commits are separate captured kernels',
                                  graph_scope=f'complete {self.h}-step forward/backward and separate reusable update/collector/statistics graphs',
                                  graphs={name: graph.record for name, graph in self.graphs.items()},
@@ -343,11 +348,14 @@ class TorchTrainer:
         def collector_transition(collector, reset, action_noise, proprio_noise, goal_noise):
             with torch.no_grad():
                 history, goal = env.policy_obs(collector, goal_noise)
+                if args.task_inputs == 'instinct_perceptive_native':
+                    from .perceptive_task_inputs import update_source_normalizer
+                    update_source_normalizer(self.actor, history, goal)
                 action = nets.actor_apply(self.actor, history, goal)+action_noise
                 stepped = env.step(collector, action, proprio_noise)
                 term = env.terminated(stepped)
                 done = term | env.clip_ended(stepped) | (stepped['ep'] >= args.max_episode_steps)
-                return state_where(done, reset, stepped), term.to(torch.float32).mean()
+                return state_where(done, env.reset_for_mask(reset, done), stepped), term.to(torch.float32).mean()
 
         self.collector_transition = (compile_fullgraph(collector_transition)
                                      if args.execution != 'eager' else collector_transition)
@@ -426,11 +434,75 @@ class TorchTrainer:
             clip_stats=result[2].detach().cpu().tolist(), target_stats=self.target_data['at_clip'].cpu().tolist(),
             memory=dict(allocated=torch.cuda.memory_allocated(),reserved=torch.cuda.memory_reserved(),
                         peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved()))
+        def numerical_range(value):
+            value = value.detach()
+            def json_number(number):
+                number = float(number)
+                return number if math.isfinite(number) else str(number)
+            return dict(minimum=json_number(value.amin()), maximum=json_number(value.amax()),
+                        absolute_max=json_number(value.abs().amax()),
+                        nonfinite=int((~torch.isfinite(value)).sum()))
+        metrics['numerical_ranges'] = dict(
+            reward_terms={name: numerical_range(value) for name, value in self.training_data['terms'].items()},
+            critic_observation=numerical_range(self.training_data['cobs_pre']),
+            policy_history=numerical_range(self.training_data['hist']),
+            policy_action=numerical_range(self.training_data['a_pi']),
+            action_target=numerical_range(self.target_data['targets']),
+            action_cotangent=numerical_range(result[1]),
+            target_setpoint_change=numerical_range(
+                (self.target_data['targets']-self.training_data['a_pi'])*self.env.action_scale),
+            critic_target=numerical_range(self.critic_targets),
+            bootstrap_raw=numerical_range(self.training_data['v2_raw']),
+            bootstrap_used=numerical_range(self.training_data['v2']),
+            window_bootstrap_raw=numerical_range(self.training_data['window_value_raw']),
+            window_bootstrap_used=numerical_range(self.training_data['window_value_used']),
+            cnorm_mean=numerical_range(self.cnorm[0]),
+            cnorm_std=numerical_range(torch.sqrt(self.cnorm[1]+1.e-5)),
+            collector_qpos=numerical_range(self.collector['qpos']),
+            collector_qvel=numerical_range(self.collector['qvel']))
         if self.completed_updates != metrics['ema_updates'] or metrics['actor_optimizer_steps'] != self.completed_updates*int(self.args.action_target[0]) or metrics['critic_optimizer_steps'] != self.completed_updates*self.args.critic_epochs*self.args.critic_minibatches:
             raise RuntimeError('Training/EMA/optimizer counters disagree')
         if invalid or not all(math.isfinite(metrics[key]) for key in ('actor_loss','regression_loss','critic_loss','reward_mean')):
             raise RuntimeError('Invalid training condition: '+json.dumps(dict(invalid=invalid,metrics=metrics)))
         return metrics
+
+    def restore(self, path):
+        """Restore current-format full state into its allocated storage owners."""
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        if state['format'] != 'nablamimic_torch_training_v1':
+            raise ValueError('Current Torch full training state required')
+        if state['perception'] != self.env.perception_contract:
+            raise ValueError('Resume physical perception contract differs')
+        if state['observation'] != self.env.observation_contract:
+            raise ValueError('Resume policy observation contract differs')
+        controls = {'out', 'config', 'resume', 'iters', 'hours', 'save_wall_minutes',
+                    'ckpt_every', 'full_state_at_end', 'initial_checkpoint',
+                    'actor_checkpoint', 'actor_weights', 'official_actor_checkpoint'}
+        current, saved = vars(self.args), state['resolved_config']
+        for key in set(current) | set(saved):
+            if key not in controls and current.get(key) != saved.get(key):
+                raise ValueError(f'Resume training input differs for {key}')
+        owners = dict(actor=self.actor, critic=self.critic, ema=self.ema, ema_count=self.ema_count,
+            actor_optimizer=self.actor_opt, critic_optimizer=self.critic_opt, cnorm=self.cnorm,
+            bin_q=self.sampler.bin_q, probabilities=self.sampler.probs, collector=self.collector,
+            replay=self.replay, replay_ptr=self.replay_ptr, outer_step=self.outer_step)
+        with torch.no_grad():
+            for key, owner in owners.items():
+                def restore_tensor(destination, source):
+                    if destination.shape != source.shape or destination.dtype != source.dtype:
+                        raise ValueError(f'Resume tensor shape or dtype differs in {key}')
+                    destination.copy_(source)
+                nets.tree_map(restore_tensor, owner, state[key])
+        self.completed_updates = int(state['completed_updates'])
+        self.total_collector_steps = int(state['total_collector_steps'])
+        self.col_accumulator = float(state['col_accumulator'])
+        if int(self.outer_step) != self.completed_updates or int(self.ema_count) != self.completed_updates:
+            raise ValueError('Resume update and EMA counters differ')
+        torch.set_rng_state(state['cpu_rng'].cpu())
+        torch.cuda.set_rng_state(state['cuda_rng'].cpu())
+        np.random.set_state(state['numpy_rng'])
+        random.setstate(state['python_rng'])
+        return float(state['wall_s'])
 
     def save(self, output, elapsed, *, full=False):
         iteration = self.completed_updates
@@ -438,7 +510,8 @@ class TorchTrainer:
             cnorm=as_numpy(self.cnorm), bin_q=as_numpy(self.sampler.bin_q), iter=iteration,
             completed_updates=iteration, ema_updates=int(self.ema_count), evaluation_policy='ema',
             wall_s=elapsed, env_steps=iteration*self.n*self.h,
-            training_framework='torch', execution=self.args.execution)
+            training_framework='torch', execution=self.args.execution, perception=self.env.perception_contract,
+            observation=self.env.observation_contract)
         destination = output/'ckpt'/f'it_{iteration:06d}.pkl'
         if not destination.exists():
             temporary = destination.with_suffix('.tmp')
@@ -446,6 +519,7 @@ class TorchTrainer:
             temporary.replace(destination)
         if full:
             state = dict(format='nablamimic_torch_training_v1', completed_updates=iteration, wall_s=elapsed,
+                perception=self.env.perception_contract, observation=self.env.observation_contract,
                 actor=self.actor, critic=self.critic, ema=self.ema, ema_count=self.ema_count,
                 actor_optimizer=self.actor_opt, critic_optimizer=self.critic_opt, cnorm=self.cnorm,
                 bin_q=self.sampler.bin_q, probabilities=self.sampler.probs, collector=self.collector,
@@ -460,7 +534,7 @@ class TorchTrainer:
 
 
 def build_parser():
-    from .train import build_parser as donor_parser
+    from .training_options import build_parser as donor_parser
     parser = donor_parser()
     parser.prog = 'python -m nablamimic.torch_train'
     parser.description = __doc__
@@ -469,20 +543,51 @@ def build_parser():
     parser.add_argument('--initial-checkpoint',type=Path,help='Current-format initial weights for a matched comparison; update count must be zero')
     parser.add_argument('--save-wall-minutes',type=float,nargs='+',default=[8,20,60,90,180])
     parser.add_argument('--full-state-at-end',action=argparse.BooleanOptionalAction,default=True)
+    parser.add_argument("--terrain-model", type=Path, help="Prepared physical terrain MJCF or MJB model")
+    parser.add_argument("--terrain-model-contract", type=Path)
+    parser.add_argument("--terrain-sensor", type=Path)
+    parser.add_argument("--terrain-sensor-ablation", choices=("measured", "constant"), default="measured")
+    parser.add_argument("--source-reset-profile", choices=("nominal", "source_pose"), default="nominal")
+    parser.add_argument("--source-motion-start-height-offset", type=float, default=0.)
+    parser.add_argument("--source-ensure-link-below-zero-ground", action="store_true")
+    parser.add_argument("--source-depth-noise", action="store_true")
+    parser.add_argument("--source-depth-gradient", action="store_true")
+    parser.add_argument("--task-inputs", choices=("heightscan_pilot", "instinct_perceptive_native"), default="heightscan_pilot")
+    parser.add_argument("--root-position-weight", type=float, default=.5)
+    parser.add_argument("--actor-checkpoint", type=Path)
+    parser.add_argument("--official-actor-checkpoint", type=Path)
+    parser.add_argument("--bootstrap-gradient", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--actor-weights", choices=("ema", "live"))
+    parser.add_argument("--actor-anchor-position", action="store_true")
+    parser.add_argument("--action-limit", type=float, default=None)
+    parser.add_argument("--future-stride", type=int, default=1)
+    parser.add_argument("--reference-root-displacement", action="store_true")
     return parser
 
 
 def validate_args(args):
+    if not math.isfinite(args.source_motion_start_height_offset):
+        raise ValueError("Source reset height offset must be finite")
+    if args.source_depth_gradient and args.task_inputs != 'instinct_perceptive_native':
+        raise ValueError('Source depth gradient requires the source camera task')
+    if args.task_inputs == "instinct_perceptive_native" and not args.motion_lib:
+        raise ValueError("Source perceptive task requires its scene-bound sharded library")
+    if sum(bool(value) for value in (args.actor_checkpoint, args.official_actor_checkpoint, args.initial_checkpoint, args.resume)) > 1:
+        raise ValueError("Actor initialization, matched initialization and full resume are mutually exclusive")
+    if args.official_actor_checkpoint and (args.task_inputs != 'instinct_perceptive_native' or args.residual_action):
+        raise ValueError("Official actor initialization requires the source task with absolute actions")
+    if bool(args.actor_checkpoint) != bool(args.actor_weights):
+        raise ValueError("Actor checkpoint and its explicit EMA/live selection are required together")
+    if args.future_stride < 1:
+        raise ValueError("Future reference stride must be positive")
     if args.physics!='engine' or not args.policy_ema or args.mask_after_done or not args.no_remat:
         raise ValueError('Torch path currently implements the unmasked, no-rematerialization EMA Engine recipe')
-    if args.motion_lib or args.shac_strict or args.actor_obs_norm or args.v_bound or args.clip_end_boot!='next':
+    if args.shac_strict or args.actor_obs_norm or args.clip_end_boot!='next':
         raise ValueError('Unsupported recipe variant')
-    if not args.anchor_to_decoder or args.enc_hoist!='on' or not args.critic_pre_state:
+    if (args.task_inputs == 'heightscan_pilot' and (not args.anchor_to_decoder or args.enc_hoist!='on')) or not args.critic_pre_state:
         raise ValueError('Current-paper anchor/encoder-hoist/pre-state-critic settings required')
     if not args.action_target or args.action_target[:2]!=[8.,1.] or args.replay_steps<=0 or args.reset_sampling!='supermimic':
         raise ValueError('Eight regression steps, one target window and replay with SuperMimic resets required')
-    if args.resume:
-        raise ValueError('Torch resumed execution is not validated yet; full terminal state is saved but fresh runs are required')
     if args.num_envs<1 or args.horizon<1 or args.regression_batch<1 or args.num_envs*args.horizon%args.critic_minibatches:
         raise ValueError('Invalid fixed batch dimensions')
     if not 0 < args.utd <= 1:
@@ -491,11 +596,149 @@ def validate_args(args):
         raise ValueError('Three termination-penalty parameters required')
 
 
+def build_environment(args, *, evaluation_backend="engine", ray_backend="native", device="cuda"):
+    """Construct the one physical scene and its checked input bindings."""
+    from .env import BM_BODIES, EnvConfig
+    from .motion import all_clip_names, load_library
+    config = {}
+    if args.motion_lib:
+        from .motion_lib import ShardedLibrary
+        source = ShardedLibrary(args.motion_lib, filtered=False)
+        if args.clips != ['all']:
+            source.clips = {name: source.clips[name] for name in args.clips}
+        shards = sorted({clip['shard'] for clip in source.clips.values()})
+        library = source.working_set(shards, sum(clip['length'] for clip in source.clips.values()))
+    else:
+        names=all_clip_names() if args.clips==['all'] else args.clips
+        if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
+        library=load_library(names,bodies=BM_BODIES)
+    declared_bodies = tuple(library.bodies)
+    if len(declared_bodies) != len(BM_BODIES) or set(declared_bodies) != set(BM_BODIES):
+        raise ValueError('Reference tracked-body names do not bind the physical tracking task')
+    body_indices = [declared_bodies.index(name) for name in BM_BODIES]
+    from dataclasses import replace
+    library = replace(library, bodies=BM_BODIES, **{
+        name: getattr(library, name)[:, body_indices]
+        for name in ('body_pos', 'body_quat', 'body_lin_vel', 'body_ang_vel')})
+    config['reference_body_binding'] = dict(declared_order=list(declared_bodies),
+        canonical_order=list(BM_BODIES), source_indices=body_indices)
+    model = None
+    source_task = args.task_inputs == 'instinct_perceptive_native'
+    if args.terrain_sensor or source_task:
+        if args.terrain_model is None:
+            raise ValueError("Terrain sensor requires the matching physical terrain model")
+        import mujoco
+        if args.terrain_model_contract is None:
+            raise ValueError("Prepared terrain model requires its physical contract")
+        model_contract = json.loads(args.terrain_model_contract.read_text())
+        if source_task and source.index['scene_artifact_id'] != model_contract['artifact_id']:
+            raise ValueError('Source reference library is bound to a different physical scene')
+        model = (mujoco.MjModel.from_binary_path(str(args.terrain_model))
+                 if args.terrain_model.suffix == '.mjb' else
+                 mujoco.MjModel.from_xml_path(str(args.terrain_model)))
+        expected_root = 'torso_link' if args.task_inputs == 'instinct_perceptive_native' else 'pelvis'
+        if model.jnt_type[0] != mujoco.mjtJoint.mjJNT_FREE or model.body(model.jnt_bodyid[0]).name != expected_root:
+            raise ValueError(f'Terrain task requires a free {expected_root} root')
+        if model_contract['free_root_body'] != expected_root:
+            raise ValueError('Scene root contract differs from the constructed free joint')
+        actual_order = [model.joint(model.actuator_trnid[i, 0]).name for i in range(model.nu)]
+        if actual_order != model_contract['actuator_joint_names']:
+            raise ValueError("Constructed actuator binding differs from physical contract")
+        if list(BM_BODIES) != model_contract['tracked_body_names']:
+            raise ValueError("Constructed tracking body order differs from physical contract")
+        if not source_task and model_contract['terrain_artifact_id'] != json.loads((args.terrain_sensor/'contract.json').read_text())['artifact_id']:
+            raise ValueError("Sensor and physical terrain artifact bindings differ")
+        config['physical_model'] = model_contract
+    environment_type = TorchTrackingEnv
+    if args.task_inputs == 'instinct_perceptive_native':
+        from .source_perceptive_env import SourcePerceptiveEnv
+        environment_type = SourcePerceptiveEnv
+    adapter=None
+    camera_geometry=None
+    if evaluation_backend=='mujoco':
+        if not source_task:
+            raise ValueError('MuJoCo evaluation requires the prepared source task')
+        from .mujoco_source_adapter import MuJoCoSourceAdapter, MuJoCoSourceEnv
+        environment_type=MuJoCoSourceEnv
+        adapter=MuJoCoSourceAdapter(model,iterations=args.solver_iterations)
+        if ray_backend=='mujoco':
+            from .mujoco_source_camera import MuJoCoRayCamera
+            camera_geometry=MuJoCoRayCamera(adapter)
+    elif evaluation_backend!='engine' or ray_backend!='native':
+        raise ValueError('Unsupported evaluation physics and camera combination')
+    env=environment_type(library,EnvConfig(solver_iterations=args.solver_iterations,
+        dr=args.task_inputs == 'heightscan_pilot',
+        reset_noise=args.task_inputs == 'heightscan_pilot' or args.source_reset_profile == 'source_pose',
+        source_reset_profile=args.source_reset_profile,
+        source_motion_start_height_offset=args.source_motion_start_height_offset,
+        source_ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
+        residual_action=args.residual_action,action_rate_space=args.action_rate_space,
+        future_stride=args.future_stride, reference_root_displacement=args.reference_root_displacement,
+        action_limit=args.action_limit, actor_anchor_position=args.actor_anchor_position,
+        root_position_weight=args.root_position_weight, source_depth_noise=args.source_depth_noise,
+        source_depth_gradient=args.source_depth_gradient), model=model,
+        source_parameters=model_contract['source_action'] if args.task_inputs == 'instinct_perceptive_native' else None,
+        device=device,step_fn=adapter.step if adapter is not None else None,
+        kinematics_fn=adapter.kinematics if adapter is not None else None)
+    if source_task:
+        if args.terrain_sensor is not None:
+            raise ValueError('Source camera is constructed from the physical model and takes no heightscan input')
+        env.bind_source_camera(camera_geometry)
+        if ray_backend=='mujoco':
+            env.camera_state_sync=lambda state: adapter.synchronized_data(state['qpos'],state['qvel'],state['warm'])
+        env.perception_contract = dict(sensor='source_depth_camera', image_shape=[1,18,32],
+            physical_scene_artifact_id=model_contract['artifact_id'],
+            terrain_artifact_id=model_contract['terrain_artifact_id'],
+            physical_frame=model_contract['frame'],
+            geometry_groups=[0,2], root_body='torso_link',
+            miss_optical_depth_m=1.e6, miss_conversion='negative geometry ID sets fixed far optical depth before noise')
+    elif args.terrain_sensor:
+        env.bind_terrain_sensor(args.terrain_sensor, args.terrain_sensor_ablation)
+        env.perception_contract['physical_scene_artifact_id'] = model_contract['artifact_id']
+        env.perception_contract['physical_frame'] = model_contract['frame']
+    config['perception'] = env.perception_contract
+    config['observation'] = env.observation_contract
+    config['depth_gradient_definition'] = ('Fixed selected triangle-plane pose derivative with unchanged raycast values'
+        if args.source_depth_gradient else 'Camera image input stops gradient; CNN parameters remain trainable')
+    if source_task:
+        config['action'] = env.action_contract
+        config['termination_penalty'] = dict(height_error='maximum absolute world Z error over torso and four ankles/wrists',
+            gravity_error='norm of full torso projected gravity difference from reference',
+            height_limit_m=env.termination_height_limit,gravity_limit=env.termination_gravity_limit,
+            weight=args.term_penalty[0],height_start_m=args.term_penalty[1],gravity_start=args.term_penalty[2],
+            definition='Negative weight times control dt times the sum of squared positive error excesses normalized by limit minus start')
+        config['reset'] = dict(profile=args.source_reset_profile,
+            motion_start_height_offset_m=args.source_motion_start_height_offset,
+            ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
+            ground_adjustment='If any actual simultaneous reset frame has a tracked link below zero, subtract each actual reset frame minimum tracked-link z from its root z',
+            ground_adjustment_batch='Actual reset mask across all motion clips in the single source motion buffer', definition='reference plus declared XY and joint noise, no joint soft-limit clipping', quaternion='reference orientation normalized by native kinematics', velocity='reference velocity unchanged')
+    config['reward'] = dict(root_position_weight=env.cfg.root_position_weight, maximum_per_control=env.max_reward)
+    if args.terrain_sensor or source_task:
+        expected = np.asarray(model_contract['foot_pairs'], dtype=np.int32)
+        foot_bodies = {env.m.body(name).id for name in ('left_ankle_roll_link','right_ankle_roll_link')}
+        actual = []
+        for index in range(env.m.npair):
+            bodies = [int(env.m.geom_bodyid[int(env.m.pair_geom1[index])]),
+                      int(env.m.geom_bodyid[int(env.m.pair_geom2[index])])]
+            if 0 in bodies and any(body in foot_bodies for body in bodies):
+                actual.append(index)
+        if sorted(expected.tolist()) != actual or len(actual) == 0:
+            raise ValueError('Prepared foot-pair contract differs from compiled foot/static terrain pairs')
+        env.foot_pairs = expected
+    if adapter is None:
+        from nablaengine import torch_ffi
+        config['engine']=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
+    else:
+        env.mujoco_adapter=adapter
+        config['evaluation_physics']=adapter.metadata()
+    return env, config
+
+
 def main(argv=None):
     from .env import BM_BODIES, EnvConfig
     from .motion import all_clip_names,load_library
     from .params import resolve_params,git_state
-    from .train import FIXED
+    from .training_options import FIXED
     from nablaengine import torch_ffi
     resolved, info = resolve_params(sys.argv[1:] if argv is None else argv)
     args=build_parser().parse_args(resolved);validate_args(args)
@@ -509,7 +752,7 @@ def main(argv=None):
     torch.manual_seed(args.seed);np.random.seed(args.seed);random.seed(args.seed)
     code=os.environ.get('NABLA_SOURCE_REVISION') or git_state()[0]
     if not code:raise ValueError('Declared committed source revision required')
-    config={**vars(args),**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
+    config={**{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},**FIXED,'training_framework':'torch','git_commit':code,'devices':1,'processes':1,
             'gpu':torch.cuda.get_device_name(0),'torch_version':torch.__version__,'torch_cuda':torch.version.cuda,
             'random_stream':'Torch default CPU/CUDA generators; same seed label does not imply the JAX random stream',
             'clock':'setup/compilation/capture excluded; per-update RNG, diagnostics, logging and weight saves included; terminal full-state serialization reported separately'}
@@ -517,24 +760,69 @@ def main(argv=None):
     config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
     config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
     write_json(output/'config.json',config)
-    names=all_clip_names() if args.clips==['all'] else args.clips
-    if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
-    library=load_library(names,bodies=BM_BODIES)
-    env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
-        residual_action=args.residual_action,action_rate_space=args.action_rate_space))
-    engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
-    config['engine']=engine;write_json(output/'config.json',config)
-    if args.initial_checkpoint:
+    env, bindings = build_environment(args)
+    config.update(bindings)
+    write_json(output/'config.json', config)
+    if args.initial_checkpoint and not args.resume:
         with args.initial_checkpoint.open('rb') as handle:initial=pickle.load(handle)
         if initial['completed_updates']!=0 or initial['ema_updates']!=0:raise ValueError('Matched initial checkpoint must contain zero completed updates')
+        if initial['perception'] != env.perception_contract:
+            raise ValueError('Initial checkpoint perception layout differs from constructed environment')
+        if initial['observation'] != env.observation_contract:
+            raise ValueError('Initial checkpoint observation layout differs from constructed environment')
         actor=nets.tree_from_jax(initial['actor'],env.device)
         critic=nets.tree_from_jax(initial['critic'],env.device)
     else:
         import jax
         from . import nets as jax_nets
         key,ka,kc=jax.random.split(jax.random.PRNGKey(args.seed),3)
-        actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
+        if args.task_inputs == 'instinct_perceptive_native':
+            from .perceptive_task_inputs import source_actor_init
+            actor = source_actor_init(env.device)
+        else:
+            actor=nets.tree_from_jax(jax_nets.actor_init(ka,env,anchor_to_decoder=6),env.device)
         critic=nets.tree_from_jax(jax_nets.mlp_init(kc,[env.critic_dim,*jax_nets.CRITIC_HIDDEN,1]),env.device)
+    if args.actor_checkpoint:
+        with args.actor_checkpoint.open('rb') as handle:
+            source_actor = pickle.load(handle)
+        if source_actor['observation'] != env.observation_contract or source_actor['perception'] != env.perception_contract:
+            raise ValueError('Actor initialization observation or physical sensor binding differs')
+        source_key = 'actor_ema' if args.actor_weights == 'ema' else 'actor'
+        selected_actor = nets.tree_from_jax(source_actor[source_key], env.device)
+        if len(nets.tree_leaves(actor)) != len(nets.tree_leaves(selected_actor)):
+            raise ValueError('Selected actor parameter tree differs')
+        for current, selected in zip(nets.tree_leaves(actor), nets.tree_leaves(selected_actor)):
+            if current.shape != selected.shape or current.dtype != selected.dtype:
+                raise ValueError('Selected actor parameter layout differs')
+        nets.copy_tree_(actor, selected_actor)
+        config['actor_initialization'] = dict(checkpoint_path=str(args.actor_checkpoint),
+            completed_updates=source_actor['completed_updates'], weights=args.actor_weights,
+            remaining_state='fresh critic, optimizer, critic normalizer, replay, collector and EMA counters')
+        write_json(output/'config.json', config)
+    if args.official_actor_checkpoint:
+        from .official_source_policy import native_actor_from_official
+        official = torch.load(args.official_actor_checkpoint, map_location=env.device, weights_only=True)
+        selected_actor = native_actor_from_official(official, env.device)
+        nets.copy_tree_(actor, selected_actor)
+        normalization = official['policy_normalizer_state_dict']
+        from .official_source_policy import OfficialSourcePolicy
+        with torch.no_grad():
+            nominal_frames=torch.as_tensor(env.starts,device=env.device,dtype=torch.int32)
+            zero_noise={name:torch.zeros_like(value) for name,value in env.sample_reset_noise(len(nominal_frames)).items()}
+            nominal_state=env.reset(nominal_frames,zero_noise)
+            nominal_history,nominal_goal=env.policy_obs(nominal_state,torch.zeros(len(nominal_frames),670,device=env.device))
+            frozen=OfficialSourcePolicy(official).to(env.device)
+            nominal_difference=float((frozen(nominal_history,nominal_goal)-nets.actor_apply(actor,nominal_history,nominal_goal)).abs().max())
+        config['actor_initialization'] = dict(
+            checkpoint_path=str(args.official_actor_checkpoint), iteration=int(official['iter']),
+            weights='official deterministic actor mean',
+            nominal_start_output_absolute_max_difference=nominal_difference,
+            comparison_inputs='Each clip start, zero reset and goal noise, configured camera noise sampled once and shared by both actors',
+            normalization='Native mean/variance/count initialized from official buffers; native uses sqrt(variance)+.01',
+            stored_std_vs_sqrt_variance_absolute_max=float(
+                (normalization['_std']-normalization['_var'].sqrt()).abs().max()),
+            remaining_state='fresh critic, critic normalizer, optimizer, replay, collector, seeded RNG and EMA counters')
+        write_json(output/'config.json', config)
     started=time.monotonic()
     try:
         trainer=TorchTrainer(env,actor,critic,args)
@@ -544,17 +832,23 @@ def main(argv=None):
         raise
     write_json(output/'execution.json',trainer.setup_record)
     torch_ffi.read_diagnostics(reset=True)
-    training_started=time.monotonic();trainer.save(output,0.)
+    restored_wall = trainer.restore(args.resume) if args.resume else 0.0
+    if trainer.completed_updates > args.iters:
+        raise ValueError('Requested final update precedes restored state')
+    training_started=time.monotonic()-restored_wall
+    trainer.save(output,restored_wall)
     stop_requested=False
     def stop(_signal,_frame):
         nonlocal stop_requested
         stop_requested=True
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     deadlines=sorted(set(60*x for x in args.save_wall_minutes));next_deadline=0
+    while next_deadline < len(deadlines) and deadlines[next_deadline] <= restored_wall:
+        next_deadline += 1
     status='failed'
     try:
         with (output/'log.jsonl').open('x') as log:
-            for _ in range(args.iters):
+            for _ in range(trainer.completed_updates, args.iters):
                 metrics=trainer.update();elapsed=time.monotonic()-training_started
                 metrics['wall_s']=elapsed
                 log.write(json.dumps(metrics,allow_nan=False)+'\n');log.flush()

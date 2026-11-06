@@ -1,0 +1,7 @@
+# Single validated jumpsit reference on its physical CoACD terrain.
+# Inputs, physical model, sensor and output roots are explicit launch arguments.
+@action_target.args
+--clips motion_07 --policy-ema --lr-warmup-steps 100
+--physics engine --residual-action --max-episode-steps 600
+--execution eager --regression-batch 512 --critic-minibatches 4
+--replay-steps 64 --collect-envs 32

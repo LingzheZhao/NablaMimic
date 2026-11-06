@@ -1,0 +1,2 @@
+@base/terrain_heightscan.args
+--num-envs 32 --horizon 8 --iters 1

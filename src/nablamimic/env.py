@@ -70,6 +70,16 @@ class EnvConfig:
     reset_noise: bool = True
     term_height: float = 0.25
     term_tilt: float = 0.8
+    action_limit: float | None = None
+    future_stride: int = 1
+    reference_root_displacement: bool = False
+    actor_anchor_position: bool = False
+    root_position_weight: float = 0.5
+    source_depth_noise: bool = False
+    source_depth_gradient: bool = False
+    source_reset_profile: str = "nominal"
+    source_motion_start_height_offset: float = 0.0
+    source_ensure_link_below_zero_ground: bool = False
     residual_action: bool = False  # joint setpoints around the next reference frame's joint angles instead of q0
     action_rate_space: str = "setpoint"  # the reward's action-rate term on the commanded setpoints ("setpoint") or
                                          # on the raw policy outputs ("raw"); the same for absolute actions
@@ -120,8 +130,8 @@ def _np_rotate_inv(q, v):
     return np.einsum("...ji,...j->...i", r, v)
 
 
-def build_model(cfg: EnvConfig):
-    m = robot.build(SCENE)
+def build_model(cfg: EnvConfig, model=None):
+    m = robot.build(SCENE) if model is None else model
     m.opt.iterations = cfg.solver_iterations
     m.opt.timestep = TIMESTEP
     kp = np.empty(m.nu)

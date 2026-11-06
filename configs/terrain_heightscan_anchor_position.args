@@ -1,0 +1,2 @@
+@terrain_heightscan_action_domain.args
+--actor-anchor-position --horizon 32 --execution compile-graph

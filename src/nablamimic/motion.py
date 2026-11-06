@@ -136,7 +136,7 @@ def process_clip(m, raw, fps_out=50.0, fps_in=30.0, bodies=TRACKED_BODIES):
         body_pos[i] = d.xpos[body_ids]
         body_quat[i] = d.xquat[body_ids]
         for k, b in enumerate(body_ids):
-            mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_BODY, b, res, 0)
+            mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_XBODY, b, res, 0)
             body_vel[i, k] = res  # [angular, linear], world frame, at the body origin
     return qpos, qvel, body_pos, body_quat, body_vel[..., 3:], body_vel[..., :3]
 
@@ -144,7 +144,7 @@ def process_clip(m, raw, fps_out=50.0, fps_in=30.0, bodies=TRACKED_BODIES):
 def load_library(names, fps_out=50.0, model=None, bodies=TRACKED_BODIES):
     """Load and concatenate clips; per-clip results are cached under CACHE_DIR."""
     m = model or mujoco.MjModel.from_xml_path(str(SCENE))
-    tag = f"{fps_out:g}hz_" + hashlib.md5(",".join(bodies).encode()).hexdigest()[:8]
+    tag = f"{fps_out:g}hz_body_origin_" + hashlib.md5(",".join(bodies).encode()).hexdigest()[:8]
     parts, starts, last, offset = [], [], [], 0
     for name in names:
         cache = CACHE_DIR / f"{name}_{tag}.npz" if model is None else None

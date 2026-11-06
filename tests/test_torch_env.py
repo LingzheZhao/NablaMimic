@@ -14,8 +14,9 @@ from nablamimic.torch_env import (COMPACT_KEYS, STATE_KEYS, TorchTrackingEnv, ab
                                  quat_angle_sq, quat_mul, quat_rotate, quat_to_matrix, select_reset)
 
 
-def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
-    frames, bodies = 12, 14
+def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False,
+            future_stride=1, reference_root_displacement=False, action_limit=None, actor_anchor_position=False, root_position_weight=.5, frames=12):
+    bodies = 14
     qpos = np.zeros((frames, 36), np.float32)
     qpos[:, 2], qpos[:, 3] = 1, 1
     qvel = np.zeros((frames, 35), np.float32)
@@ -24,15 +25,16 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
     positions = qpos[:, None, :3] + offsets.numpy()[None]
     quaternions = np.zeros((frames, bodies, 4), np.float32)
     quaternions[..., 0] = 1
-    cfg = SimpleNamespace(residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
-                          dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8)
+    cfg = SimpleNamespace(source_depth_gradient=False, root_position_weight=root_position_weight, actor_anchor_position=actor_anchor_position, action_limit=action_limit, residual_action=residual, action_rate_space="setpoint", solver_iterations=10,
+                          dr=dr, obs_noise=obs_noise, reset_noise=reset_noise, term_height=0.25, term_tilt=0.8,
+                          future_stride=future_stride, reference_root_displacement=reference_root_displacement)
     reference = SimpleNamespace(m=SimpleNamespace(nq=36, nv=35, nu=29), cfg=cfg, nu=29,
         q0=np.zeros(29), action_scale=np.full(29, 0.5), ctrl_lo=np.full(29, -2), ctrl_hi=np.full(29, 2),
         soft_lo=np.full(29, -1), soft_hi=np.full(29, 1), body_ids=np.arange(bodies), anchor_k=1,
-        torso_id=1, root_com_id=0, foot_pairs=np.array([0, 1]), starts=np.array([0, 6]), lengths=np.array([6, 6]),
+        torso_id=1, root_com_id=0, foot_pairs=np.array([0, 1]), starts=np.array([0, 6]), lengths=np.array([6, frames-6]),
         ref_qpos=qpos, ref_qvel=qvel, ref_body_pos=positions, ref_body_quat=quaternions,
         ref_body_lin=np.zeros((frames, bodies, 3)), ref_body_ang=np.zeros((frames, bodies, 3)),
-        ref_last=np.repeat([5, 11], 6), goal_feat=np.arange(frames*68, dtype=np.float32).reshape(frames, 68))
+        ref_last=np.repeat([5, frames-1], [6, frames-6]), goal_feat=np.arange(frames*68, dtype=np.float32).reshape(frames, 68))
 
     def kinematics(q, v, com):
         normalized = q[:, 3:7]/torch.linalg.vector_norm(q[:, 3:7], dim=-1, keepdim=True)
@@ -55,6 +57,167 @@ def fixture(*, residual=False, dr=False, obs_noise=False, reset_noise=False):
 
 
 class TorchEnvironmentTest(unittest.TestCase):
+    def test_source_zero_noise_reset_preserves_reference_and_does_not_clip_joint_noise(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture(reset_noise=True)
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=0.
+        env.cfg.source_ensure_link_below_zero_ground=False
+        env.reset_position_limits=torch.tensor([.15,.15,0.])
+        env.ref_qpos[0,:3]=torch.tensor([3.,4.,.8])
+        env.ref_qpos[0,7:]=2.
+        env.ref_qvel[0]=torch.arange(35).float()*.01
+        frame=torch.tensor([0])
+        noise={name:torch.zeros_like(value) for name,value in env.sample_reset_noise(1).items()}
+        state=env.reset(frame,noise)
+        torch.testing.assert_close(state['qpos'],env.ref_qpos[frame],rtol=0,atol=0)
+        torch.testing.assert_close(state['qvel'],env.ref_qvel[frame],rtol=0,atol=0)
+        torch.testing.assert_close(state['prev_a'],torch.zeros(1,29))
+        self.assertEqual(state['hist'].shape,(1,8,93))
+        for direction in (-1.,1.):
+            noise['joints'].fill_(direction)
+            state=env.reset(frame,noise)
+            torch.testing.assert_close(state['qpos'][:,7:],env.ref_qpos[frame,7:]+.1*direction)
+            torch.testing.assert_close(state['qvel'],env.ref_qvel[frame],rtol=0,atol=0)
+
+    def test_source_reset_lift_preserves_upstream_batch_branch(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture()
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=.1
+        env.cfg.source_ensure_link_below_zero_ground=True
+        env.ref_body_pos[0,:,2]=.04
+        env.ref_body_pos[1,:,2]=-.2
+        # A positive-only batch receives just the fixed lift.
+        state=env.reset(torch.tensor([0]))
+        torch.testing.assert_close(state['qpos'][:,2],env.ref_qpos[[0],2]+.1)
+        # One negative frame triggers subtraction for every selected row.
+        frames=torch.tensor([0,1])
+        state=env.reset(frames)
+        torch.testing.assert_close(state['qpos'][:,2],env.ref_qpos[frames,2]+torch.tensor([.06,.3]))
+        torch.testing.assert_close(state['qvel'],env.ref_qvel[frames])
+        torch.testing.assert_close(state['qpos'][:,3:],env.ref_qpos[frames,3:])
+
+    def test_source_ground_reset_uses_only_active_rows_without_repeating_fk(self):
+        from nablamimic.source_perceptive_env import SourcePerceptiveEnv
+        template,_=fixture()
+        env=SourcePerceptiveEnv.__new__(SourcePerceptiveEnv)
+        env.__dict__.update(template.__dict__)
+        env.m.nbody=14
+        env.cfg.source_motion_start_height_offset=.1
+        env.cfg.source_ensure_link_below_zero_ground=True
+        # These frames represent different clips in the same source buffer.
+        env.ref_body_pos[0,:,2]=.04
+        env.ref_body_pos[1,:,2]=-.2
+        frames=torch.tensor([0,1])
+        candidate=env.reset(frames)
+        candidate['xpos'][:,0]=0.
+        original={name:value.clone() for name,value in candidate.items()}
+        active=torch.tensor([True,False])
+        adjusted=env.reset_for_mask(candidate,active)
+        expected=env.reset(frames[:1])
+        torch.testing.assert_close(adjusted['qpos'][:1],expected['qpos'])
+        # Translation invariance of the fixture FK for every moving body and COM.
+        _,positions,rotations,velocities,centers=env.engine_kinematics(
+            adjusted['qpos'],adjusted['qvel'],adjusted['com'])
+        torch.testing.assert_close(adjusted['xpos'][:,1:],positions[:,1:])
+        torch.testing.assert_close(adjusted['subtree_com'],centers)
+        torch.testing.assert_close(adjusted['xpos'][:,0],torch.zeros(2,3))
+        for name in candidate:
+            torch.testing.assert_close(candidate[name],original[name],rtol=0,atol=0)
+            if name not in ('qpos','xpos','subtree_com'):
+                torch.testing.assert_close(adjusted[name],candidate[name],rtol=0,atol=0)
+        # An active negative row preserves the original cross-clip branch.
+        both=env.reset_for_mask(candidate,torch.tensor([True,True]))
+        torch.testing.assert_close(both['qpos'],candidate['qpos'],rtol=0,atol=0)
+        none=env.reset_for_mask(candidate,torch.tensor([False,False]))
+        torch.testing.assert_close(none['qpos'][:,2],env.ref_qpos[frames,2]+.1)
+
+    def test_root_position_weight_and_maximum_reward_use_the_same_value(self):
+        baseline, _ = fixture(root_position_weight=.5)
+        weighted, _ = fixture(root_position_weight=2.)
+        state = baseline.reset(torch.tensor([0]))
+        action = torch.zeros(1, 29)
+        _, base_terms = baseline.reward(state, action, action, prev=state)
+        _, weighted_terms = weighted.reward(state, action, action, prev=state)
+        torch.testing.assert_close(weighted_terms['root_pos'], 4*base_terms['root_pos'])
+        for name in base_terms:
+            if name != 'root_pos':
+                torch.testing.assert_close(weighted_terms[name], base_terms[name])
+        self.assertAlmostEqual(weighted.max_reward-baseline.max_reward, .02*1.5)
+
+    def test_actor_anchor_position_observes_rigid_physical_xy_translation(self):
+        env, _ = fixture(actor_anchor_position=True)
+        state = env.reset(torch.tensor([0]))
+        before, goal_before = env.policy_obs(state)
+        critic_before = env.critic_obs(state)
+        shifted = {key: value.clone() for key, value in state.items()}
+        translation = torch.tensor([[.3, -.2, 0.]])
+        shifted['qpos'][:, :3] += translation
+        shifted['xpos'] += translation[:, None]
+        shifted['subtree_com'] += translation[:, None]
+        after, goal_after = env.policy_obs(shifted)
+        self.assertEqual(env.hist_dim, 933)
+        self.assertEqual(before.shape[-1], env.hist_dim)
+        torch.testing.assert_close(before[:, :-3], after[:, :-3])
+        torch.testing.assert_close(after[:, -3:]-before[:, -3:], -translation)
+        torch.testing.assert_close(goal_before, goal_after)
+        self.assertEqual(env.critic_obs(shifted).shape, critic_before.shape)
+
+    def test_source_action_domain_is_shared_by_physics_and_history(self):
+        env, calls = fixture(residual=True, action_limit=20.)
+        state = env.reset(torch.tensor([0]))
+        action = torch.full((1, 29), 1.e6)
+        stepped = env.step(state, action)
+        torch.testing.assert_close(stepped['prev_a'], torch.full_like(action, 20.))
+        torch.testing.assert_close(env.proprio(stepped)[:, 64:], stepped['prev_a'])
+        torch.testing.assert_close(calls[-1][0], env.ctrl_of(torch.full_like(action, 20.), state['frame']))
+        torch.testing.assert_close(env.proprio(state)[:, 64:], torch.zeros_like(action))
+
+    def test_reference_torso_displacement_uses_full_reference_rotation_and_stride(self):
+        env, _ = fixture(frames=72, future_stride=5, reference_root_displacement=True)
+        times = torch.arange(env.n_frames)*.02
+        positions = torch.stack((torch.sin(times), torch.cos(2*times), .5+.2*times**2), -1)
+        yaw = .7+.4*times
+        yaw_rotation = torch.stack((torch.cos(yaw/2), 0*yaw, 0*yaw, torch.sin(yaw/2)), -1)
+        pitch_rotation = torch.tensor([np.cos(.35/2), 0., np.sin(.35/2), 0.], dtype=torch.float32)
+        rotations = quat_mul(yaw_rotation, pitch_rotation.expand_as(yaw_rotation))
+        env.ref_body_pos[:, env.anchor_k] = positions
+        env.ref_body_quat[:, env.anchor_k] = rotations
+        frames = torch.tensor([7, 20, 62], dtype=torch.int32)
+        indices = torch.minimum(frames[:, None]+5*torch.arange(10), env.ref_last[frames, None])
+        features = env.goal_ref(frames).reshape(3, 10, 71)
+        delta = positions[indices]-positions[frames, None]
+        inverse_rotation = quat_to_matrix(rotations[frames]).transpose(-1, -2)
+        expected = torch.einsum('bij,bfj->bfi', inverse_rotation, delta)
+        torch.testing.assert_close(features[..., :68], env.goal_feat[indices])
+        torch.testing.assert_close(features[..., 68:], expected)
+        torch.testing.assert_close(features[:, 0, 68:], torch.zeros(3, 3))
+        # A shared translation of the reference trajectory cancels exactly.
+        env.ref_body_pos += torch.tensor([2., -3., 1.])
+        torch.testing.assert_close(env.goal_ref(frames).reshape(3, 10, 71), features, atol=5e-7, rtol=1e-5)
+        state = env.reset(frames)
+        self.assertEqual(env.goal(state).shape, (3, 716))
+        self.assertEqual(env.critic_obs(state).shape, (3, 855))
+        contract = env.observation_contract
+        self.assertEqual(contract['reference_frame_dim'], 71)
+        self.assertEqual(contract['future_stride'], 5)
+        self.assertAlmostEqual(contract['reference_time_offsets_s'][-1], .9)
+        self.assertEqual(contract['goal_dim'], 716)
+        self.assertTrue(contract['reference_root_displacement'])
+        self.assertEqual(int(indices[-1, -1]), 71)
+
+    def test_reference_future_configuration_rejects_invalid_values(self):
+        for stride in (0, -1, 1.5, True):
+            with self.subTest(stride=stride), self.assertRaises(ValueError):
+                fixture(future_stride=stride)
+        with self.assertRaises(ValueError):
+            fixture(reference_root_displacement=1)
+
     def test_nominal_reset_and_reference_goal_do_not_cross_clip_boundary(self):
         env, _ = fixture()
         state = env.reset(torch.tensor([4, 10]))

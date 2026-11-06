@@ -100,7 +100,10 @@ def actor_decode(actor, latent, history, anchor):
     return mlp_apply(actor['dec'], torch.cat((latent, history, anchor), dim=-1))
 
 
-def actor_apply(actor, history, goal):
+def actor_apply(actor, history, goal, *, differentiate_depth=False):
+    if 'source_perceptive' in actor:
+        from .perceptive_task_inputs import source_actor_apply
+        return source_actor_apply(actor, history, goal, differentiate_depth=differentiate_depth)
     if 'obs_norm' in actor:
         norm = tuple(value.detach() for value in actor['obs_norm'])
         normalized = normalize(norm, torch.cat((history, goal), dim=-1))
@@ -111,6 +114,21 @@ def actor_apply(actor, history, goal):
         return actor_decode(actor, latent, history, goal[..., -anchor_size:])
     latent = actor_encode(actor, goal)
     return mlp_apply(actor['dec'], torch.cat((latent, history), dim=-1))
+
+
+def discounted_return_bound(maximum_reward, gamma, maximum_controls):
+    """The native trainer's finite-horizon positive-return magnitude for --v-bound."""
+    if not math.isfinite(maximum_reward) or maximum_reward < 0 or not 0 <= gamma < 1 or maximum_controls < 1:
+        raise ValueError('Value bound requires finite nonnegative reward, gamma in [0,1) and positive horizon')
+    return maximum_reward*(1-gamma**maximum_controls)/(1-gamma)
+
+
+def bootstrap_value(value, bound, *, gradient=True):
+    """Symmetric native algorithm clip. The lower bound is an algorithm choice."""
+    if bound is not None:
+        lower,upper=value.new_full((),-bound),value.new_full((),bound)
+        value=torch.minimum(torch.maximum(value,lower),upper)
+    return value if gradient else value.detach()
 
 
 def td_lambda(reward, terminated, done, next_value, gamma, lam):
@@ -331,7 +349,7 @@ def update_policy_ema(average, actor, updates):
 def _validate_ema_actor(actor):
     # Plain membership keeps this static schema check traceable by Dynamo;
     # set subset/difference operations are unsupported in the pinned compiler.
-    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm')
+    allowed = ('enc', 'dec', 'anchor_dec', 'obs_norm', 'source_perceptive', 'source_norm')
     if (not isinstance(actor, dict) or 'enc' not in actor or 'dec' not in actor or
             any(name not in allowed for name in actor)):
         raise ValueError('Policy EMA requires enc/dec and only optional anchor_dec/obs_norm')

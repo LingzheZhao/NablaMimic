@@ -24,6 +24,7 @@ class ShardedLibrary:
         """filtered: leave out the clips the converter flagged (FLAGS), as SuperMimic's training set does."""
         self.root = Path(root)
         idx = json.loads((self.root / "index.json").read_text())
+        self.index = idx
         self.fps, self.bodies = idx["fps"], tuple(idx["bodies"])
         self.clips = {k: c for k, c in idx["clips"].items() if not (filtered and any(c.get(f) for f in FLAGS))}
         self.shards = sorted({c["shard"] for c in self.clips.values()})

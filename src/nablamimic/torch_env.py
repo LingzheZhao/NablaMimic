@@ -110,17 +110,27 @@ def select_reset(done, reset, stepped):
 class TorchTrackingEnv:
     TABLES = ("ref_qpos", "ref_qvel", "ref_body_pos", "ref_body_quat", "ref_body_lin", "ref_body_ang",
               "ref_last", "goal_feat")
-    max_reward = DT * sum(W[key] for key in ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel",
-                                            "root_pos", "root_ori"))
+    @property
+    def max_reward(self):
+        return DT*(self.cfg.root_position_weight + sum(W[key] for key in
+            ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel", "root_ori")))
 
-    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None):
+
+    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, model=None, source_parameters=None):
         # These routines construct CPU model constants / NumPy reference features.
         # They do not construct TrackingEnv or an MJX runtime state.
         import mujoco
         from .env import ANCHOR, BM_BODIES, Q0, TrackingEnv, build_model
         if tuple(lib.bodies) != BM_BODIES:
             raise ValueError("Reference body order must be the current G1 tracking body order")
-        model, kp = build_model(cfg)
+        if source_parameters is None:
+            model, kp = build_model(cfg, model=model)
+        else:
+            if model is None:
+                raise ValueError('Source actuator binding requires the prepared physical model')
+            kp = np.array(model.actuator_gainprm[:, 0], copy=True)
+            if not np.isfinite(kp).all() or (kp <= 0).any():
+                raise ValueError('Source position actuator gains must be finite and positive')
         model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_SENSOR)
         q0 = np.zeros(model.nu)
         for i in range(model.nu):
@@ -128,15 +138,31 @@ class TorchTrackingEnv:
             for key, value in Q0.items():
                 if key in name:
                     q0[i] = value
+        if source_parameters is not None:
+            q0 = np.asarray(source_parameters['default_joint_position'], dtype=np.float32)
+            if q0.shape != (model.nu,) or not np.isfinite(q0).all():
+                raise ValueError('Source default positions must bind every actuator')
         effort = np.array([model.jnt_actfrcrange[model.actuator_trnid[i, 0], 1] for i in range(model.nu)])
         ranges = np.array([model.jnt_range[model.actuator_trnid[i, 0]] for i in range(model.nu)])
-        mid, half = ranges.mean(1), 0.5 * (ranges[:, 1]-ranges[:, 0]) * 0.9
+        soft_limit_factor = .9 if source_parameters is None else source_parameters['soft_joint_pos_limit_factor']
+        if not np.isfinite(soft_limit_factor) or not 0 < soft_limit_factor <= 1:
+            raise ValueError('Soft joint limit factor must lie in (0,1]')
+        if source_parameters is not None:
+            actual_joint_names = [model.joint(model.actuator_trnid[i,0]).name for i in range(model.nu)]
+            if source_parameters['joint_names'] != actual_joint_names:
+                raise ValueError('Source action coordinates differ from model actuator joint order')
+        mid, half = ranges.mean(1), 0.5 * (ranges[:, 1]-ranges[:, 0]) * soft_limit_factor
+        action_scale = 0.25*effort/kp
+        if source_parameters is not None:
+            action_scale = np.asarray(source_parameters['action_scale'], dtype=np.float32)
+            if action_scale.shape != (model.nu,) or not np.isfinite(action_scale).all() or (action_scale <= 0).any():
+                raise ValueError('Source action scales must be finite, positive and in actuator order')
         prepared = SimpleNamespace(
-            m=model, cfg=cfg, nu=model.nu, q0=q0, action_scale=0.25*effort/kp,
+            m=model, cfg=cfg, nu=model.nu, q0=q0, action_scale=action_scale,
             ctrl_lo=model.actuator_ctrlrange[:, 0], ctrl_hi=model.actuator_ctrlrange[:, 1],
             soft_lo=mid-half, soft_hi=mid+half,
             body_ids=np.array([model.body(name).id for name in BM_BODIES]), anchor_k=BM_BODIES.index(ANCHOR),
-            torso_id=model.body(ANCHOR).id, root_com_id=int(model.body_rootid[model.body("pelvis").id]),
+            torso_id=model.body(ANCHOR).id, root_com_id=int(model.body_rootid[model.jnt_bodyid[0]]),
             foot_pairs=np.array([i for i in range(model.npair)
                                  if "_foot" in model.pair(i).name and model.pair(i).name.endswith("_floor")]),
             starts=lib.starts, lengths=np.asarray([lib.last[s]-s+1 for s in lib.starts]),
@@ -154,8 +180,18 @@ class TorchTrackingEnv:
 
     def _init(self, reference, device, step_fn, kinematics_fn):
         self.cfg = reference.cfg
+        if not np.isfinite(self.cfg.root_position_weight) or self.cfg.root_position_weight < 0:
+            raise ValueError("Root position reward weight must be finite and nonnegative")
+        if self.cfg.action_limit is not None and (not np.isfinite(self.cfg.action_limit) or self.cfg.action_limit <= 0):
+            raise ValueError("Normalized action limit must be finite and positive")
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
             raise ValueError("action_rate_space must be setpoint or raw")
+        if type(self.cfg.future_stride) is not int or self.cfg.future_stride < 1:
+            raise ValueError("future_stride must be a positive integer number of controls")
+        if type(self.cfg.reference_root_displacement) is not bool:
+            raise ValueError("reference_root_displacement must be boolean")
+        self.perception_contract = {"sensor": "none", "width": 0}
+        self.terrain = None
         self.m = reference.m
         self.device = torch.device(device)
         self.nu = int(reference.nu)
@@ -186,9 +222,10 @@ class TorchTrackingEnv:
         if tuple(self.body_ids.shape) != (14,):
             raise ValueError("Exactly 14 current tracking body IDs are required")
         self.valid = torch.arange(self.n_frames, device=self.device) < self.ref_last
-        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM, FUTURE*GOAL_FRAME_DIM+6, 1+self.nu+3
+        frame_dim = GOAL_FRAME_DIM + 3*int(self.cfg.reference_root_displacement)
+        self.hist_dim, self.goal_dim, self.xi_dim = HIST*PROPRIO_DIM+3*int(self.cfg.actor_anchor_position), FUTURE*frame_dim+6, 1+self.nu+3
         self.critic_dim = PROPRIO_DIM + 9 + self.goal_dim + 4 + self.xi_dim
-        self.future_offsets = torch.arange(FUTURE, dtype=torch.int32, device=self.device)
+        self.future_offsets = self.cfg.future_stride*torch.arange(FUTURE, dtype=torch.int32, device=self.device)
         self.noise_limits = torch.tensor([0.01]*self.nu + [0.5/5.0]*self.nu + [0.2/2.0]*3
                                          + [0.05]*3 + [0.0]*self.nu, device=self.device, dtype=torch.float32)
         self.reset_position_limits = torch.tensor([0.05, 0.05, 0.01], device=self.device, dtype=torch.float32)
@@ -232,9 +269,38 @@ class TorchTrackingEnv:
         rotation = quat_to_matrix(quat_mul(quat_inv(ra_q), ma_q))
         return torch.cat((position, rotation[..., :, 0], rotation[..., :, 1]), -1)
 
+    @property
+    def observation_contract(self):
+        return dict(actor_anchor_position=self.cfg.actor_anchor_position,
+                    actor_anchor_position_definition="Simulator-based reference torso position minus physical torso position in the current physical torso full rotation frame, appended after history and scan",
+                    control_dt_s=DT, history_frames=HIST, proprioception_frame_dim=PROPRIO_DIM,
+                    history_dim=self.hist_dim, goal_dim=self.goal_dim, critic_dim=self.critic_dim,
+                    reference_frames=FUTURE, future_stride=self.cfg.future_stride,
+                    reference_time_offsets_s=[i*self.cfg.future_stride*DT for i in range(FUTURE)],
+                    reference_end_rule="Clamp each requested frame to the current clip's last frame",
+                    reference_frame_dim=GOAL_FRAME_DIM+3*int(self.cfg.reference_root_displacement),
+                    reference_feature_order=["joint_position_minus_default_29", "joint_velocity_scaled_29",
+                        "pelvis_projected_gravity_3", "pelvis_angular_velocity_scaled_3",
+                        "pelvis_heading_frame_linear_velocity_3", "pelvis_world_height_1"] +
+                        (["reference_torso_displacement_in_current_reference_torso_frame_3"]
+                         if self.cfg.reference_root_displacement else []),
+                    reference_root_displacement=self.cfg.reference_root_displacement,
+                    reference_root_body="torso_link",
+                    reference_root_displacement_definition=
+                        "Inverse full current reference torso rotation applied to future reference torso position minus current reference torso position",
+                    dynamic_anchor="Current reference torso rotation relative to physical torso, first two matrix columns",
+                    dynamic_anchor_dim=6)
+
     def goal_ref(self, frame):
         index = torch.minimum(frame[:, None]+self.future_offsets, self.ref_last[frame, None])
-        return self.goal_feat[index].flatten(1)
+        features = self.goal_feat[index]
+        if self.cfg.reference_root_displacement:
+            current_position = self.ref_body_pos[frame, self.anchor_k]
+            current_rotation = self.ref_body_quat[frame, self.anchor_k]
+            displacement = self.ref_body_pos[index, self.anchor_k]-current_position[:, None]
+            displacement = quat_rotate(displacement, quat_inv(current_rotation)[:, None])
+            features = torch.cat((features, displacement), -1)
+        return features.flatten(1)
 
     def goal(self, state, noise=None):
         anchor = self.anchor_rel(state)[..., 3:9]
@@ -244,8 +310,54 @@ class TorchTrackingEnv:
             anchor = anchor + 0.05*noise
         return torch.cat((self.goal_ref(state["frame"]), anchor), -1)
 
+    def bind_terrain_sensor(self, directory, ablation="measured"):
+        import json
+        from pathlib import Path
+        from .terrain_observation import ConvexTerrain
+        directory = Path(directory)
+        contract = json.loads((directory / "contract.json").read_text())
+        if contract["format"] != "nablamimic-convex-terrain-v1":
+            raise ValueError("Convex terrain producer contract required")
+        with np.load(directory / "terrain.npz") as arrays:
+            self.terrain = ConvexTerrain(*[
+                torch.as_tensor(arrays[name].copy(), device=self.device)
+                for name in ("normals", "offsets", "valid_faces")])
+        normals, offsets, valid = self.terrain.normals, self.terrain.offsets, self.terrain.valid_faces
+        if normals.ndim != 3 or normals.shape[-1] != 3 or offsets.shape != normals.shape[:2] or valid.shape != offsets.shape:
+            raise ValueError("Malformed convex terrain halfspaces")
+        if not bool(torch.isfinite(normals).all() & torch.isfinite(offsets).all()):
+            raise ValueError("Nonfinite terrain halfspaces")
+        if not bool(valid.any(-1).all()):
+            raise ValueError("Every terrain hull requires boundary faces")
+        if not bool(torch.allclose(torch.linalg.vector_norm(normals[valid], dim=-1), torch.ones_like(offsets[valid]), atol=1.e-5)):
+            raise ValueError("Terrain halfspaces require unit outward normals")
+        x = torch.linspace(-0.8, 1.2, 11, device=self.device)
+        y = torch.linspace(-0.5, 0.5, 7, device=self.device)
+        self.scan_offsets = torch.cartesian_prod(x, y)
+        self.sensor_ablation = ablation
+        self.hist_dim += len(self.scan_offsets)
+        self.critic_dim += len(self.scan_offsets)
+        self.perception_contract = dict(sensor="yaw_heightscan", width=len(self.scan_offsets),
+            placement="current scan appended after proprioception history and critic inputs",
+            offset_x_m=[-0.8, 1.2, 11], offset_y_m=[-0.5, 0.5, 7],
+            sensor_height_m=1.0, maximum_distance_m=3.0, ablation=ablation,
+            terrain=contract, units="distance divided by maximum_distance")
+
+    def terrain_scan(self, state):
+        from .terrain_observation import height_scan
+        q = state["qpos"]
+        scan = height_scan(self.terrain, q[:, :3], q[:, 3:7], self.scan_offsets) / 3.0
+        if self.sensor_ablation == "constant":
+            scan = torch.ones_like(scan)
+        return scan
+
     def policy_obs(self, state, goal_noise=None):
-        return state["hist"].flatten(1), self.goal(state, goal_noise)
+        history = state["hist"].flatten(1)
+        if self.terrain is not None:
+            history = torch.cat((history, self.terrain_scan(state)), -1)
+        if self.cfg.actor_anchor_position:
+            history = torch.cat((history, self.anchor_rel(state)[:, :3]), -1)
+        return history, self.goal(state, goal_noise)
 
     def critic_obs(self, state):
         q, frame = state["qpos"], state["frame"]
@@ -255,7 +367,14 @@ class TorchTrackingEnv:
                         state["com"]/0.05), -1)
         anchor = self.anchor_rel(state)
         goal = torch.cat((self.goal_ref(frame), anchor[:, 3:9]), -1)
-        return torch.cat((self.proprio(state), goal, root_error, anchor, xi), -1)
+        observation = torch.cat((self.proprio(state), goal, root_error, anchor, xi), -1)
+        if self.terrain is not None:
+            observation = torch.cat((observation, self.terrain_scan(state)), -1)
+        return observation
+
+    def reset_for_mask(self, reset, active):
+        """Use a prepared reset candidate for the selected episode starts."""
+        return reset
 
     def reset(self, frame, noise=None):
         if (self.cfg.dr or self.cfg.reset_noise or self.cfg.obs_noise) and noise is None:
@@ -320,7 +439,13 @@ class TorchTrackingEnv:
         result["hist"] = torch.cat((state["hist"][:, 1:], p[:, None]), 1)
         return result
 
+    def bound_action(self, action):
+        if self.cfg.action_limit is None:
+            return action
+        return torch.clamp(action, -self.cfg.action_limit, self.cfg.action_limit)
+
     def step(self, state, action, proprio_noise=None):
+        action = self.bound_action(action)
         outputs = self.engine_step(state["qpos"].contiguous(), state["qvel"].contiguous(),
                                    state["warm"].contiguous(), self.ctrl_of(action, state["frame"]).contiguous(),
                                    state["friction"].contiguous(), state["com"].contiguous(),
@@ -355,7 +480,7 @@ class TorchTrackingEnv:
                      body_ori=quat_angle_sq(rel_quat, quat).mean(-1),
                      body_lin_vel=((ref_linear-linear)**2).sum(-1).mean(-1),
                      body_ang_vel=((ref_angular-angular)**2).sum(-1).mean(-1))
-        terms = {name: DT*W[name]*torch.exp(-value/(STD[name]**2)) for name, value in error.items()}
+        terms = {name: DT*(self.cfg.root_position_weight if name == "root_pos" else W[name])*torch.exp(-value/(STD[name]**2)) for name, value in error.items()}
         terms["action_rate"] = DT*W["action_rate"]*(self.action_change(action, prev_action, prev)**2).sum(-1)
         joints = state["qpos"][:, 7:]
         zero = torch.zeros_like(joints)
@@ -369,6 +494,14 @@ class TorchTrackingEnv:
         dg = abs_real(gravity_b(q[:, 3:7])[:, 2]-gravity_b(reference[:, 3:7])[:, 2])
         bad = ~torch.isfinite(q).all(-1) | ~torch.isfinite(state["qvel"]).all(-1)
         return (dz > self.cfg.term_height) | (dg > self.cfg.term_tilt) | bad
+
+    def termination_penalty(self, state, height_start, tilt_start):
+        hazard=self.hazard_features(state)
+        zero=hazard.new_zeros(())
+        return ((torch.maximum(self.cfg.term_height-hazard[:,0]-height_start,zero)/
+                 (self.cfg.term_height-height_start))**2+
+                (torch.maximum(self.cfg.term_tilt-hazard[:,2]-tilt_start,zero)/
+                 (self.cfg.term_tilt-tilt_start))**2)
 
     def hazard_features(self, state):
         q, v, frame = state["qpos"], state["qvel"], state["frame"]
