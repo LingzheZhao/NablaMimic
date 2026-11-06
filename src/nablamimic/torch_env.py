@@ -495,6 +495,14 @@ class TorchTrackingEnv:
         bad = ~torch.isfinite(q).all(-1) | ~torch.isfinite(state["qvel"]).all(-1)
         return (dz > self.cfg.term_height) | (dg > self.cfg.term_tilt) | bad
 
+    def termination_penalty(self, state, height_start, tilt_start):
+        hazard=self.hazard_features(state)
+        zero=hazard.new_zeros(())
+        return ((torch.maximum(self.cfg.term_height-hazard[:,0]-height_start,zero)/
+                 (self.cfg.term_height-height_start))**2+
+                (torch.maximum(self.cfg.term_tilt-hazard[:,2]-tilt_start,zero)/
+                 (self.cfg.term_tilt-tilt_start))**2)
+
     def hazard_features(self, state):
         q, v, frame = state["qpos"], state["qvel"], state["frame"]
         rq, rv = self.ref_qpos[frame], self.ref_qvel[frame]

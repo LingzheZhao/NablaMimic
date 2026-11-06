@@ -67,7 +67,7 @@ def main():
     cpu_rng = torch.get_rng_state()
     cuda_rng = torch.cuda.get_rng_state()
     reward = env.reward
-    hazard = env.hazard_features
+    penalty = env.termination_penalty
     critic_apply = nets.critic_apply
     clip = nets.clip_rows_to_median
     results = {}
@@ -76,7 +76,7 @@ def main():
     try:
         for condition in ('full_raw', 'reward', 'term_penalty', 'bootstrap', 'full_native_clip'):
             env.reward = reward
-            env.hazard_features = hazard
+            env.termination_penalty = penalty
             nets.critic_apply = critic_apply
             nets.clip_rows_to_median = clip
             if condition not in ('full_raw', 'full_native_clip', 'reward'):
@@ -85,7 +85,7 @@ def main():
                     return value.detach(), terms
                 env.reward = detached_reward
             if condition not in ('full_raw', 'full_native_clip', 'term_penalty'):
-                env.hazard_features = lambda *values: hazard(*values).detach()
+                env.termination_penalty = lambda *values: penalty(*values).detach()
             if condition not in ('full_raw', 'full_native_clip', 'bootstrap'):
                 nets.critic_apply = lambda *values: critic_apply(*values).detach()
             if condition != 'full_native_clip':
@@ -101,7 +101,7 @@ def main():
             objectives[condition] = float(objective)
     finally:
         env.reward = reward
-        env.hazard_features = hazard
+        env.termination_penalty = penalty
         nets.critic_apply = critic_apply
         nets.clip_rows_to_median = clip
     full = results['full_raw']

@@ -16,6 +16,9 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         from nablaengine.depth_geometry import DepthGeometry
         from .source_depth_noise import SourceDepthNoise
         self.camera_noise = SourceDepthNoise(self.device) if self.cfg.source_depth_noise else None
+        from .env import BM_BODIES
+        self.termination_end_indices=[BM_BODIES.index(name) for name in (
+            'left_ankle_roll_link','right_ankle_roll_link','left_wrist_yaw_link','right_wrist_yaw_link')]
         self.source_ctrl_limited = torch.tensor(self.m.actuator_ctrllimited.copy(),device=self.device,dtype=torch.bool)
         self.source_kp = torch.tensor(self.m.actuator_gainprm[:,0].copy(),device=self.device,dtype=torch.float32)
         self.source_kd = torch.tensor(-self.m.actuator_biasprm[:,2].copy(),device=self.device,dtype=torch.float32)
@@ -170,21 +173,31 @@ class SourcePerceptiveEnv(TorchTrackingEnv):
         return torch.cat((self.proprio(state), self.source_goal(state), self.anchor_rel(state),
                           root_velocity, state['friction'][:, None], state['enc_bias'], state['com']), -1)
 
-    def terminated(self, state):
+    termination_height_limit=.25
+    termination_gravity_limit=.8
+
+    def termination_errors(self, state):
         frame = state['frame']
         torso_height = state['xpos'][:, self.torso_id, 2]
         reference_height = self.ref_body_pos[frame, self.anchor_k, 2]
         gravity_error = torch.linalg.vector_norm(
             gravity_b(state['xquat'][:, self.torso_id])-
             gravity_b(self.ref_body_quat[frame, self.anchor_k]), dim=-1)
-        from .env import BM_BODIES
-        links = ('left_ankle_roll_link','right_ankle_roll_link','left_wrist_yaw_link','right_wrist_yaw_link')
-        indices = [BM_BODIES.index(name) for name in links]
-        actual = state['xpos'][:, self.body_ids[indices], 2]
-        reference = self.ref_body_pos[frame][:, indices, 2]
-        nonfinite = ~torch.isfinite(state['qpos']).all(-1) | ~torch.isfinite(state['qvel']).all(-1)
-        return ((torso_height-reference_height).abs() > .25) | (gravity_error > .8) | (
-            (actual-reference).abs().amax(-1) > .25) | nonfinite
+        actual = state['xpos'][:, self.body_ids[self.termination_end_indices], 2]
+        reference = self.ref_body_pos[frame][:, self.termination_end_indices, 2]
+        height_error=torch.maximum((torso_height-reference_height).abs(),
+                                   (actual-reference).abs().amax(-1))
+        return height_error,gravity_error
+
+    def terminated(self, state):
+        height_error,gravity_error=self.termination_errors(state)
+        nonfinite=~torch.isfinite(state['qpos']).all(-1)|~torch.isfinite(state['qvel']).all(-1)
+        return (height_error>self.termination_height_limit)|(gravity_error>self.termination_gravity_limit)|nonfinite
+
+    def termination_penalty(self, state, height_start, tilt_start):
+        height_error,gravity_error=self.termination_errors(state)
+        return ((torch.relu(height_error-height_start)/(self.termination_height_limit-height_start))**2+
+                (torch.relu(gravity_error-tilt_start)/(self.termination_gravity_limit-tilt_start))**2)
 
     def empty_transition_measurements(self, state):
         batch = state['qpos'].shape[0]

@@ -66,13 +66,7 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
         reward, terms = env.reward(stepped, action, state['prev_a'], prev=state)
         if term_penalty is not None:
             weight, height_start, tilt_start = term_penalty
-            hazard = env.hazard_features(stepped)
-            zero = torch.zeros((), device=reward.device, dtype=reward.dtype)
-            penalty = -weight * .02 * (
-                (torch.maximum(env.cfg.term_height-hazard[:, 0]-height_start, zero) /
-                 (env.cfg.term_height-height_start)) ** 2 +
-                (torch.maximum(env.cfg.term_tilt-hazard[:, 2]-tilt_start, zero) /
-                 (env.cfg.term_tilt-tilt_start)) ** 2)
+            penalty = -weight * .02 * env.termination_penalty(stepped,height_start,tilt_start)
             reward = reward + penalty
             terms = {**terms, 'term_pen': penalty}
         terminated = env.terminated(stepped)
@@ -692,6 +686,11 @@ def build_environment(args):
         if args.source_depth_gradient else 'Camera image input stops gradient; CNN parameters remain trainable')
     if source_task:
         config['action'] = env.action_contract
+        config['termination_penalty'] = dict(height_error='maximum absolute world Z error over torso and four ankles/wrists',
+            gravity_error='norm of full torso projected gravity difference from reference',
+            height_limit_m=env.termination_height_limit,gravity_limit=env.termination_gravity_limit,
+            weight=args.term_penalty[0],height_start_m=args.term_penalty[1],gravity_start=args.term_penalty[2],
+            definition='Negative weight times control dt times the sum of squared positive error excesses normalized by limit minus start')
         config['reset'] = dict(profile=args.source_reset_profile,
             motion_start_height_offset_m=args.source_motion_start_height_offset,
             ensure_link_below_zero_ground=args.source_ensure_link_below_zero_ground,
