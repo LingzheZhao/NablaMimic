@@ -201,6 +201,9 @@ def build_parser():
     ap.add_argument("--resume", default=None,
                     help="checkpoint to continue from, or 'latest' (the newest OUT/ckpt/it_*.pkl): actor, critic, "
                          "normalizer, optimizer and reset-bin state")
+    ap.add_argument("--initialize-from-ema", default=None, metavar="CHECKPOINT",
+                    help="new training process: initialize actor and EMA from actor_ema, inherit critic/normalizer, "
+                         "rebuild all optimizers, sampler, collector and replay; update schedule starts at zero")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--clips", nargs="+", default=["all"], help="LAFAN1 clip names, or all")
     ap.add_argument("--motion-lib", default=None, metavar="DIR",
@@ -322,6 +325,8 @@ def main(argv=None):
     ap = build_parser()
     argv, params_info = resolve_params(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)
+    if args.resume and args.initialize_from_ema:
+        raise ValueError("Choose either continuation or EMA parameter initialization")
     out = Path(args.out)
     if args.resume == "latest":
         args.resume = latest_checkpoint(out)
@@ -697,6 +702,26 @@ def main(argv=None):
         ema0 = as_j(ck["actor_ema"]) if "actor_ema" in ck else None
         start_it, env_steps0, wall0 = int(ck["iter"]), int(ck["env_steps"]), float(ck["wall_s"])
         print(f"resumed from {args.resume} at update {start_it}", flush=True)
+
+    if args.initialize_from_ema:
+        from .initialize import initialize_parameters
+        with open(args.initialize_from_ema, "rb") as stream:
+            initialization = pickle.load(stream)
+        validate_feedback(initialization, cfg)
+        actor, critic, cnorm = initialize_parameters(initialization, actor, critic, cnorm)
+        st_a, st_c = opt_a.init(actor), opt_c.init(critic)
+        # EMA is initialized from this same actor below. Action-target Adam is newly
+        # initialized later, while counters, sampler, collector and replay retain new-run state.
+        evidence = dict(checkpoint=str(Path(args.initialize_from_ema).resolve()),
+                        source_iter=int(initialization["iter"]), source_actor_key="actor_ema",
+                        actor_and_ema_initialization="same selected actor_ema parameters",
+                        critic_and_normalizer="inherited from same checkpoint",
+                        optimizers="new actor, critic and action-target Adam",
+                        sampler="new current-library initial distribution",
+                        collector_and_replay="rebuilt", completed_updates=0,
+                        learning_rate_schedule="new training process starting at zero")
+        with (out / "initialization.json").open("x") as stream:
+            json.dump(evidence, stream, indent=2)
 
     if args.motion_lib and start_it // args.ws_swap > 0:  # back on the working set the run was using
         env.set_library(ws_lib(start_it))
