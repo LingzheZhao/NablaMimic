@@ -201,6 +201,10 @@ def build_parser():
     ap.add_argument("--resume", default=None,
                     help="checkpoint to continue from, or 'latest' (the newest OUT/ckpt/it_*.pkl): actor, critic, "
                          "normalizer, optimizer and reset-bin state")
+    ap.add_argument("--reset-clip-mass", nargs=2, metavar=("CLIP", "MASS"),
+                    help="fix reset-start probability of one clip; preserve native conditional probabilities")
+    ap.add_argument("--sampler-exposure-log", action="store_true",
+                    help="record actual per-clip reset, collector, replay and actor counts")
     ap.add_argument("--reset-sampler-on-resume", action="store_true",
                     help="on resume, initialize reset-bin statistics from the current reference library")
     ap.add_argument("--seed", type=int, default=0)
@@ -324,6 +328,13 @@ def main(argv=None):
     ap = build_parser()
     argv, params_info = resolve_params(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)
+    if args.reset_clip_mass is not None:
+        mass = float(args.reset_clip_mass[1])
+        if not math.isfinite(mass) or not 0.0 < mass < 1.0:
+            ap.error("--reset-clip-mass requires a finite mass strictly between zero and one")
+    if args.reset_clip_mass is not None or args.sampler_exposure_log:
+        if not args.motion_lib or args.ws_shards != 1 or args.ws_swap <= args.iters:
+            ap.error("reset clip mass/exposure requires one unchanged resident motion-library shard")
     out = Path(args.out)
     if args.resume == "latest":
         args.resume = latest_checkpoint(out)
@@ -459,7 +470,25 @@ def main(argv=None):
         w = jnp.where(bin_count > 0, jax.nn.softmax(jnp.where(bin_count > 0, -25.0 * stat / scale, -1e9)), 0.0)
         return w / w.sum()
 
-    def frame_probs(bin_q, aux):
+    sampler_names = tuple(str(name) for name in lib.names) if args.motion_lib else ()
+    if args.reset_clip_mass is not None or args.sampler_exposure_log:
+        owner = np.full(env.n_frames, -1, np.int32)
+        for clip_index, (start, length) in enumerate(zip(env.starts, env.lengths)):
+            owner[start:start + length] = clip_index
+        if np.any(owner[np.asarray(env.valid)] < 0):
+            raise ValueError("Valid reset frames require a named clip owner")
+        frame_owner = jnp.asarray(owner)
+        n_sampler_clips = len(sampler_names)
+        if args.reset_clip_mass is not None:
+            name = args.reset_clip_mass[0]
+            if sampler_names.count(name) != 1:
+                raise ValueError("Fixed-mass clip must occur exactly once in the resident library")
+            fixed_mask = frame_owner == sampler_names.index(name)
+            valid_mask = np.asarray(env.valid)
+            if not np.any(np.asarray(fixed_mask) & valid_mask) or not np.any(~np.asarray(fixed_mask) & valid_mask):
+                raise ValueError("Both reset partitions require valid native start support")
+
+    def native_frame_probs(bin_q, aux):
         bins_j, valid_j, bin_count = aux["bins"], aux["valid"], aux["bin_count"]
         per_frame = lambda w: jnp.where(valid_j > 0, w[bins_j] / jnp.maximum(bin_count[bins_j], 1), 0.0)  # noqa: E731
         if args.uniform_over == "bins":
@@ -471,6 +500,17 @@ def main(argv=None):
         hard = per_frame(bin_weights(bin_q[0], bin_count))
         hist = per_frame(bin_q[1] / bin_q[1].sum())
         return 0.5 * uni + 0.4 * hard + 0.1 * hist
+
+    def frame_probs(bin_q, aux):
+        probabilities = native_frame_probs(bin_q, aux)
+        if args.reset_clip_mass is not None:
+            from .sampler import fixed_clip_mass
+            probabilities = fixed_clip_mass(probabilities, fixed_mask, mass)
+        return probabilities
+
+    def clip_counts(frames, weights=None):
+        from .sampler import clip_frame_counts
+        return clip_frame_counts(frames, frame_owner, n_sampler_clips, weights)
 
     use_replay = args.replay_steps > 0
     rollout = make_rollout(env, args.horizon, args.gamma, args.max_episode_steps, not args.no_remat,
@@ -495,12 +535,19 @@ def main(argv=None):
         s2 = f["step"](cstate, a)
         term = f["terminated"](s2)
         done = term | f["clip_ended"](s2) | (s2.ep >= args.max_episode_steps)
-        s_next = select_reset(done, sample_resets(k3, probs, tables, nc), s2)
+        reset_candidate = sample_resets(k3, probs, tables, nc)
+        s_next = select_reset(done, reset_candidate, s2)
         psize = pool["frame"].shape[0]
         pos = (ptr[0] + jnp.arange(nc)) % psize
         row = env.compact(s_next)
         pool = jax.tree_util.tree_map(lambda p, v: p.at[pos].set(v), pool, row)
         ptr = jnp.stack([(ptr[0] + nc) % psize, jnp.minimum(ptr[1] + nc, psize)])
+        if args.sampler_exposure_log:
+            observed = dict(term_rate=jax.lax.pmean(jnp.mean(term), "d"),
+                selected_collector_resets=jax.lax.psum(clip_counts(reset_candidate.frame, done.astype(jnp.int32)), "d"),
+                collector_physical_transitions=jax.lax.psum(clip_counts(cstate.frame), "d"),
+                replay_inserted_states=jax.lax.psum(clip_counts(s_next.frame), "d"))
+            return s_next, pool, ptr, observed
         return s_next, pool, ptr, jax.lax.pmean(jnp.mean(term), "d")
 
     def action_target_update(actor, buf, gd, outs, key):
@@ -619,6 +666,9 @@ def main(argv=None):
             actor_new = optax.apply_updates(actor, upd)
             actor = jax.tree_util.tree_map(lambda a, b: jnp.where(finite, a, b), actor_new, actor)
             st_a = jax.tree_util.tree_map(lambda a, b: jnp.where(finite, a, b), st_a_new, st_a)
+        if args.sampler_exposure_log:
+            outs["sampler_actor_starts"] = jax.lax.psum(clip_counts(start.frame), "d")
+            outs["sampler_actor_window_frames"] = jax.lax.psum(clip_counts(outs["frame"]), "d")
         outs["dq_rms"] = dq_of(actor)
         outs["dq_env_q"] = jnp.quantile(dq_env(actor), jnp.array([0.5, 0.95, 1.0]))
         outs["clip_stats"] = jnp.concatenate([clip_stats, outs.pop("at_clip")]) if use_at else clip_stats
@@ -813,6 +863,13 @@ def main(argv=None):
                              iter=it, wall_s=wall_s, env_steps=env_steps), f)
         tmp.rename(path)  # atomic: the evaluator never sees a partial file
 
+    if args.sampler_exposure_log:
+        exposure_log = open(out / "sampler_exposure.jsonl", "x")
+        exposure_counts = {name: np.zeros(n_sampler_clips, np.int64) for name in
+            ("selected_collector_resets", "collector_physical_transitions", "replay_inserted_states",
+             "actor_batch_starts", "actor_window_frames")}
+        initial_collector_counts = np.asarray(jnp.bincount(frame_owner[cstate.frame.reshape(-1)], length=n_sampler_clips)) if use_replay else None
+        native_probability = jax.jit(native_frame_probs)
     t_start, env_steps = time.time() - wall0, env_steps0
     # per update: raw grad norm (or regression loss), RMS setpoint change, per-env setpoint change quantiles (p50, p95,
     # max) and action-cotangent clipping stats
@@ -847,7 +904,12 @@ def main(argv=None):
             for j in range(int(col_acc)):
                 cstate, pool, ptr, ct = p_collect(actor, cstate, pool, ptr, probs,
                                                   jax.random.split(jax.random.fold_in(k1, 100 + j), nd), tables)
-                col_terms.append(ct)
+                if args.sampler_exposure_log:
+                    col_terms.append(ct["term_rate"])
+                    for name in ("selected_collector_resets", "collector_physical_transitions", "replay_inserted_states"):
+                        exposure_counts[name] += np.asarray(ct[name][0], np.int64)
+                else:
+                    col_terms.append(ct)
             col_acc -= int(col_acc)
             actor, st_a, state, _, ptr, outs, loss, gnorm, buf = p_actor(actor, st_a, critic, cnorm, state, pool, ptr,
                                                                          probs, keys_now, tables, buf)
@@ -858,6 +920,9 @@ def main(argv=None):
             d = min(args.actor_ema, (1.0 + n_ema) / (10.0 + n_ema)) if args.actor_ema_warmup else args.actor_ema
             actor_ema = ema_step(actor_ema, actor, jnp.float32(d))
             n_ema += 1
+        if args.sampler_exposure_log:
+            exposure_counts["actor_batch_starts"] += np.asarray(outs["sampler_actor_starts"][0], np.int64)
+            exposure_counts["actor_window_frames"] += np.asarray(outs["sampler_actor_window_frames"][0], np.int64)
         gn = float(gnorm[0])
         if args.shac_strict and not (math.isfinite(gn) and gn <= SHAC_GUARD):  # SHAC raises here; not applied
             save(out / "ckpt" / f"it_{it:06d}.pkl", it, time.time() - t_start, env_steps)
@@ -875,6 +940,19 @@ def main(argv=None):
         probs = p_probs(bin_q, aux)
         jax.block_until_ready(critic)
         env_steps += n * nd * args.horizon
+        if args.sampler_exposure_log and (it % 10 == 0 or it == args.iters - 1):
+            native_p = np.asarray(native_probability(first(bin_q), aux))
+            actual_p = np.asarray(first(probs))
+            valid_owner = owner[np.asarray(env.valid)]
+            record = dict(completed_updates=it + 1, initial_update=start_it,
+                clip_names=sampler_names, fixed_reset_clip_mass=args.reset_clip_mass,
+                native_reset_probability_mass=np.bincount(valid_owner, weights=native_p[np.asarray(env.valid)], minlength=n_sampler_clips).tolist(),
+                reset_probability_mass=np.bincount(valid_owner, weights=actual_p[np.asarray(env.valid)], minlength=n_sampler_clips).tolist(),
+                counts={name: values.tolist() for name, values in exposure_counts.items()},
+                initial_collector_state_counts=None if initial_collector_counts is None else initial_collector_counts.tolist(),
+                scope="Cumulative after initial_update. Selected collector resets exclude unused reset proposals and initialization probes. Collector transitions use incoming frame; inserted replay states use saved next frame. Actor starts and native rollout outs.frame visits counted separately.")
+            exposure_log.write(json.dumps(record) + "\n")
+            exposure_log.flush()
         if it % 10 == 0:
             o = first(outs)
             rec = {"iter": it, "wall_s": time.time() - t_start, "iter_s": time.time() - t1,
