@@ -49,7 +49,8 @@ is made.
 
 The environment is the run's (`torch_train.build_environment` with the run's
 `config.json`: its clips, solver iterations, action base and action-rate
-space) without the recovery options, so no hidden reference, recovery stop or
+space) without the seven `--recovery-*` options of
+[recovery training](RECOVERY.md), so no hidden reference, recovery stop or
 termination masking enters a rollout. Domain randomisation is off (foot
 friction 1, zero joint-encoder bias, zero torso centre-of-mass offset),
 observation noise is off, and the actions are the actor's output without
@@ -114,8 +115,8 @@ later push is not applied.
 
 `description.json` is written before the rollouts and again after them. It
 holds the run directory, the checkpoint path, its completed updates and the
-weights (`actor_key`); the run's source revision, engine and GPU from its
-`config.json`, and this program's source revision; the scene path and its
+weights (`actor_key`); the run's source revision (`git_commit`), engine and
+GPU from its `config.json`, and this program's source revision; the scene path and its
 content; the termination and the controls; the engine record of
 `torch_ffi.init`; the GPU name and the PyTorch version; under `settings` the
 run's clips, solver iterations, action base, action-rate space and
