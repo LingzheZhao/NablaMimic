@@ -1,128 +1,113 @@
 # Recovery training from placed lying starts
 
 The [PyTorch trainer](TORCH.md) can train a tracking policy that also gets up
-from lying on the floor and returns to its command. A share of the episodes
-starts with the body placed at a low row of a get-up recording. During such an
-episode the reward follows that recording, called the hidden reference. The
-actor still reads the command, which starts at a separate upright row and runs
-on as in any episode. Once the body is up, a blend leads the reward back to the
-command.
-
-The method follows StableMimic (arXiv 2608.02385v1) as the BeyondMimic
-reproduction (BM) implemented it in its own NablaMimic trainer. Each value
-below is marked as **BM's reading of StableMimic** (a value that BM's
-recipes, code or results attribute to the paper) or **BM's choice**. These
-attributions are BM's; they are not checked against the paper in this
-repository.
+from lying on the floor and returns to its command. This is recovery training
+in a reduced, single-network form of StableMimic (arXiv 2608.02385v1). A share
+of the episodes starts with the body placed at a low row of a get-up recording.
+During such an episode the reward follows that recording, called the hidden
+reference, while the actor reads only the command, which starts at a separate
+upright row and advances as in any episode. Once the body is up, a blend leads
+the reward back to the command.
 
 ```bash
 python -m nablamimic.torch_train --config configs/recovery.args --out runs/recovery_s0 --iters 3000
 python -m nablamimic.torch_train --config configs/absolute.args --out runs/absolute_s0 --iters 3000
 ```
 
-`configs/absolute.args` is the 0.2.0 recipe (`configs/base/ours.args`) on
-NablaEngine with absolute actions: the joint setpoints are the default pose
-plus the scaled action, so no reference row enters the action. It is the
-control condition. `configs/recovery.args` adds the recovery options and
-nothing else. The options go together: a partial set is refused, and so is
+"The recipe" is the tracking recipe of `configs/base/ours.args` (the
+NablaMimic 0.2.0 defaults). `configs/absolute.args` is the recipe on
+NablaEngine with absolute actions (joint setpoints are the default pose plus
+the scaled action, so no reference row enters the action); it is the control
+condition. `configs/recovery.args` adds the seven recovery options and nothing
+else. The options go together: a partial set is refused, and so is
 `--residual-action` with them. Without them the trainer runs the recipe
 unchanged: no extra random draw, the same state keys, and the same reset,
 step, reward, termination, critic and log.
 
-## The setting
+## Settings
+
+A control is one 0.02 s policy step (50 Hz); a row is one 0.02 s frame of the
+motion library. The terms are defined under [Rows](#rows-of-the-motion-library)
+and [Order inside a control](#order-inside-a-control).
 
 | Option | Value | Meaning | Source |
 | --- | --- | --- | --- |
-| `--recovery-share` | 0.5 | probability that a reset is a recovery start | BM's reading of StableMimic (equal tracking and recovery sampling) |
-| `--recovery-hidden-clips` | `fallAndGetUp1_subject1`, `fallAndGetUp1_subject5`, `fallAndGetUp2_subject2`, `fallAndGetUp2_subject3`, `fallAndGetUp3_subject1` | clips whose low rows are recovery starts and whose rows are the hidden reference | BM's choice |
-| `--recovery-command-excluded-clips` | the five hidden clips and `fallAndGetUp1_subject4` | clips that never give the command of a recovery start | BM's choice |
-| `--recovery-low-pelvis HEIGHT UPZ` | 0.50 m, 0.5 | a reference row is low when its pelvis is below HEIGHT or the world z of its pelvis up axis is below UPZ (a tilt beyond 60 degrees) | BM's choice: StableMimic's fall rule as BM applied it to the reference pelvis |
-| `--recovery-rows UPRIGHT_RUN LONGEST_SPAN COMMAND_UPRIGHT` | 50, 375, 500 | a get-up ends at the last row of its first 50 upright rows (1 s); at most 375 rows (7.5 s) from a start row to its get-up end; a command row has 500 upright rows ahead inside its clip | BM's choice |
-| `--recovery-reward-scale` | 2.5 | factor on the six tracking terms while the hidden reference is followed | BM's reading of StableMimic |
-| `--recovery-controls STOP BLEND` | 100, 75 | consecutive controls of target error that stop a recovery episode (2.0 s); controls of the blend back to the command (1.5 s) | BM's reading of StableMimic; BM's choice to count consecutive controls and to blend linearly |
+| `--recovery-share` | 0.5 | probability that a reset is a recovery start | StableMimic, Sections III-B and III-D |
+| `--recovery-hidden-clips` | `fallAndGetUp1_subject1`, `fallAndGetUp1_subject5`, `fallAndGetUp2_subject2`, `fallAndGetUp2_subject3`, `fallAndGetUp3_subject1` | clips that give the start rows and the hidden reference | this repository's choice; the paper names no clips |
+| `--recovery-command-excluded-clips` | the five hidden clips and `fallAndGetUp1_subject4` | clips that never give a command row | this repository's choice; in StableMimic commands come only from the LAFAN1 dance subset, disjoint from the get-up library (Section IV-A) |
+| `--recovery-low-pelvis HEIGHT UPZ` | 0.50 m, 0.5 | bounds of a low row | this repository's choice; StableMimic uses 0.50 m and 60 degrees as the onset of a fall in its evaluation (Section IV-A) and gives no height or tilt rule for start frames |
+| `--recovery-rows UPRIGHT_RUN LONGEST_SPAN COMMAND_UPRIGHT` | 50 (1 s), 375 (7.5 s), 500 | upright run that ends a get-up; longest span from a start row to its get-up end; upright rows ahead of a command row | this repository's choice; StableMimic starts the transition back to the command on similarity to the end of the get-up reference and gives no threshold (Section III-B) |
+| `--recovery-reward-scale` | 2.5 | factor on the six tracking terms during recovery | StableMimic, Section III-C |
+| `--recovery-controls STOP BLEND` | 100 (2.0 s), 75 (1.5 s) | consecutive controls of target error that stop a recovery episode; controls of the blend | StableMimic, Section III-B, for the durations; counting consecutive controls is this repository's choice, as the paper does not say how persistence is counted |
 
-The anchor term during recovery reads the torso height alone: BM's reading of
-StableMimic (root height), with the torso link as BM's choice. The termination
-thresholds are the recipe's (0.25 m pelvis height, 0.8 gravity z). BM's
-recipe has a further factor on the blend, set to 1.0 and marked as not given
-by the paper; it is not an option here.
+LONGEST_SPAN leaves room for the blend and 1 s of command tracking inside the
+10 s (500-control) episode. COMMAND_UPRIGHT equals the episode limit, so no
+clip end and no low command row meets a recovery episode.
 
 ## Rows of the motion library
 
-`src/nablamimic/recovery.py` computes the tables once when the environment is
-built; the run writes their counts to `RUN/recovery.json`.
+`src/nablamimic/recovery.py` classifies the rows once when the environment is
+built.
 
 - A row is **low** where its reference pelvis is below HEIGHT or the world z
-  component of its pelvis up axis is below UPZ. Every other row is upright.
+  component of its pelvis up axis is below UPZ (a tilt beyond 60 degrees).
+  Every other row is upright.
 - The **get-up end** of row `r` is the last row of the first run of
   UPRIGHT_RUN consecutive upright rows that ends at or after `r` inside its
-  clip (none where the clip holds no such run). All rows from a low row to
-  that end share one end.
+  clip (none where the clip holds no such run).
 - A **start row** is a low row of a hidden clip whose get-up ends inside its
   clip at most LONGEST_SPAN rows later.
 - A **command row** lies outside the command-excluded clips, and it and the
-  next COMMAND_UPRIGHT rows are upright and before its clip's last row. With
-  COMMAND_UPRIGHT equal to the episode limit, no clip end and no low command
-  meets a recovery episode.
+  next COMMAND_UPRIGHT rows are upright and before its clip's last row.
 
-The counts are the low rows of the hidden clips, those without a get-up end in
-their clip, those beyond the longest span, the start rows, the distinct get-up
-ends and the command rows. Unknown clip names, an empty start or command
-table, and a hidden clip that is not command-excluded are refused. (A reset
-is a recovery start where its body row differs from its command row, which
-needs the two tables apart.)
+Unknown clip names, an empty start or command table, and a hidden clip that is
+not command-excluded are refused: a reset is a recovery start where its body
+row differs from its command row, which needs the two tables apart.
 
 ## Starts
 
-Every reset draw goes through `ResetSampler.sample`: the collector's initial
-states (which then get random episode ages, recovery starts included, as any
-initial state), the collector's resets and the window's resets. It draws, in
-this order:
+`ResetSampler.sample` makes every reset draw (the collector's initial states
+and resets, and the window's resets). It draws, in this order and for every
+environment: the reset rows from the reset bins; the reset noise; one uniform,
+below the share for a recovery start; a start row, uniform over the start
+rows; a command row, uniform over the command rows. Without the options only
+the first two draws are made. Recovery starts among the collector's initial
+states get random episode ages, as every initial state does.
 
-1. the reset rows from the reset bins;
-2. the reset noise;
-3. one uniform per environment, which makes the environment a recovery start
-   below the share;
-4. a start row, uniform over the start rows;
-5. a command row, uniform over the command rows.
+`env.reset(frame, noise, body_frame)` places the body at `body_frame` as an
+ordinary reset places it at that row: the row's positions and velocities with
+the reset noise, no lift (the paper does not state one), a zero previous
+action and the history filled with the first frame. The reset noise limits
+equal those of StableMimic's implementation details table (Reset row); the
+rotation is applied as one axis-angle vector. The command starts at `frame`.
+A recovery start gets `body_frame` = start row and `frame` = command row; any
+other reset gets both at its reset row.
 
-Each draw is made for every environment, and the choice selects. Without the
-options only the first two draws are made.
-
-`env.reset(frame, noise, body_frame)` places the body at `body_frame` exactly
-as an ordinary reset places it at that row: the row's positions and velocities
-with the same reset noise, no lift, a zero previous action and the history
-filled with the first frame. The command starts at `frame`. A recovery start
-gets `body_frame` = start row and `frame` = command row; any other reset gets
-both at its reset row.
-
-## The hidden row and who reads it
+## The hidden row and what reads it
 
 With the options the state holds five more keys, which `compact`, `restore`,
 `select_reset` and the start replay carry like the others:
 
 | Key | Meaning |
 | --- | --- |
-| `hidden_frame` | the row the last control targeted: the hidden row while recovering, the command row otherwise (at a reset: the body row) |
-| `recovering` | whether the hidden row is followed |
+| `hidden_frame` | the row the last control targeted: the hidden row during recovery, the command row otherwise (at a reset: the body row) |
+| `recovering` | whether the hidden row is followed (the recovery regime) |
 | `error_controls` | consecutive controls of target error |
 | `blend_left` | blend controls still to run |
-| `command_offset` | horizontal offset of the command reference, set at the switch |
+| `command_offset` | horizontal offset of the command reference, set at the switch back to the command |
 
 | Reads the hidden row | Reads the command row |
 | --- | --- |
 | the six tracking terms of the reward | the actor's goal rows and anchor orientation |
 | the termination penalty (`hazard_features`) | the proprioception history |
 | the recovery stop | the action base and the setpoint |
-| the critic, while recovering: its goal rows, reference torso pose and reference root height | the encoder latents of the window |
+| the critic during recovery: its goal rows, reference torso pose and reference root height | the encoder latents of the window |
 | | the clip end and the episode limit |
 | | the reset bins |
 | | the recipe's height and tilt termination, outside recovery |
 
-The actor gets no regime flag and no blend count; it sees what it would see
-at deployment. The critic's input keeps its 825 entries and has no regime
-entry; after the switch it reads the command row with the reference torso
-moved by the command offset.
+The actor gets no regime flag and no blend count, so it sees what it sees at
+deployment. The critic's input keeps its 825 entries and has no regime entry.
 
 ## Order inside a control
 
@@ -139,17 +124,21 @@ each control:
    it is the command row. It is stored as `hidden_frame`.
 4. The pelvis height and gravity-z differences of the body are taken against
    the target row and against the command row.
-5. A recovering control is a control of target error when the body is outside
-   the thresholds of the target row, or, at the get-up end, outside those of
-   the command row. An error adds one to `error_controls`; a control without
-   error sets it to 0.
+5. A recovering control is a control of **target error** when the body is
+   outside the recipe's termination thresholds (0.25 m pelvis height
+   difference, 0.8 gravity-z difference; the paper gives no training
+   thresholds) at the target row, or, at the get-up end, at the command row.
+   An error adds one to `error_controls`; a control without error sets it
+   to 0.
 6. The **switch**: a recovering control at the get-up end with the body within
    both rows' thresholds stops recovering. `blend_left` becomes BLEND, and
    later controls lower it by one to 0. `command_offset` becomes the body's
    torso position minus the command's torso position, horizontally and
-   without gradient; the command's yaw is kept.
-7. The reward is computed at the target row (below), the termination penalty
-   at the target row, and the termination of the reached state (below).
+   without gradient, and the command's yaw is kept (StableMimic, Section
+   III-D, re-aligns the command's horizontal translation to the recovered
+   pose and keeps its yaw; the torso is this repository's choice).
+7. The reward and the termination penalty are computed at the target row, and
+   the termination of the reached state as below.
 8. `done` = termination, clip end or episode limit. A recovery stop is a
    termination, so the episode ends without a bootstrap value; the clip end
    and the episode limit bootstrap as in the recipe.
@@ -158,220 +147,104 @@ Nothing else changes at the switch: the previous action, the history, the
 episode step and the command row continue.
 
 **Reward.** A recovery control takes the reward scale times each of the six
-tracking terms at the target row. Its anchor-position error is the squared
-torso height difference alone. A blend control with `left` blend controls
-still to run takes `(BLEND - left + 1) / BLEND` times the six terms: 1/75 at
-the first blend control, 1 at the last. A tracking control takes the recipe's
-terms. Outside recovery the anchor-position reference is the command torso
-moved by `command_offset`. The action-rate term (from the command row's
-action base), the joint-limit term and the termination penalty keep the
-recipe's weights. Recovery rows can exceed the recipe's largest step reward,
-so `reward_mean` of the log is not comparable between the two conditions.
+tracking terms at the target row, with the squared torso height difference
+alone as its anchor-position error (StableMimic, Section III-C, uses root
+height; the torso link is this repository's choice). A blend control with
+`left` blend controls still to run takes `(BLEND - left + 1) / BLEND` times
+the six terms: 1/75 at the first blend control, 1 at the last. The paper gives
+neither the shape of this weight nor a value for its separate transition
+coefficient; no further coefficient is applied here. A tracking control takes
+the recipe's terms. Outside recovery the anchor-position reference and the
+critic's reference torso are the command torso moved by `command_offset`. The
+action-rate term (from the command row's action base), the joint-limit term
+and the termination penalty keep the recipe's weights. Recovery rows can
+exceed the recipe's largest step reward, so `reward_mean` of the log is not
+comparable between the two conditions.
 
 **Termination.** While the reached state is recovering, the recipe's height
-and tilt terms against the command row are masked; the non-finite term still
-ends the episode at once. A reached state with STOP or more
-`error_controls` is the recovery stop. BM's code masks by the state the
-control starts from; the reached state gives the same result, because a
-switching control is within the command row's thresholds and a stopping
-control is still recovering.
+and tilt terms against the command row are masked (StableMimic, Section III-B:
+termination is measured against the get-up target during recovery); a
+non-finite state still ends the episode at once. A reached state with STOP or
+more `error_controls` is the recovery stop.
 
 **Reset bins.** Only transitions that start in tracking update the reset-bin
-statistics. Recovery and blend transitions leave the bins of the command rows
+statistics; recovery and blend transitions leave the bins of the command rows
 as they are. The critic normaliser is updated from all rows.
 
 ## Records
 
-`RUN/recovery.json` holds the setting (with the two clip lists), the six row
-counts and which parts read the hidden row and which the command row. It is a
-separate file because the exporter checks the fields of `config.json`
-exactly. `config.json`, the `resolved_config` of the full training state
-(`training_state_itNNNNNN.pt`) and the exported policy's
-`source_run.parsed_arguments` record the seven options as parsed arguments,
-with null values in a run without them. With the options, the collector and
-replay states in the full training state also hold the five recovery keys.
-`ckpt/it_N.pkl` holds no recovery fields.
+`RUN/recovery.json` holds the settings (with the two clip lists), which parts
+read the hidden row and which the command row, and six row counts: the low
+rows of the hidden clips, those without a get-up end in their clip, those
+beyond the longest span, the start rows, the distinct get-up ends and the
+command rows. It is a separate file because the exporter checks the fields of
+`config.json` exactly. `config.json` and the `resolved_config` of the full
+training state (`training_state_itNNNNNN.pt`) record the seven options as
+parsed arguments, null in a run without them. With the options, the collector
+and replay states in the full training state also hold the five recovery
+keys. `ckpt/it_N.pkl` holds no recovery fields.
 
-`log.jsonl` gains these columns per update, over the window's rows (controls
-times environments) by the regime each control started in:
+`log.jsonl` has these extra columns per update, over the window's rows
+(controls times environments) by the regime each control started in:
 
 | Column | Meaning |
 | --- | --- |
 | `recovery_window_row_share_tracking`, `_recovery`, `_blend` | share of the window's rows in each regime |
 | `recovery_tracking_window_rows_total` | running total of the window rows in tracking since the run started |
 | `recovery_switches`, `recovery_stops` | switches back to the command, recovery stops |
-| `recovery_switch_yaw_mean_rad`, `recovery_switch_yaw_p90_rad` | absolute yaw between the body's torso and the command's torso at the switches; null without a switch |
+| `recovery_switch_yaw_mean_rad`, `recovery_switch_yaw_p90_rad` | mean and 90th percentile of the absolute yaw between the body's torso and the command's torso at the switches; null without a switch |
 | `recovery_clip_ends`, `recovery_episode_limits` | clip ends and episode limits of recovery controls |
 | `recovery_terminations_in_blend` | terminations of blend controls |
-| `recovery_tracking_reward_mean` | mean reward over the tracking rows over the recipe's largest step reward; null without a tracking row |
+| `recovery_tracking_reward_mean` | mean reward over the tracking rows divided by the recipe's largest step reward; null without a tracking row |
 
-**Exposure.** The tracking rows a recovery run has trained on after update N
-are `recovery_tracking_window_rows_total` of that update's row. A control run
-trains on `num_envs * horizon` tracking rows per update (262,144 at 4,096
-environments and horizon 64), so after N updates on N times that. The control
+**Tracking exposure.** A control run trains on `num_envs * horizon` tracking
+rows per update (262,144 at 4,096 environments and horizon 64). The control
 update matched in tracking exposure to a recovery run's update is the first
-whose total reaches the recovery run's.
+whose running total reaches that update's
+`recovery_tracking_window_rows_total`.
 
-## Choices kept from BM
+## Differences from StableMimic
 
-- The critic reads the hidden row alone while recovering. BM's reading of
-  StableMimic gives the critic both rows.
-- Episodes last at most 500 controls (10 s); BM's reading of StableMimic gives
-  20 s.
-- The regularisers are the recipe's two; BM's reading of StableMimic also
-  names self-collision and power terms.
-- "Persisting" target error is counted as consecutive controls of either
-  termination difference.
-- A recovery start has no lift, keeps the start row's reference velocity and
-  the recipe's reset noise.
-- Recovery starts among the collector's initial states get random episode
-  ages, as every initial state does.
-- COMMAND_UPRIGHT equals the episode limit.
+| StableMimic | This repository |
+| --- | --- |
+| two experts whose actions a mixing network on proprioception blends, trained with extra mixing losses (Sections III-A, III-C) | one actor network |
+| start frames half uniform, half weighted towards failed phases (Section III-B) | start rows uniform |
+| a success term in the reward, not defined further (Section III-C) | no success term |
+| action-rate, joint-limit, self-collision and power penalties (Section III-C) | the recipe's action-rate and joint-limit penalties |
+| the critic reads the command and the active get-up reference (Section III-A) | during recovery, the critic reads the hidden row in place of the command row |
+| 20 s training episodes (implementation details table) | at most 500 controls (10 s) |
+
+The choice of start, command and get-up end rows differs as well; the
+settings table gives the paper's side.
 
 ## Not implemented
 
-- two experts with a mixing network;
-- failure-adaptive weights of the start rows;
-- a success reward;
-- pushes, or falls during tracking turned into recovery, during training;
-- a regime entry in the critic's input, or the hidden row in the actor's;
+- the paper's parts in the table above that this repository leaves out;
+- pushes during training (the paper's pushes belong to its evaluation);
+- falls during tracking turned into recovery during training;
 - the residual action base with recovery (refused);
 - the JAX trainer (`train.py`).
 
 ## Export
 
-The policy of a recovery run exports like any other run
-([EXPORT.md](EXPORT.md)); its options are recorded in the declaration's
-`source_run.parsed_arguments`. `--critic-out` is refused for such a run: its
-critic reads the hidden row in place of the command's goal while recovering,
-which the critic file's input declaration does not describe.
+The policy of a recovery run exports like any other run; `--critic-out` is
+refused for it ([EXPORT.md](EXPORT.md)).
 
-## Reading a trained policy
-
-`nablamimic.engine_rollouts` runs the policy of a numbered checkpoint on
-NablaEngine, the simulator it was trained on, closed-loop and without a tape,
-for the trials of a scene file, into an output directory that must not exist:
-
-```bash
-python -m nablamimic.engine_rollouts --run runs/recovery_s0 --iter 3000 \
-    --scene scene.json --termination recipe --controls 1000 --out readings/recovery_s0_3000
-```
-
-`--actor-key` chooses `actor_ema` (the running average, the default) or
-`actor` (the weights as trained). The environment is the run's
-(`torch_train.build_environment` with the run's `config.json`) without the
-recovery options, so no hidden row, recovery stop or termination masking
-enters a rollout; domain randomisation is off (foot friction 1, zero
-joint-encoder bias, zero torso centre-of-mass offset), observation noise is
-off and the actions are the actor's output without noise. The policy acts as
-the trainer's collector acts: `env.policy_obs` into `actor_apply`. The
-network matmul precision is the run's. The values of `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and
-`MENAGERIE_DIR` must equal the run's (its `config.json`), since the scene's
-rows index the motion library they locate; the program compares the values,
-not the files. The scene is checked against the library before the output
-directory is made.
-
-**Scene.** `{"trials": [TRIAL, ...]}`, one environment of one batch per
-trial; unknown keys are refused at every level. A trial holds:
-
-| Key | Meaning |
-| --- | --- |
-| `command_row` | library row the command starts from |
-| `body_row` | library row whose reference posture the body is placed at; absent: the command row |
-| `reset_uniforms` | unit uniforms in [-1, 1] of the reset noise (the fields of `TorchTrackingEnv.sample_reset_noise`), absent: zeros; `position` [3] times 0.05, 0.05, 0.01 m on the root position; `rotation` [3] times 0.1, 0.1, 0.2 rad, a rotation vector premultiplied on the root orientation (world frame); `velocity` [6] times 0.5, 0.5, 0.2 m/s and 0.52, 0.52, 0.78 rad/s on the free joint's six velocity coordinates; `joints` [29] times 0.1 rad on the joint positions in actuator order. The half-widths are the environment's |
-| `push` | `{"control", "velocity_xy"}`: a world planar velocity change (m/s); or `{"control", "force", "duration", "direction"}`: force (N) times duration (s) over the whole-body mass (`body_subtreemass[0]` of the model) along `forward`, `backward`, `left` or `right` of the pelvis yaw at that control |
-
-Every trial starts through the training reset,
-`env.reset(command_rows, noise, body_frame=body_rows)`, as a recovery start
-does: a placed lying start gives `body_row` and its uniforms, a twin of it
-gives only the same `command_row`, and a clip's first row gives that row as
-`command_row`. The reset places the body row's positions and velocities with
-the noise, limits the joints to the soft joint range for every trial (with
-zero uniforms too, so also for a twin, a first row or a pushed trial), sets a
-zero previous action, fills the history with the first frame and stores the
-engine-normalised positions (unit quaternion). A push is added to the root's
-planar world velocity (`qvel[:, 0:2]`) of the state its control starts from,
-before that control's action; the action reads the history of earlier
-controls, so the policy sees the push from the next control on.
-
-**Termination.** `--termination recipe`: the recipe's termination ends a trial
-(pelvis height more than 0.25 m or gravity z more than 0.8 from the command
-row's, or a non-finite state). `--termination nonfinite`: only a non-finite
-state does. Neither the clip end nor an episode limit ends a trial; the
-command row holds at its clip's last row. An ended trial keeps the state it
-started its last control from, whether that control's state is finite or
-not: the batched step still computes it, its results are not used, no
-non-finite state reaches the engine again and no other trial depends on it.
-The control that ends a trial is recorded (available unless its state is
-non-finite); its later controls are unavailable, and pushes are not applied
-to it.
-
-**Record.** `description.json` holds the inputs: run directory, checkpoint,
-weights, the run's source revision (`git_commit` of its `config.json`) and
-this program's, the scene file and its content, the termination, the
-controls, the engine record of `torch_ffi.init` and the engine counters read
-after the rollouts, the card, the settings above, the whole-body mass and the
-library inputs. The engine counters include the steps of ended trials, which
-the batch still computes; per-trial counts come from the fields below.
-`rollouts.npz` holds, per control and trial (time-major, [C controls, T
-trials, ...]; after a trial's end NaN, -1 or false):
-
-| Field | Shape, type | Meaning |
-| --- | --- | --- |
-| `body_pos_w`, `body_quat_w` | [C, T, 14, 3], [C, T, 14, 4] float32 | the 14 tracked bodies' world positions and WXYZ orientations after the control |
-| `qpos` | [C, T, 36] float32 | root and joint positions after the control (engine-normalised) |
-| `qvel` | [C, T, 35] float32 | velocities after the control: `[0:3]` the pelvis origin's world linear velocity, `[3:6]` the pelvis angular velocity in its body frame, `[6:]` the joints' |
-| `frame_before`, `frame_after`, `clip_last_row` | [C, T] int32 | command row before and after the control; last row of its clip (the clip end is `frame_after == clip_last_row`) |
-| `available` | [C, T] bool | the state after the control is recorded and finite |
-| `done` | [C, T] bool | the control ended the trial |
-| `termination_height`, `termination_tilt`, `termination_nonfinite` | [C, T] bool | the recipe's three termination terms, recorded in either mode |
-| `push_applied` | [C, T] bool | the control's push was applied |
-| `engine_newton_iterations`, `engine_contacts`, `engine_constraint_rows`, `engine_info_bits` | [C, T] int32 | the engine's report of the control's step per environment (counts of the last substep, bits over the substeps) |
-| `engine_contact_capacity_exceeded`, `engine_row_capacity_exceeded` | [C, T] bool | contacts or constraint rows beyond the engine's capacity were dropped in the step (bits 4 and 16) |
-
-and per trial:
-
-| Field | Shape, type | Meaning |
-| --- | --- | --- |
-| `command_row`, `body_row` | [T] int32 | the trial's rows |
-| `push_control` | [T] int32 | the push's control, -1 without a push |
-| `push_velocity_xy` | [T, 2] float32 | the world velocity change applied, zero without one |
-| `start_qpos`, `start_qvel`, `start_body_pos_w`, `start_body_quat_w` | [T, 36], [T, 35], [T, 14, 3], [T, 14, 4] float32 | the placed state before the first control |
-
-For a push at control c, the pelvis yaw that turns a force push and the root
-velocity before the push are those of control c - 1's `qpos` and `qvel`
-(`start_qpos` and `start_qvel` for c = 0); the push adds `push_velocity_xy`
-to that velocity.
-
-## Checks
+## Tests
 
 `tests/test_recovery.py` runs on CPU with a synthetic get-up library and a
 stand-in step that holds or scripts the root. It covers the row tables, the
 draws and placement of the starts, the unchanged path without the options,
-the readers of the hidden row on both action bases, the clocks, the stop, the
-switch, the blend and the switch yaw, the reward's form and gradient, the
-termination penalty at the hidden row, the replay keys, a stop inside a
-window, the reset-bin mask, the log columns and the option refusals.
+the readers of the hidden row on both action bases, the advance of the command
+and hidden rows, the stop, the switch, the blend and the switch yaw, the
+reward's form and gradient, the termination penalty at the hidden row, the
+replay keys, a stop inside a window, the reset-bin mask, the log columns and
+the option refusals.
 
-`tests/test_engine_rollouts.py` runs the rollouts on CPU with a stand-in
-engine step: a placed start equals a recovery training start at the same rows
-and noise, a twin equals an ordinary reset at the command row, the uniforms
-reach the reset by value, a push changes only its trial's planar root velocity
-from its control (a world change unturned, a force push turned by the pelvis
-yaw at its control), the record holds the stepped state of the tracked bodies,
-the clip end holds the command row without ending a trial, the height and tilt
-terms each end a trial, the two terminations agree up to the first recipe
-termination, an ended trial leaves the other trials' records bit-equal to a
-batch without it, and invalid scenes and environments are refused. What only
-the engine establishes (its per-environment report, the normalised positions,
-the dynamics of a push) and the program's command line beyond its parsing need
-a GPU run.
-
-`TorchTrainer` needs CUDA, so these tests do not cover the trainer's own
-wiring: the recovery starts among the collector's initial states with their
-random episode ages, the replay ring with the recovery keys, the reset-bin
-update fed with the regimes of the training window, the merge of the
-recovery columns into the log row, and that whole training updates without
-the options compute what the recipe computes. Compiled execution, CUDA-graph
-capture with the recovery keys and the memory of a full-size run also need a
-GPU and are not covered by these tests.
+`TorchTrainer` needs CUDA, so these tests leave out the trainer's own wiring
+(the recovery starts among the collector's initial states, the replay ring
+with the recovery keys, the reset-bin update fed with the window's regimes,
+the merge of the recovery columns into the log row, and that whole training
+updates without the options compute what the recipe computes), compiled
+execution, CUDA-graph capture with the recovery keys and the memory of a
+full-size run.

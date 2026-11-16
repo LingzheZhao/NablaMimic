@@ -140,7 +140,7 @@ class ActionParameters(NamedTuple):
     """The joint-setpoint action space of a compiled model, per actuator in actuator order (float64, as the model holds
     them; TrackingEnv casts nominal, scale and the setpoint range to float32)."""
     joint_names: tuple      # the joint each actuator drives
-    nominal: np.ndarray     # q0: mjlab's knees-bent pose (Q0)
+    nominal: np.ndarray     # q0: the knees-bent default pose (Q0)
     kp: np.ndarray          # position gain
     effort: np.ndarray      # torque limit (jnt_actfrcrange upper bound)
     scale: np.ndarray       # ACTION_EFFORT_FRACTION * effort / kp: setpoint radians per unit of action
