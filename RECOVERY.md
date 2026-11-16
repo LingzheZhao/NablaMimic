@@ -264,7 +264,11 @@ recovery options, so no hidden row, recovery stop or termination masking
 enters a rollout; domain randomisation is off (foot friction 1, zero
 joint-encoder bias, zero torso centre-of-mass offset), observation noise is
 off and the actions are the actor's output without noise. The network matmul
-precision is the run's.
+precision is the run's. The values of `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and
+`MENAGERIE_DIR` must equal the run's (its `config.json`), since the scene's
+rows index the motion library they locate; the program compares the values,
+not the files. The scene is checked against the library before the output
+directory is made.
 
 **Scene.** `{"trials": [TRIAL, ...]}`, one environment of one batch per
 trial; unknown keys are refused at every level. A trial holds:
@@ -273,63 +277,70 @@ trial; unknown keys are refused at every level. A trial holds:
 | --- | --- |
 | `command_row` | library row the command starts from |
 | `body_row` | library row whose reference posture the body is placed at; absent: the command row |
-| `reset_uniforms` | unit uniforms in [-1, 1] of the reset noise, absent: zeros; `position` [3] times 0.05, 0.05, 0.01 m; `rotation` [3] times 0.1, 0.1, 0.2 rad, a rotation vector premultiplied on the root orientation; `velocity` [6] times 0.5, 0.5, 0.2 m/s and 0.52, 0.52, 0.78 rad/s on the free joint's velocity coordinates; `joints` [29] times 0.1 rad, then limited to the soft joint range |
+| `reset_uniforms` | unit uniforms in [-1, 1] of the reset noise (the fields of `TorchTrackingEnv.sample_reset_noise`), absent: zeros; `position` [3] times 0.05, 0.05, 0.01 m on the root position; `rotation` [3] times 0.1, 0.1, 0.2 rad, a rotation vector premultiplied on the root orientation (world frame); `velocity` [6] times 0.5, 0.5, 0.2 m/s and 0.52, 0.52, 0.78 rad/s on the free joint's six velocity coordinates; `joints` [29] times 0.1 rad on the joint positions in actuator order. The half-widths are the environment's |
 | `push` | `{"control", "velocity_xy"}`: a world planar velocity change (m/s); or `{"control", "force", "duration", "direction"}`: force (N) times duration (s) over the whole-body mass (`body_subtreemass[0]` of the model) along `forward`, `backward`, `left` or `right` of the pelvis yaw at that control |
 
 Every trial starts through the training reset,
 `env.reset(command_rows, noise, body_frame=body_rows)`, as a recovery start
 does: a placed lying start gives `body_row` and its uniforms, a twin of it
 gives only the same `command_row`, and a clip's first row gives that row as
-`command_row`. A push is added to the root's planar world velocity
-(`qvel[:, 0:2]`) of the state its control starts from, before that control's
-action; the action reads the history of earlier controls, so the policy sees
-the push from the next control on.
+`command_row`. The reset places the body row's positions and velocities with
+the noise, limits the joints to the soft joint range for every trial (with
+zero uniforms too, so also for a twin, a first row or a pushed trial), sets a
+zero previous action, fills the history with the first frame and stores the
+engine-normalised positions (unit quaternion). A push is added to the root's
+planar world velocity (`qvel[:, 0:2]`) of the state its control starts from,
+before that control's action; the action reads the history of earlier
+controls, so the policy sees the push from the next control on.
 
 **Termination.** `--termination recipe`: the recipe's termination ends a trial
 (pelvis height more than 0.25 m or gravity z more than 0.8 from the command
 row's, or a non-finite state). `--termination nonfinite`: only a non-finite
 state does. Neither the clip end nor an episode limit ends a trial; the
 command row holds at its clip's last row. An ended trial keeps the state it
-started its last control from: the batched step still computes it, its
-results are not used, and no other trial depends on it. Its later controls
-are unavailable.
+started its last control from, whether that control's state is finite or
+not: the batched step still computes it, its results are not used, no
+non-finite state reaches the engine again and no other trial depends on it.
+The control that ends a trial is recorded (available unless its state is
+non-finite); its later controls are unavailable, and pushes are not applied
+to it.
 
 **Record.** `description.json` holds the inputs: run directory, checkpoint,
 weights, the run's source revision (`git_commit` of its `config.json`) and
 this program's, the scene file and its content, the termination, the
 controls, the engine record of `torch_ffi.init` and the engine counters read
-after the rollouts (they include the steps of ended trials, which the batch
-still computes; per-trial counts come from the fields below), the card, the settings above, the whole-body mass and the
-library inputs of the run and of the rollout. `rollouts.npz` holds, per control
-and trial (time-major, [controls, trials, ...]; after a trial's end NaN, -1 or
-false):
+after the rollouts, the card, the settings above, the whole-body mass and the
+library inputs. The engine counters include the steps of ended trials, which
+the batch still computes; per-trial counts come from the fields below.
+`rollouts.npz` holds, per control and trial (time-major, [C controls, T
+trials, ...]; after a trial's end NaN, -1 or false):
 
-| Field | Meaning |
-| --- | --- |
-| `body_pos_w`, `body_quat_w` | the 14 tracked bodies' world positions and WXYZ orientations after the control |
-| `qpos`, `qvel` | root and joint positions (engine-normalised) and velocities after the control |
-| `frame_before`, `frame_after`, `clip_last_row` | command row before and after the control; last row of its clip |
-| `available` | the state after the control is recorded and finite |
-| `done` | the control ended the trial |
-| `termination_height`, `termination_tilt`, `termination_nonfinite` | the recipe's three termination terms, recorded in either mode |
-| `push_applied` | the control's push was applied |
-| `engine_newton_iterations`, `engine_contacts`, `engine_constraint_rows`, `engine_info_bits` | the engine's report of the control's step per environment (counts of the last substep, bits over the substeps) |
-| `engine_contact_capacity_exceeded`, `engine_row_capacity_exceeded` | contacts or constraint rows beyond the engine's capacity were dropped in the step |
+| Field | Shape, type | Meaning |
+| --- | --- | --- |
+| `body_pos_w`, `body_quat_w` | [C, T, 14, 3], [C, T, 14, 4] float32 | the 14 tracked bodies' world positions and WXYZ orientations after the control |
+| `qpos` | [C, T, 36] float32 | root and joint positions after the control (engine-normalised) |
+| `qvel` | [C, T, 35] float32 | velocities after the control: `[0:3]` the pelvis origin's world linear velocity, `[3:6]` the pelvis angular velocity in its body frame, `[6:]` the joints' |
+| `frame_before`, `frame_after`, `clip_last_row` | [C, T] int32 | command row before and after the control; last row of its clip (the clip end is `frame_after == clip_last_row`) |
+| `available` | [C, T] bool | the state after the control is recorded and finite |
+| `done` | [C, T] bool | the control ended the trial |
+| `termination_height`, `termination_tilt`, `termination_nonfinite` | [C, T] bool | the recipe's three termination terms, recorded in either mode |
+| `push_applied` | [C, T] bool | the control's push was applied |
+| `engine_newton_iterations`, `engine_contacts`, `engine_constraint_rows`, `engine_info_bits` | [C, T] int32 | the engine's report of the control's step per environment (counts of the last substep, bits over the substeps) |
+| `engine_contact_capacity_exceeded`, `engine_row_capacity_exceeded` | [C, T] bool | contacts or constraint rows beyond the engine's capacity were dropped in the step (bits 4 and 16) |
 
-and per trial `command_row`, `body_row`, `push_control` (-1 without a push),
-`push_velocity_xy` (the world velocity change applied) and the placed state
-before the first control: `start_qpos`, `start_qvel`, `start_body_pos_w`,
-`start_body_quat_w`.
+and per trial:
 
-**Against BM's tracker.** BM's placement uniforms `root_position`,
-`root_rotation`, `root_velocity` and `joint_position` are `position`,
-`rotation`, `velocity` and `joints` here, with the same half-widths and
-formulas; the half-widths are the environment's, not given by the scene. The
-reset limits the joints to the soft range for every trial, a twin included,
-where BM placed a twin at its row's reference state unchanged; and the state
-holds the engine-normalised positions (unit quaternion) from the reset on,
-where BM's placed state kept the unnormalised values until its first step.
-The history starts filled with the first frame, as at a training reset.
+| Field | Shape, type | Meaning |
+| --- | --- | --- |
+| `command_row`, `body_row` | [T] int32 | the trial's rows |
+| `push_control` | [T] int32 | the push's control, -1 without a push |
+| `push_velocity_xy` | [T, 2] float32 | the world velocity change applied, zero without one |
+| `start_qpos`, `start_qvel`, `start_body_pos_w`, `start_body_quat_w` | [T, 36], [T, 35], [T, 14, 3], [T, 14, 4] float32 | the placed state before the first control |
+
+For a push at control c, the pelvis yaw that turns a force push and the root
+velocity before the push are those of control c - 1's `qpos` and `qvel`
+(`start_qpos` and `start_qvel` for c = 0); the push adds `push_velocity_xy`
+to that velocity.
 
 ## Checks
 
@@ -345,11 +356,15 @@ window, the reset-bin mask, the log columns and the option refusals.
 engine step: a placed start equals a recovery training start at the same rows
 and noise, a twin equals an ordinary reset at the command row, the uniforms
 reach the reset by value, a push changes only its trial's planar root velocity
-from its control, the two terminations agree up to the first recipe
+from its control (a world change unturned, a force push turned by the pelvis
+yaw at its control), the record holds the stepped state of the tracked bodies,
+the clip end holds the command row without ending a trial, the height and tilt
+terms each end a trial, the two terminations agree up to the first recipe
 termination, an ended trial leaves the other trials' records bit-equal to a
-batch without it, and invalid scenes are refused. What only the engine
-establishes (its per-environment report, the normalised positions, the
-dynamics of a push) needs a GPU run.
+batch without it, and invalid scenes and environments are refused. What only
+the engine establishes (its per-environment report, the normalised positions,
+the dynamics of a push) and the program's command line beyond its parsing need
+a GPU run.
 
 `TorchTrainer` needs CUDA, so these tests do not cover the trainer's own
 wiring: the recovery starts among the collector's initial states with their

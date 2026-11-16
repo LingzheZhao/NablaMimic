@@ -1,71 +1,9 @@
-"""Closed-loop rollouts of a trained policy on NablaEngine, the training simulator (RECOVERY.md, "Reading a trained
-policy").
+"""Closed-loop rollouts of a trained policy on NablaEngine, the training simulator, for the trials of a scene file:
+placed starts, starts at a command row alone, a clip's first row, and pushes. RECOVERY.md, "Reading a trained policy",
+gives the scene file, the environment, the termination and the record.
 
   python -m nablamimic.engine_rollouts --run RUN --iter 3000 --scene scene.json --termination recipe \\
       --controls 1000 --out OUT
-
-The policy of the numbered checkpoint ``RUN/ckpt/it_N.pkl`` of a PyTorch-trainer run (``actor_ema``, the running
-average, by default; ``actor``, the weights as trained) acts deterministically (no action noise) on the trainer's
-environment, built by ``torch_train.build_environment`` for the run's ``config.json`` without the recovery setting
-(so no hidden row, recovery stop or termination masking enters a rollout), with domain randomisation off (foot
-friction 1, zero joint-encoder bias, zero torso centre-of-mass offset) and observation noise off. The policy acts as
-the trainer's collector acts: ``env.policy_obs`` (the proprioception history with the previous action, the goal
-rows and anchor orientation of the command row) into ``actor_apply`` with its goal encoder, and the step is the
-engine's step without a tape (``torch_ffi.forward``), which also reports per environment the Newton iterations of
-the last substep, the contacts, the constraint rows and the capacity bits.
-
-Scene file (JSON; unknown keys are refused at every level): ``{"trials": [TRIAL, ...]}``, one environment of one
-batch per trial. A TRIAL holds
-
-* ``command_row``: the library row the command starts from;
-* ``body_row`` (optional): the library row whose reference posture the body is placed at; absent, the body starts at
-  the command row;
-* ``reset_uniforms`` (optional): unit uniforms in [-1, 1] of the trainer's reset noise, absent meaning zeros:
-  ``position`` [3] (times 0.05, 0.05, 0.01 m on the root position), ``rotation`` [3] (times 0.1, 0.1, 0.2 rad, a
-  rotation vector premultiplied on the root orientation, world frame), ``velocity`` [6] (times 0.5, 0.5, 0.2 m/s and
-  0.52, 0.52, 0.78 rad/s on the free joint's six velocity coordinates) and ``joints`` [29] (times 0.1 rad on every
-  joint position in actuator order, then limited to the soft joint range). These are the fields ``position``,
-  ``rotation``, ``velocity`` and ``joints`` of ``TorchTrackingEnv.sample_reset_noise``; BM's placement uniforms
-  ``root_position``, ``root_rotation``, ``root_velocity`` and ``joint_position`` map onto them in that order with the
-  same half-widths and formulas;
-* ``push`` (optional): ``{"control": C, "velocity_xy": [VX, VY]}``, a world planar velocity change in m/s, or
-  ``{"control": C, "force": F, "duration": T, "direction": D}``, the change F * T / M (N, s; M the whole-body mass,
-  the MuJoCo model's ``body_subtreemass[0]``) along D (forward, backward, left or right) in the pelvis yaw frame at
-  control C. The change is added to the root's planar world velocity ``qvel[:, 0:2]`` of the state control C starts
-  from, before its action is computed; the action reads the history of earlier controls, so the policy first sees the
-  push in the control after it.
-
-Every trial starts through the environment's one reset, ``env.reset(command_rows, noise, body_frame=body_rows)``, the
-call recovery training's starts use: the body row's positions and velocities with the noise, joints limited to the
-soft range (with zero uniforms too), a zero previous action, the history filled with the first frame, the command at
-the command row, the engine-normalised positions. A trial runs until ``--controls`` controls or its end: with
-``--termination recipe`` the recipe's termination (pelvis height more than 0.25 m or gravity z more than 0.8 from the
-command row's, or a non-finite state), with ``--termination nonfinite`` a non-finite state only. Neither the clip end
-nor an episode limit ends a trial: the command row holds at its clip's last row. An ended trial keeps the state it
-started its last control from, so it never moves again and no non-finite value reaches the engine again; the batched
-step still computes it, and the other trials do not depend on it. The control that ends a trial is recorded (it is
-available unless its state is non-finite); its later controls are unavailable, with NaN, -1 or false in every field.
-
-Output directory (must not exist): ``description.json`` (the inputs: run, checkpoint, weights, the run's source
-revision, the scene file and its content, the engine record and the counters read after the rollouts, the card,
-the settings; the counters include the steps of ended trials, which the batch still computes, so per-trial counts
-come from the fields below) and ``rollouts.npz``, per control and trial (time-major, [controls, trials, ...]):
-
-* ``body_pos_w`` [C, T, 14, 3], ``body_quat_w`` [C, T, 14, 4] (WXYZ): the tracked bodies' world positions and
-  orientations after the control; ``qpos`` [C, T, 36], ``qvel`` [C, T, 35]: the root and joint state after it;
-* ``frame_before``, ``frame_after``, ``clip_last_row`` [C, T] int32: the command row before and after the control and
-  the last row of its clip;
-* ``available``, ``done``, ``termination_height``, ``termination_tilt``, ``termination_nonfinite`` [C, T] bool: the
-  state after the control is recorded and finite; the control ended the trial; the recipe's three termination terms
-  (recorded in either mode);
-* ``push_applied`` [C, T] bool;
-* ``engine_newton_iterations``, ``engine_contacts``, ``engine_constraint_rows``, ``engine_info_bits`` [C, T] int32 and
-  ``engine_contact_capacity_exceeded``, ``engine_row_capacity_exceeded`` [C, T] bool: the engine's report of the
-  control's step (the counts of the last substep, the bits over all substeps);
-
-and per trial: ``command_row``, ``body_row``, ``push_control`` (-1 without a push) [T] int32, ``push_velocity_xy``
-[T, 2] (the world velocity change applied, zero without one), and the placed state before the first control:
-``start_qpos`` [T, 36], ``start_qvel`` [T, 35], ``start_body_pos_w`` [T, 14, 3], ``start_body_quat_w`` [T, 14, 4].
 """
 
 import argparse
@@ -88,6 +26,7 @@ DIRECTIONS = dict(forward=(1.0, 0.0), backward=(-1.0, 0.0), left=(0.0, 1.0), rig
 TRIAL_KEYS = {"command_row", "body_row", "reset_uniforms", "push"}
 PUSH_KEYS = ({"control", "velocity_xy"}, {"control", "force", "duration", "direction"})
 OVERFLOW_CONTACTS, OVERFLOW_ROWS = 4, 16  # torch_ffi's bits of info[:, 3]
+LIBRARY_INPUTS = ("LAFAN1_G1_DIR", "MOTION_CACHE_DIR", "MENAGERIE_DIR")
 
 
 class TapeFreeStep:
@@ -126,10 +65,10 @@ def _positive(value, what):
 
 
 def trial_inputs(scene, env, controls):
-    """The tensors of a scene document (module docstring): command and body rows [T], the reset noise {name: [T, n]},
-    the push controls [T] (-1 without a push), the world velocity changes [T, 2] and the changes in the pelvis yaw
-    frame [T, 2]. Unknown keys, rows outside the library, uniforms outside [-1, 1] and push controls outside the
-    rollout are refused."""
+    """The inputs of ``controls`` controls for the trials of a scene document (RECOVERY.md, "Reading a trained
+    policy"): command and body rows [T], the reset noise {name: [T, n]}, the push controls [T] (-1 without a push),
+    the world velocity changes [T, 2] and the changes in the pelvis yaw frame [T, 2]. Unknown keys, rows outside the
+    library, uniforms outside [-1, 1] and push controls outside the rollout are refused."""
     if not isinstance(scene, dict) or set(scene) != {"trials"} or not isinstance(scene["trials"], list) \
             or not scene["trials"]:
         raise ValueError(f"a scene is {{'trials': [trial, ...]}} with at least one trial, got keys "
@@ -178,7 +117,7 @@ def trial_inputs(scene, env, controls):
 
     def tensor(values, dtype=torch.float32):
         return torch.tensor(values, dtype=dtype, device=env.device)
-    return dict(command=tensor(command, torch.int32), body=tensor(body, torch.int32),
+    return dict(controls=controls, command=tensor(command, torch.int32), body=tensor(body, torch.int32),
                 noise={name: tensor(values) for name, values in noise.items()},
                 push_control=tensor(push_control, torch.int32), push_world=tensor(world),
                 push_heading_frame=tensor(heading_frame))
@@ -190,30 +129,30 @@ def after_end(ended, value):
     return torch.where(ended.reshape(ended.shape + (1,)*(value.ndim - 1)), missing, value)
 
 
-def place(env, inputs):
-    """The trials' start: the environment's reset at the command rows with the body at the body rows and the noise."""
-    return env.reset(inputs["command"], inputs["noise"], body_frame=inputs["body"])
-
-
-def rollout(env, actor, scene, controls, termination):
-    """The records (module docstring) of ``controls`` deterministic controls of ``actor`` from the trials of ``scene``
-    on ``env``, whose step is a ``TapeFreeStep``, with the trial end ``termination`` (recipe or nonfinite)."""
+def rollout(env, actor, inputs, termination):
+    """The records (RECOVERY.md, "Reading a trained policy") of the deterministic controls of ``actor`` for the trial
+    ``inputs`` of ``trial_inputs`` on ``env``, whose step is a ``TapeFreeStep``, with the trial end ``termination``
+    (recipe or nonfinite)."""
     if termination not in TERMINATIONS:
         raise ValueError(f"termination {termination!r} is not one of {TERMINATIONS}")
     if env.recovery is not None:
         raise ValueError("rollouts read the environment without the recovery setting")
     if not isinstance(env.engine_step, TapeFreeStep):
         raise ValueError("rollouts need the tape-free engine step that reports per-environment info")
-    inputs = trial_inputs(scene, env, controls)
+    if not env.cfg.reset_noise or env.cfg.dr or env.cfg.obs_noise:
+        raise ValueError(f"rollouts read the environment with reset noise on and domain randomisation and observation "
+                         f"noise off, got reset_noise={env.cfg.reset_noise}, dr={env.cfg.dr}, "
+                         f"obs_noise={env.cfg.obs_noise}")
     with torch.no_grad():
-        state = place(env, inputs)
+        # Every trial starts through the reset of recovery training's starts.
+        state = env.reset(inputs["command"], inputs["noise"], body_frame=inputs["body"])
         count = state["frame"].shape[0]
         ended = torch.zeros(count, dtype=torch.bool, device=env.device)
         applied_velocity = torch.zeros((count, 2), device=env.device)
         rows = []
         start = dict(start_qpos=state["qpos"], start_qvel=state["qvel"],
                      start_body_pos_w=state["xpos"][:, env.body_ids], start_body_quat_w=state["xquat"][:, env.body_ids])
-        for control in range(controls):
+        for control in range(inputs["controls"]):
             pushed = (inputs["push_control"] == control) & ~ended
             yaw = recovery.heading(state["qpos"][:, 3:7])
             cos, sin = torch.cos(yaw), torch.sin(yaw)
@@ -264,7 +203,7 @@ def build_parser():
     parser.add_argument("--scene", type=Path, required=True, help="scene file (JSON) of the trials")
     parser.add_argument("--termination", choices=TERMINATIONS, required=True,
                         help="recipe: the recipe's termination ends a trial; nonfinite: only a non-finite state does")
-    parser.add_argument("--controls", type=int, required=True, help="controls per trial (50 per second)")
+    parser.add_argument("--controls", type=int, required=True, help="controls per trial")
     parser.add_argument("--out", type=Path, required=True, help="output directory; must not exist")
     return parser
 
@@ -280,7 +219,14 @@ def main(argv=None):
     config = json.loads((args.run/"config.json").read_text())
     if config.get("training_framework") != "torch":
         raise ValueError(f"{args.run} is not a run of the PyTorch trainer (torch_train)")
-    with (args.run/"ckpt"/f"it_{args.iter:06d}.pkl").open("rb") as handle:
+    # The scene's rows index the motion library, which these variables locate.
+    library_inputs = {key: os.environ.get(key) for key in LIBRARY_INPUTS}
+    differing = [key for key in LIBRARY_INPUTS if config["inputs"].get(key) != library_inputs[key]]
+    if differing:
+        raise ValueError("the motion library inputs differ from the run's: " + "; ".join(
+            f"{key} {library_inputs[key]!r} here, {config['inputs'].get(key)!r} in the run" for key in differing))
+    checkpoint_path = args.run/"ckpt"/f"it_{args.iter:06d}.pkl"
+    with checkpoint_path.open("rb") as handle:
         checkpoint = pickle.load(handle)
     if args.actor_key not in checkpoint:
         raise ValueError(f"checkpoint it_{args.iter:06d} holds no {args.actor_key}")
@@ -290,14 +236,15 @@ def main(argv=None):
         raise ValueError("Declared committed source revision required")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("Exactly one provisioned CUDA device required")
-    args.out.mkdir(parents=True, exist_ok=False)
     precision = configure_matmul_precision(config["matmul_precision"])
     env = build_environment(argparse.Namespace(**config), step_fn=TapeFreeStep(torch_ffi.forward), dr=False,
                             obs_noise=False, reset_noise=True)
+    inputs = trial_inputs(scene, env, args.controls)
     engine = torch_ffi.init(model=env.m, foot_pairs=np.asarray(env.foot_pairs), device=env.device)
     actor = nets.tree_from_jax(checkpoint[args.actor_key], env.device)
+    args.out.mkdir(parents=True, exist_ok=False)
     description = dict(
-        run=str(args.run.resolve()), checkpoint=str((args.run/"ckpt"/f"it_{args.iter:06d}.pkl").resolve()),
+        run=str(args.run.resolve()), checkpoint=str(checkpoint_path.resolve()),
         completed_updates=checkpoint["completed_updates"], actor_key=args.actor_key,
         run_source_revision=config["git_commit"], run_engine=config.get("engine"), run_gpu=config.get("gpu"),
         source_revision=code, scene=str(args.scene.resolve()), scene_content=scene, termination=args.termination,
@@ -311,16 +258,14 @@ def main(argv=None):
             observation_noise="off", actions="deterministic: the actor's output without action noise",
             reset_noise="the scene's unit uniforms (zero where absent); joints limited to the soft range",
             term_height=env.cfg.term_height, term_tilt=env.cfg.term_tilt,
-            whole_body_mass_kg=float(env.m.body_subtreemass[0]), run_inputs=config.get("inputs"),
-            inputs={key: os.environ.get(key) for key in ("LAFAN1_G1_DIR", "MOTION_CACHE_DIR", "MENAGERIE_DIR")}))
+            whole_body_mass_kg=float(env.m.body_subtreemass[0]), inputs=library_inputs))
     write_json(args.out/"description.json", description)
     torch_ffi.read_diagnostics(reset=True)
-    records = rollout(env, actor, scene, args.controls, args.termination)
+    records = rollout(env, actor, inputs, args.termination)
     description["engine_diagnostics"] = torch_ffi.read_diagnostics(reset=True)
     write_json(args.out/"description.json", description)
     with (args.out/"rollouts.npz").open("xb") as handle:
         np.savez(handle, **records)
-
 
 if __name__ == "__main__":
     main()

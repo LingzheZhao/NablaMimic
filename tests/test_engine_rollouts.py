@@ -2,12 +2,14 @@
 no assets, simulator, GPU or stored outputs.
 
 Library (clips in this order): getup (80 rows: rows 0-29 lying at pelvis height 0.2 m, pitched 90 degrees about y,
-rows 30-79 upright at 0.55 m), sway (40 upright rows at 0.66 m) and walk (300 upright rows at 0.78 m, moving along x;
-its row 10 holds joint 0 at 1.5 rad, outside the soft range of +-1 rad). The stand-in forward moves every joint halfway
-to its setpoint and keeps the root, except that a pelvis below 0.7 m sinks by 0.04 m per control and a state whose
-pelvis would be below 0.28 m turns non-finite; it reports contacts beyond capacity for a pelvis below 0.6 m. A body
-placed at a sway row under a walk command therefore leaves the recipe's 0.25 m height threshold at control 3 and turns
-non-finite at control 9; a body placed at a lying row turns non-finite at control 0."""
+rows 30-79 upright at 0.55 m), sway (40 upright rows at 0.66 m), walk (300 upright rows at 0.78 m, moving along x; its
+row 10 holds joint 0 at 1.5 rad, outside the soft range of +-1 rad) and tilted (20 rows pitched like the lying rows at
+0.78 m). The model has 16 bodies, of which bodies 2 to 15 are tracked. The stand-in forward moves every joint halfway to
+its setpoint, turns the root by 0.05 rad of yaw and keeps its position, except that a pelvis below 0.7 m sinks by
+0.04 m per control and a state whose pelvis would be below 0.28 m turns non-finite; it reports contacts beyond capacity
+for a pelvis below 0.6 m. A body placed at a sway row under a walk command therefore leaves the recipe's 0.25 m height
+threshold at control 3 and turns non-finite at control 9; a body placed at a lying row turns non-finite at control 0;
+an upright body under a tilted command leaves the recipe's 0.8 gravity-z threshold at control 0 at the same height."""
 
 import importlib.util
 import math
@@ -25,12 +27,14 @@ from nablamimic.recovery import RecoverySettings
 from nablamimic.torch_env import TorchTrackingEnv, quat_mul, quat_rotate
 from nablamimic.torch_train import ResetSampler
 
-CLIPS = (("getup", 80), ("sway", 40), ("walk", 300))
-SWAY, WALK = 80, 120  # first rows of sway and walk
+CLIPS = (("getup", 80), ("sway", 40), ("walk", 300), ("tilted", 20))
+SWAY, WALK, TILTED = 80, 120, 420  # first rows of sway, walk and tilted
 LYING = (math.cos(math.pi/4), 0.0, math.sin(math.pi/4), 0.0)
-BODIES = 14
+BODIES = 16
+TRACKED = np.arange(2, BODIES)
 OFFSETS = torch.zeros((BODIES, 3))
 OFFSETS[:, 0] = torch.arange(BODIES)*0.1
+TURN = torch.tensor([math.cos(0.025), 0.0, 0.0, math.sin(0.025)])
 MASS = 40.0
 PER_TRIAL = ("command_row", "body_row", "push_control", "push_velocity_xy", "start_qpos", "start_qvel",
              "start_body_pos_w", "start_body_quat_w")
@@ -55,7 +59,8 @@ class SinkingForward:
         assert flags == dict(tape=False, kinematics=True)
         self.nonfinite_inputs += int(not (torch.isfinite(q).all() and torch.isfinite(v).all()))
         height = torch.where(q[:, 2] < 0.7, q[:, 2]-0.04, q[:, 2])
-        qn = torch.cat((q[:, :2], height[:, None], q[:, 3:7], 0.5*q[:, 7:]+0.5*ctrl), -1)
+        turned = quat_mul(TURN.expand(len(q), 4), q[:, 3:7])
+        qn = torch.cat((q[:, :2], height[:, None], turned, 0.5*q[:, 7:]+0.5*ctrl), -1)
         broken = height < 0.28
         qn = torch.where(broken[:, None], float("nan"), qn)
         v = torch.where(broken[:, None], float("nan"), v)
@@ -65,7 +70,7 @@ class SinkingForward:
         return (qn, v, warm, info, *kinematics(qn, v, com))
 
 
-def reference(*, noise):
+def reference(**settings):
     qpos = []
     for name, rows in CLIPS:
         q = np.zeros((rows, 36), np.float32)
@@ -76,44 +81,57 @@ def reference(*, noise):
             q[:30, 3:7] = LYING
         elif name == "sway":
             q[:, 2] = 0.66
-        else:
+        elif name == "walk":
             q[:, 2] = 0.78
             q[:, 0] = 0.01*np.arange(rows)
+        else:
+            q[:, 2] = 0.78
+            q[:, 3:7] = LYING
         qpos.append(q)
     qpos = np.concatenate(qpos)
     frames = len(qpos)
     qpos[:, 7:] = 0.05*np.sin(0.1*np.arange(frames)[:, None]+np.arange(29)[None])
     qpos[WALK+10, 7] = 1.5
     quaternion = torch.from_numpy(qpos[:, 3:7])
-    positions = (torch.from_numpy(qpos[:, None, :3])+quat_rotate(OFFSETS[None], quaternion[:, None])).numpy()
+    positions = (torch.from_numpy(qpos[:, None, :3])
+                 + quat_rotate(OFFSETS[TRACKED][None], quaternion[:, None])).numpy()
     starts = np.cumsum([0]+[rows for _, rows in CLIPS[:-1]])
     last = np.concatenate([np.full(rows, start+rows-1) for (_, rows), start in zip(CLIPS, starts)])
-    cfg = SimpleNamespace(residual_action=False, action_rate_space="setpoint", solver_iterations=10, dr=noise,
-                          obs_noise=noise, reset_noise=True, term_height=0.25, term_tilt=0.8)
+    cfg = SimpleNamespace(residual_action=False, action_rate_space="setpoint", solver_iterations=10, term_height=0.25,
+                          term_tilt=0.8, **settings)
     return SimpleNamespace(
         m=SimpleNamespace(nq=36, nv=35, nu=29, body_subtreemass=np.array([MASS, 30.0])), cfg=cfg, nu=29,
         q0=np.zeros(29), action_scale=np.full(29, 0.5), ctrl_lo=np.full(29, -2), ctrl_hi=np.full(29, 2),
-        soft_lo=np.full(29, -1), soft_hi=np.full(29, 1), body_ids=np.arange(BODIES), anchor_k=1, torso_id=1,
+        soft_lo=np.full(29, -1), soft_hi=np.full(29, 1), body_ids=TRACKED, anchor_k=1, torso_id=TRACKED[1],
         root_com_id=0, foot_pairs=np.array([0, 1]), starts=starts, lengths=np.array([rows for _, rows in CLIPS]),
         names=[name for name, _ in CLIPS], ref_qpos=qpos, ref_qvel=np.zeros((frames, 35), np.float32),
-        ref_body_pos=positions, ref_body_quat=np.repeat(qpos[:, None, 3:7], BODIES, 1),
-        ref_body_lin=np.zeros((frames, BODIES, 3)), ref_body_ang=np.zeros((frames, BODIES, 3)), ref_last=last,
+        ref_body_pos=positions, ref_body_quat=np.repeat(qpos[:, None, 3:7], len(TRACKED), 1),
+        ref_body_lin=np.zeros((frames, len(TRACKED), 3)), ref_body_ang=np.zeros((frames, len(TRACKED), 3)),
+        ref_last=last,
         goal_feat=np.random.default_rng(0).normal(size=(frames, 68)).astype(np.float32))
+
+
+def environment(step_fn, recovery=None, dr=False, obs_noise=False, reset_noise=True):
+    return TorchTrackingEnv.from_reference(reference(dr=dr, obs_noise=obs_noise, reset_noise=reset_noise), device="cpu",
+                                           step_fn=step_fn, kinematics_fn=kinematics, recovery=recovery)
 
 
 def rollout_environment():
     """The environment as engine_rollouts builds it: no recovery setting, no randomisation or observation noise, reset
     noise from the scene, the tape-free step."""
     forward = SinkingForward()
-    env = TorchTrackingEnv.from_reference(reference(noise=False), device="cpu",
-                                          step_fn=rollouts.TapeFreeStep(forward), kinematics_fn=kinematics)
-    return env, forward
+    return environment(rollouts.TapeFreeStep(forward)), forward
 
 
 def training_environment(recovery):
     """The environment as training builds it: randomisation, observation and reset noise."""
-    return TorchTrackingEnv.from_reference(reference(noise=True), device="cpu", step_fn=SinkingForward(),
-                                           kinematics_fn=kinematics, recovery=recovery)
+    return environment(SinkingForward(), recovery, dr=True, obs_noise=True)
+
+
+def recovery_settings():
+    return RecoverySettings(share=0.5, hidden_clips=("getup",), command_excluded_clips=("getup", "sway"),
+                            low_pelvis_height=0.5, low_pelvis_up_z=0.5, upright_run_rows=10, longest_span_rows=60,
+                            command_upright_rows=20, reward_scale=2.5, stop_controls=100, blend_controls=75)
 
 
 def actor():
@@ -129,7 +147,7 @@ def actor():
 
 def run(trials, controls, termination="recipe"):
     env, forward = rollout_environment()
-    records = rollouts.rollout(env, actor(), {"trials": trials}, controls, termination)
+    records = rollouts.rollout(env, actor(), rollouts.trial_inputs({"trials": trials}, env, controls), termination)
     return records, forward
 
 
@@ -141,12 +159,19 @@ def walk(row, **trial):
     return {"command_row": WALK+row, **trial}
 
 
+def assert_start(test, records, state):
+    """The records' placed state is ``state``."""
+    tracked = torch.as_tensor(TRACKED)
+    for key, value in (("start_qpos", state["qpos"]), ("start_qvel", state["qvel"]),
+                       ("start_body_pos_w", state["xpos"][:, tracked]),
+                       ("start_body_quat_w", state["xquat"][:, tracked]), ("frame_before", state["frame"])):
+        recorded = records[key][0] if key == "frame_before" else records[key]
+        test.assertTrue(np.array_equal(recorded, value.numpy()), key)
+
+
 class PlacementTest(unittest.TestCase):
     def test_a_placed_start_is_the_body_of_a_recovery_training_start_at_the_same_rows_and_noise(self):
-        settings = RecoverySettings(share=0.5, hidden_clips=("getup",), command_excluded_clips=("getup", "sway"),
-                                    low_pelvis_height=0.5, low_pelvis_up_z=0.5, upright_run_rows=10,
-                                    longest_span_rows=60, command_upright_rows=20, reward_scale=2.5,
-                                    stop_controls=100, blend_controls=75)
+        settings = recovery_settings()
         training = training_environment(settings)
         sampler = ResetSampler(training, 500, .99)
         torch.manual_seed(3)
@@ -162,12 +187,8 @@ class PlacementTest(unittest.TestCase):
         command_rows, body_rows = torch.where(chosen, command, frames), torch.where(chosen, start, frames)
         trials = [{"command_row": int(command_rows[i]), "body_row": int(body_rows[i]),
                    "reset_uniforms": {name: noise[name][i].tolist() for name in rollouts.UNIFORMS}} for i in range(64)]
-        env, _ = rollout_environment()
-        placed = rollouts.place(env, rollouts.trial_inputs({"trials": trials}, env, 1))
-        for key in ("qpos", "qvel", "xpos", "xquat", "frame"):
-            self.assertTrue(torch.equal(placed[key], started[key]), key)
-        self.assertTrue(bool((placed["friction"] == 1).all() and (placed["enc_bias"] == 0).all()
-                             and (placed["com"] == 0).all()))
+        records, _ = run(trials, 1)
+        assert_start(self, records, started)
 
     def test_a_twin_is_an_ordinary_reset_at_the_command_row_without_noise(self):
         training = training_environment(None)
@@ -176,22 +197,21 @@ class PlacementTest(unittest.TestCase):
             noise[name] = torch.zeros_like(noise[name])
         rows = torch.tensor([WALK+10, WALK+40], dtype=torch.int32)
         ordinary = training.reset(rows, noise)
-        env, _ = rollout_environment()
-        twin = rollouts.place(env, rollouts.trial_inputs({"trials": [walk(10), walk(40)]}, env, 1))
-        for key in ("qpos", "qvel", "xpos", "xquat", "frame"):
-            self.assertTrue(torch.equal(twin[key], ordinary[key]), key)
+        records, _ = run([walk(10), walk(40)], 1)
+        assert_start(self, records, ordinary)
         # The root is the command row's; the joints are limited to the soft range as at every reset.
-        reference_qpos = env.ref_qpos[rows.long()]
-        self.assertTrue(torch.equal(twin["qpos"][:, :7], reference_qpos[:, :7]))
-        self.assertEqual(float(twin["qpos"][0, 7]), 1.0)
-        self.assertTrue(torch.equal(twin["qpos"][0, 8:], reference_qpos[0, 8:]))
-        self.assertTrue(torch.equal(twin["qpos"][1, 7:], reference_qpos[1, 7:]))
+        twin = records["start_qpos"]
+        reference_qpos = training.ref_qpos[rows.long()].numpy()
+        self.assertTrue(np.array_equal(twin[:, :7], reference_qpos[:, :7]))
+        self.assertEqual(float(twin[0, 7]), 1.0)
+        self.assertTrue(np.array_equal(twin[0, 8:], reference_qpos[0, 8:]))
+        self.assertTrue(np.array_equal(twin[1, 7:], reference_qpos[1, 7:]))
 
     def test_the_reset_uniforms_map_onto_the_reset_noise_by_value(self):
         uniforms = dict(position=[1.0, -1.0, 0.5], rotation=[0.0, 0.0, 1.0],
                         velocity=[1.0, 0.0, -1.0, 0.5, 0.0, 1.0], joints=[1.0, -0.5]+[0.0]*27)
         records, _ = run([walk(40, body_row=SWAY+5, reset_uniforms=uniforms)], 1)
-        body = torch.from_numpy(reference(noise=False).ref_qpos[SWAY+5])
+        body = torch.from_numpy(reference().ref_qpos[SWAY+5])
         qpos, qvel = torch.from_numpy(records["start_qpos"][0]), torch.from_numpy(records["start_qvel"][0])
         torch.testing.assert_close(qpos[:3], body[:3]+torch.tensor([0.05, -0.05, 0.005]))
         torch.testing.assert_close(qpos[3:7], quat_mul(torch.tensor([math.cos(0.1), 0, 0, math.sin(0.1)]), body[3:7]))
@@ -205,13 +225,14 @@ class PlacementTest(unittest.TestCase):
 class PushTest(unittest.TestCase):
     def test_a_push_changes_only_its_trial_s_planar_root_velocity_and_only_from_its_control(self):
         turned = dict(position=[0.0]*3, rotation=[0.0, 0.0, 1.0], velocity=[0.0]*6, joints=[0.0]*29)
-        trials = [walk(0), walk(30), walk(60, reset_uniforms=turned)]
+        trials = [walk(0), walk(30, reset_uniforms=turned), walk(60, reset_uniforms=turned)]
         plain, _ = run(trials, 8)
         trials[1]["push"] = {"control": 3, "velocity_xy": [0.4, -0.2]}
         trials[2]["push"] = {"control": 5, "force": 100.0, "duration": 0.2, "direction": "left"}
         pushed, _ = run(trials, 8)
-        # 100 N for 0.2 s on 40 kg is 0.5 m/s to the left of the pelvis, whose yaw is 0.2 rad.
-        left = torch.tensor([-math.sin(0.2), math.cos(0.2)])*0.5
+        # A world change is not turned by the pelvis yaw. 100 N for 0.2 s on 40 kg is 0.5 m/s to the left of the
+        # pelvis, whose yaw at control 5 is the start's 0.2 rad and five turns of 0.05 rad.
+        left = torch.tensor([-math.sin(0.45), math.cos(0.45)])*0.5
         torch.testing.assert_close(torch.from_numpy(pushed["push_velocity_xy"][2]), left)
         self.assertTrue(np.array_equal(pushed["push_velocity_xy"][:2], np.float32([[0.0, 0.0], [0.4, -0.2]])))
         self.assertEqual(pushed["push_control"].tolist(), [-1, 3, 5])
@@ -252,6 +273,25 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(records["frame_before"][:, 0].tolist(), list(range(WALK, WALK+4)))
         self.assertEqual(records["frame_after"][:, 0].tolist(), list(range(WALK+1, WALK+5)))
         self.assertTrue((records["clip_last_row"] == WALK+299).all())
+        # The tracked bodies (2 to 15) of the placed state: the walk row's root at the origin, unturned.
+        offsets = 0.1*TRACKED.astype(np.float32)
+        np.testing.assert_allclose(records["start_body_pos_w"][0, :, 0], offsets, atol=1e-6, rtol=0)
+        np.testing.assert_allclose(records["start_body_quat_w"][0], np.tile([1.0, 0.0, 0.0, 0.0], (14, 1)), atol=1e-6)
+        # After the control the state is the stepped one: the sway body sank from 0.66 to 0.62 m, and the walk body
+        # turned by 0.05 rad.
+        np.testing.assert_allclose(records["start_qpos"][1, 2], 0.66, atol=1e-6)
+        np.testing.assert_allclose(records["qpos"][0, 1, 2], 0.62, atol=1e-6)
+        np.testing.assert_allclose(records["body_pos_w"][0, 1, :, 2], np.full(14, 0.62), atol=1e-6)
+        np.testing.assert_allclose(records["body_pos_w"][0, 0, :, 0], offsets*math.cos(0.05), atol=1e-6)
+        np.testing.assert_allclose(records["body_quat_w"][0, 0], np.tile(TURN.numpy(), (14, 1)), atol=1e-6)
+
+    def test_the_clip_end_holds_the_command_at_its_last_row_and_ends_no_trial(self):
+        records, _ = run([walk(295)], 10)
+        self.assertEqual(records["frame_after"][:, 0].tolist(), [WALK+296, WALK+297, WALK+298]+[WALK+299]*7)
+        self.assertEqual(records["frame_before"][4:, 0].tolist(), [WALK+299]*6)
+        self.assertTrue((records["clip_last_row"] == WALK+299).all())
+        self.assertFalse(records["done"].any())
+        self.assertTrue(records["available"].all())
 
 
 class TerminationTest(unittest.TestCase):
@@ -275,6 +315,10 @@ class TerminationTest(unittest.TestCase):
         self.assertTrue(np.isnan(recipe["qpos"][first+1:, 1]).all())
         self.assertTrue((recipe["frame_after"][first+1:, 1] == -1).all())
         self.assertEqual(np.flatnonzero(nonfinite["done"][:, 1]).tolist(), [9])
+        # The ending control records the stepped state, non-finite here, not the finite state it started from.
+        for key in ("qpos", "qvel", "body_pos_w", "body_quat_w"):
+            self.assertTrue(np.isnan(nonfinite[key][9, 1]).all(), key)
+            self.assertTrue(np.isfinite(nonfinite[key][8, 1]).all(), key)
         self.assertEqual(nonfinite["available"][:, 1].tolist(), [True]*9+[False]*3)
         self.assertTrue(bool(nonfinite["termination_nonfinite"][9, 1]))
         self.assertEqual(nonfinite["frame_after"][:9, 1].tolist(), list(range(WALK+41, WALK+50)))
@@ -283,6 +327,18 @@ class TerminationTest(unittest.TestCase):
         self.assertFalse(nonfinite["engine_row_capacity_exceeded"].any())
         self.assertTrue((nonfinite["engine_contacts"][:, 0] == 8).all())
         self.assertTrue((nonfinite["engine_newton_iterations"][:, 0] == 10).all())
+
+    def test_a_tilt_beyond_the_threshold_ends_a_trial_under_the_recipe_only(self):
+        tilted = [{"command_row": TILTED, "body_row": WALK}]
+        recipe, _ = run(tilted, 3, "recipe")
+        self.assertEqual(recipe["done"][:, 0].tolist(), [True, False, False])
+        self.assertTrue(bool(recipe["termination_tilt"][0, 0]))
+        self.assertFalse(bool(recipe["termination_height"][0, 0]))
+        self.assertEqual(recipe["available"][:, 0].tolist(), [True, False, False])
+        nonfinite, _ = run(tilted, 3, "nonfinite")
+        self.assertFalse(nonfinite["done"].any())
+        self.assertTrue(nonfinite["available"].all() and nonfinite["termination_tilt"].all())
+        self.assertFalse(nonfinite["termination_height"].any())
 
     def test_an_ended_trial_leaves_the_other_trials_records_bit_equal_to_a_batch_without_it(self):
         others = [walk(0), walk(70, reset_uniforms=dict(position=[0.2, -0.3, 0.1], rotation=[0.5, 0.0, -1.0],
@@ -313,7 +369,7 @@ class SceneTest(unittest.TestCase):
             no_trials={"trials": []},
             trial_key={"trials": [walk(0, body=3)]},
             no_command={"trials": [{"body_row": 3}]},
-            row_beyond={"trials": [{"command_row": 420}]},
+            row_beyond={"trials": [{"command_row": 440}]},
             negative_row={"trials": [walk(0, body_row=-1)]},
             boolean_row={"trials": [{"command_row": True}]},
             uniform_key={"trials": [walk(0, reset_uniforms={**uniforms, "friction": [0.0]})]},
@@ -332,18 +388,22 @@ class SceneTest(unittest.TestCase):
             with self.subTest(name), self.assertRaises(ValueError):
                 rollouts.trial_inputs(scene, env, 5)
 
-    def test_rollouts_refuse_the_recovery_setting_an_engine_step_without_its_report_and_unknown_terminations(self):
+    def test_rollouts_refuse_unknown_terminations_and_environments_other_than_the_rollout_environment(self):
         env, _ = rollout_environment()
-        scene = {"trials": [walk(0)]}
-        with self.assertRaises(ValueError):
-            rollouts.rollout(env, actor(), scene, 2, "fall")
-        settings = RecoverySettings(share=0.5, hidden_clips=("getup",), command_excluded_clips=("getup", "sway"),
-                                    low_pelvis_height=0.5, low_pelvis_up_z=0.5, upright_run_rows=10,
-                                    longest_span_rows=60, command_upright_rows=20, reward_scale=2.5,
-                                    stop_controls=100, blend_controls=75)
-        for wrong in (training_environment(settings), training_environment(None)):
-            with self.subTest(recovery=wrong.recovery is not None), self.assertRaises(ValueError):
-                rollouts.rollout(wrong, actor(), scene, 2, "recipe")
+        inputs = rollouts.trial_inputs({"trials": [walk(0)]}, env, 2)
+        with self.assertRaisesRegex(ValueError, "termination 'fall'"):
+            rollouts.rollout(env, actor(), inputs, "fall")
+        # Each environment differs from the rollout environment in one property.
+        settings = "reset noise on and domain randomisation and observation noise off"
+        cases = dict(
+            recovery=(environment(rollouts.TapeFreeStep(SinkingForward()), recovery_settings()), "recovery setting"),
+            step_without_report=(environment(SinkingForward()), "tape-free engine step"),
+            randomisation=(environment(rollouts.TapeFreeStep(SinkingForward()), dr=True), settings),
+            observation_noise=(environment(rollouts.TapeFreeStep(SinkingForward()), obs_noise=True), settings),
+            no_reset_noise=(environment(rollouts.TapeFreeStep(SinkingForward()), reset_noise=False), settings))
+        for name, (wrong, message) in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                rollouts.rollout(wrong, actor(), inputs, "recipe")
 
     def test_the_command_line_takes_the_run_checkpoint_weights_scene_termination_controls_and_output(self):
         args = rollouts.build_parser().parse_args(["--run", "RUN", "--iter", "3000", "--scene", "scene.json",
