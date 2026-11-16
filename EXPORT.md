@@ -26,10 +26,12 @@ argument parser of `torch_train.py`. Compiling the model needs the JAX and
 MuJoCo packages for either trainer.
 
 Either run must be on one device and one process, must not be resumed, and must
-not use the SHAC guard (`--shac-strict`, the update rule and gradient guard of
-SHAC, which halts training at an exploding actor gradient). Only numbered checkpoints `RUN/ckpt/it_N.pkl` are read;
-`params.pkl` is saved at a different point of the update loop and is not an
-input. A run directory holding `DIVERGED` or `HALTED` is refused.
+not use `--shac-strict`, which applies the update rule and gradient guard of
+SHAC and halts training at an exploding actor gradient.
+
+Only numbered checkpoints `RUN/ckpt/it_N.pkl` are read; `params.pkl` is saved
+at a different point of the update loop and is not an input. A run directory
+holding `DIVERGED` or `HALTED` is refused.
 
 ### train.py runs
 
@@ -44,7 +46,8 @@ input. A run directory holding `DIVERGED` or `HALTED` is refused.
   N averaging updates at checkpoint N; with `actor_ema = 0` it must not hold
   one. The declaration records these derived counts and the configured decay
   and warmup. `configs/ours.args` uses decay 0.999 with warmup (from
-  `configs/base/ours.args`).
+  `configs/base/ours.args`): the decay after n averaging updates is
+  min(0.999, (1 + n) / (10 + n)).
 - The checkpoint fields must be exactly those `train.py` writes for the
   configuration: `actor`, `critic`, `cnorm`, `st_a`, `st_c`, `bin_q`, `iter`,
   `wall_s` and `env_steps`, with `st_r` for the action-target optimizer and
