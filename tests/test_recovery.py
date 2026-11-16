@@ -23,8 +23,8 @@ import torch
 
 from nablamimic import torch_nets as nets
 from nablamimic.params import read_params
-from nablamimic.recovery import (BLEND, RECOVERY, TRACKING, RecoverySettings, get_up_last_rows, regime,
-                                 upright_ahead, upright_run_lengths)
+from nablamimic.recovery import (BLEND, RECOVERY, TRACKING, RecoverySettings, get_up_last_rows, heading, regime,
+                                 upright_ahead, upright_run_lengths, wrap)
 from nablamimic.torch_env import DT, TorchTrackingEnv, quat_rotate, select_reset
 from nablamimic.torch_train import (ResetSampler, build_parser, make_control_body, make_window, recovery_metrics,
                                     validate_args)
@@ -251,6 +251,8 @@ class RecoveryStartTest(unittest.TestCase):
         start = env.start_frames[torch.randint(env.start_frames.shape[0], (count,))]
         command = env.command_frames[torch.randint(env.command_frames.shape[0], (count,))]
         self.assertTrue(torch.equal(state["recovering"], chosen))
+        # The binomial standard deviation of the share over 4,000 draws is 0.008; 0.03 is about four of them (the
+        # draws are fixed by the seed).
         self.assertLess(abs(chosen.float().mean().item()-0.5), 0.03)
         self.assertTrue(torch.equal(state["hidden_frame"], torch.where(chosen, start, frames)))
         self.assertTrue(torch.equal(state["frame"], torch.where(chosen, command, frames)))
@@ -319,14 +321,41 @@ class TrackingControlTest(unittest.TestCase):
                                       plain.policy_obs(base_stepped, observation["goal"]))):
                     self.assertTrue(torch.equal(one, two))
                 reset_frames = torch.tensor([WALK+9, WALK+10, WALK+11])
-                records = window_runner(env, 6, term_penalty=(2., .08, .10))[0](
-                    state, env.reset(reset_frames, noise))[3]
-                base_records = window_runner(plain, 6, term_penalty=(2., .08, .10))[0](
-                    base, plain.reset(reset_frames, noise))[3]
+                result = window_runner(env, 6, term_penalty=(2., .08, .10))[0](state, env.reset(reset_frames, noise))
+                base_result = window_runner(plain, 6, term_penalty=(2., .08, .10))[0](
+                    base, plain.reset(reset_frames, noise))
+                records, base_records = result[3], base_result[3]
                 self.assertTrue(bool(records["done"][:, 2].any()))
                 self.assertTrue(bool((records["regime"] == TRACKING).all()))
+                # The objective, its gradients with respect to the action perturbation and the clip statistics.
+                self.assertTrue(bool((result[1] != 0).any()))
+                for index in range(3):
+                    self.assertTrue(torch.equal(result[index], base_result[index]), index)
                 for key in ("r", "term", "done", "cobs", "cobs_pre", "v2", "a_pi", "hist", "goal", "frame"):
                     self.assertTrue(torch.equal(records[key], base_records[key]), key)
+                self.assertEqual(set(records["terms"]), set(base_records["terms"]))
+                for name in records["terms"]:
+                    self.assertTrue(torch.equal(records["terms"][name], base_records["terms"][name]), name)
+
+    def test_the_reward_gradient_of_a_tracking_control_through_the_body_equals_the_plain_environment_s(self):
+        """The stand-in step keeps the root, so a window's action gradient never reaches the body terms; here the
+        reached root carries the gradient."""
+        gradients = []
+        for one in (environment(settings()), environment(None)):
+            state = one.reset(torch.tensor([WALK+40, 76]))
+            shift = torch.tensor([[0.03, -0.02, 0.01], [-0.01, 0.02, -0.03]], requires_grad=True)
+            reached = one.ref_qpos[[WALK+41, 77]].clone()
+            qpos = torch.cat((reached[:, :3]+shift, reached[:, 3:]), -1)
+            qvel = torch.zeros_like(state["qvel"])
+            moved = kinematics(qpos, qvel, state["com"])
+            action = torch.zeros((2, one.nu))
+            result = one.finish_physics_kin(state, action, (moved[0], qvel, qvel, *moved))
+            reward, terms = one.reward(result, action, state["prev_a"], prev=state)
+            gradients.append([torch.autograd.grad(value.sum(), shift, retain_graph=True)[0]
+                              for value in (reward, terms["root_pos"], terms["body_pos"])])
+        self.assertTrue(bool((gradients[0][1] != 0).all()))
+        for one, two in zip(*gradients):
+            self.assertTrue(torch.equal(one, two))
 
 
 class CommandReadersTest(unittest.TestCase):
@@ -346,12 +375,26 @@ class CommandReadersTest(unittest.TestCase):
                 for other in (changed, blending):
                     for one, two in zip(env.policy_obs(state), env.policy_obs(other)):
                         self.assertTrue(torch.equal(one, two))
-                    self.assertTrue(torch.equal(env.ctrl_of(action, state["frame"]),
-                                                env.ctrl_of(action, other["frame"])))
+                    # The joints move halfway to the setpoint, so equal joints and history mean equal setpoints. Only
+                    # the residual base reads a reference row in the setpoint; on the absolute base this always holds.
+                    stepped, stepped_other = step(env, state, action), step(env, other, action)
+                    for key in ("qpos", "hist"):
+                        self.assertTrue(torch.equal(stepped[key], stepped_other[key]), key)
                     self.assertFalse(torch.equal(env.critic_obs(state), env.critic_obs(other)))
                 reward = env.reward(step(env, state, action), action, state["prev_a"], prev=state)[1]
                 reward_changed = env.reward(step(env, changed, action), action, changed["prev_a"], prev=changed)[1]
                 self.assertFalse(torch.equal(reward["body_pos"], reward_changed["body_pos"]))
+
+    def test_the_critic_of_a_recovering_state_is_the_recipe_s_at_the_hidden_row(self):
+        env, plain = environment(settings()), environment(None)
+        state = recovery_start(env, [3, 10], [40, 200])
+        stepped = step(env, state)
+        for recovering in (state, stepped):
+            self.assertTrue(bool(recovering["recovering"].all()))
+            at_command = {key: recovering[key] for key in BASE_STATE_KEYS}
+            at_hidden = {**at_command, "frame": recovering["hidden_frame"]}
+            self.assertTrue(torch.equal(env.critic_obs(recovering), plain.critic_obs(at_hidden)))
+            self.assertFalse(torch.equal(env.critic_obs(recovering), plain.critic_obs(at_command)))
 
     def test_changing_only_the_hidden_fields_leaves_a_window_s_regression_inputs_and_latents_equal(self):
         for residual in (False, True):
@@ -452,6 +495,7 @@ class SwitchAndBlendTest(unittest.TestCase):
                 body = stepped["xpos"][0, env.torso_id, :2]
                 command = env.ref_body_pos[stepped["frame"][0], env.anchor_k, :2]
                 torch.testing.assert_close(stepped["command_offset"][0], body-command)
+                # The places and tolerances below allow float32 rounding of positions below 1 m.
                 self.assertAlmostEqual(outputs["switch_yaw"].item(), 0.0, places=6)
                 # The switching control's reward reads the get-up's last row with the height-only anchor term at the
                 # recovery scale; the critic of the state it reaches reads the command row with the offset.
@@ -467,8 +511,44 @@ class SwitchAndBlendTest(unittest.TestCase):
         self.assertEqual(regimes, [RECOVERY]*9+[BLEND]*75+[TRACKING]*15)
         self.assertEqual(state["blend_left"].item(), 0)
         full = DT*1.0
+        # Ratios of float32 terms to their float64 values.
         self.assertAlmostEqual(terms[9]["body_ori"].item()/(full/75), 1.0, places=5)
         self.assertAlmostEqual(terms[83]["body_ori"].item()/full, 1.0, places=5)
+        # The first blend control's anchor term: the command torso one row on (0.01 m further along x) moved by the
+        # offset (the body's torso minus the command torso at the switch) lies 0.01 m ahead of the body's torso and
+        # WALK_HEIGHT - RISEN_HEIGHT above it.
+        anchor = DT*0.5/75*math.exp(-(0.01**2+(WALK_HEIGHT-RISEN_HEIGHT)**2)/0.3**2)
+        self.assertAlmostEqual(terms[9]["root_pos"].item()/anchor, 1.0, places=5)
+
+    def test_the_switch_yaw_is_the_wrapped_heading_of_the_reached_torso_against_the_command_torso(self):
+        def turned(angle):
+            return torch.tensor([math.cos(angle/2), 0.0, 0.0, math.sin(angle/2)])
+        # Float32 headings and wrapped differences.
+        torch.testing.assert_close(heading(torch.stack([turned(a) for a in (0.4, -2.0, 3.0)])),
+                                   torch.tensor([0.4, -2.0, 3.0]))
+        torch.testing.assert_close(wrap(torch.tensor([6.0, -6.0, 0.5])),
+                                   torch.tensor([6.0-2*math.pi, 2*math.pi-6.0, 0.5]))
+        # The body reaches the get-up's last pose turned to heading 3.0; the command clip is turned to heading -3.0.
+        # The torso the body held before the switch and the hidden row both have heading 0.
+        holder = {}
+
+        def script(call):
+            row = min(30+call+1, GET_UP_LAST)
+            poses = pose(holder["env"], [row])
+            if row == GET_UP_LAST:
+                poses[:, 3:7] = turned(3.0)
+            return poses
+        prepared = reference()
+        prepared.ref_body_quat[WALK:] = turned(-3.0).numpy()
+        env = holder["env"] = TorchTrackingEnv.from_reference(prepared, device="cpu", step_fn=HeldBody(script),
+                                                              kinematics_fn=kinematics, recovery=settings())
+        state = recovery_start(env, [30], [40])
+        for _ in range(9):
+            stepped = step(env, state)
+            outputs = env.recovery_outputs(state, stepped)
+            state = stepped
+        self.assertTrue(outputs["switched"].item())
+        self.assertAlmostEqual(outputs["switch_yaw"].item(), 2*math.pi-6.0, places=5)
 
     def test_a_window_records_the_switch_control_as_recovery_and_the_next_as_blend(self):
         env, state = following(29)
@@ -529,15 +609,17 @@ class RecoveryRewardTest(unittest.TestCase):
         stepped = step(env, state)
         terms = env.reward(stepped, action, state["prev_a"], prev=state)[1]
         for name, value in terms.items():
+            # The shifted body's positions round differently in float32.
             torch.testing.assert_close(value[1], value[0], rtol=1e-6, atol=1e-7)
             self.assertTrue(torch.equal(value[2], value[0]), name)
+        # Worlds 0 and 3 reach the same pose against the same row, so their terms differ by the factor alone.
         for name in ("root_ori", "body_pos", "body_ori", "body_lin_vel", "body_ang_vel"):
-            torch.testing.assert_close(terms[name][0], 2.5*terms[name][3], rtol=1e-6, atol=0)
+            self.assertTrue(torch.equal(terms[name][0], 2.5*terms[name][3]), name)
         for name in ("action_rate", "joint_limit"):
             self.assertTrue(torch.equal(terms[name][0], terms[name][3]), name)
         hazard = env.hazard_features(stepped)
         self.assertTrue(torch.equal(hazard[0], hazard[3]))
-        self.assertAlmostEqual(terms["root_pos"][0].item(), 2.5*DT*0.5, places=7)
+        self.assertAlmostEqual(terms["root_pos"][0].item(), 2.5*DT*0.5, places=7)  # float32 rounding of 0.025
 
     def test_a_recovery_control_s_penalty_and_action_change_are_the_recipe_s_at_their_rows(self):
         for residual in (False, True):
@@ -604,9 +686,26 @@ class ReplayAndWindowTest(unittest.TestCase):
         self.assertEqual(records["stop"][:, 0].tolist(), [False, False, True, False])
         self.assertTrue(bool(records["term"][2, 0] and records["done"][2, 0] and not records["clip_end"][2, 0]))
         reward = records["r"][:, 0].double()
-        # The critic returns 1 everywhere: no value after the stop, one after the last control.
+        # The critic returns 1 everywhere: no value after the stop, one after the last control. The objective sums in
+        # float32, the expected value in float64.
         expected = reward[0]+.99*reward[1]+.99**2*reward[2]+reward[3]+.99*1.0
         self.assertAlmostEqual(-objective.item(), expected.item(), places=5)
+
+    def test_a_recovery_window_s_termination_penalty_is_the_recipe_s_at_the_hidden_row(self):
+        holder = {}
+        env = environment(settings(), script=lambda call: holder["pose"])
+        plain = environment(None, script=lambda call: holder["pose"])
+        # 0.15 m above the hidden row's pelvis, past the penalty's height start and within the termination threshold.
+        holder["pose"] = pose(env, [13], height=LYING_HEIGHT+0.15)
+        state = recovery_start(env, [12], [40])
+        at_hidden_row = {**{key: state[key] for key in BASE_STATE_KEYS}, "frame": state["hidden_frame"]}
+        penalty = (2., .08, .10)
+        records = window_runner(env, 1, term_penalty=penalty)[0](state, state)[3]
+        base_records = window_runner(plain, 1, term_penalty=penalty)[0](at_hidden_row, at_hidden_row)[3]
+        self.assertEqual(records["regime"][0, 0].item(), RECOVERY)
+        self.assertFalse(bool(records["done"].any() or base_records["done"].any()))
+        self.assertLess(records["terms"]["term_pen"][0, 0].item(), 0.0)
+        self.assertTrue(torch.equal(records["terms"]["term_pen"], base_records["terms"]["term_pen"]))
 
 
 class ResetBinsAndLogTest(unittest.TestCase):
