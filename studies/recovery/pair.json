@@ -5,7 +5,6 @@
     "seeds": [0, 1],
     "updates": 3000,
     "checkpoint_every": 250,
-    "hours": 4,
     "initial_weights": "none: each training initialises its networks from its seed, so the two conditions of a seed start from equal weights and the two seeds from different ones"
   },
   "saves": [1500, 3000],
@@ -61,8 +60,8 @@
   "classes": "each seed's recovery save at 3,000 updates: near_zero (R <= near_zero), gets_up (R >= gets_up_R and R >= the larger control R at 3,000 + gets_up_lead), some otherwise",
   "outcomes": [
     {"name": "run_stopped",
-     "when": "a training ends before 3,000 updates by an engine capacity overflow or by the wall time",
-     "taken_to_mean": "an engine or budget result, not a recovery result; the saves that exist are read as stated",
+     "when": "a training ends before 3,000 updates by an engine capacity overflow",
+     "taken_to_mean": "an engine result, not a recovery result; the saves that exist are read as stated",
      "sends_forward": "the failing update read first; then a larger engine build or restricted starts"},
     {"name": "split_seeds",
      "when": "one seed gets_up and the other near_zero",
@@ -111,8 +110,8 @@
   ],
   "unreadable_when": [
     "a declared save has no reading (readings.py refuses an incomplete record, a record of another scene, termination, control count, weights or checkpoint, a record whose rows are not its scene's, and another library), or E at a save is unavailable (a clip without a body-position error)",
-    "a training's config.json names another seed, other updates, checkpoint interval or hours than declared, or recovery options that do not fit its condition",
+    "a training's config.json names another seed, other updates or checkpoint interval than declared, a wall-time limit (--hours), or recovery options that do not fit its condition",
     "the two trainings of a seed have config.json files that differ outside the recovery options, out, config, engine.path and engine.artifact (the card, source revision, image, engine identity and capacities, torch version, library inputs and every other option included)",
-    "a training ended in any other way than its 3,000 updates, a capacity overflow or the wall time"
+    "a training ended in any other way than its 3,000 updates or a capacity overflow"
   ]
 }

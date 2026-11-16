@@ -27,7 +27,7 @@ outcome order.
 | --- | --- |
 | Conditions | control (`configs/absolute.args`) and recovery (`configs/recovery.args`: the control plus the seven recovery options) |
 | Seeds | 0 and 1. Each training initialises its networks from its seed, so the two conditions of a seed start from equal weights |
-| Length | 3,000 updates, a numbered checkpoint every 250 updates and a wall time of 4 h (`--hours 4`, which counts training without set-up and the terminal save) |
+| Length | 3,000 updates with a numbered checkpoint every 250 updates, and no wall-time limit (`--hours` unset) |
 | Execution | the trainer's defaults: a compiled window with CUDA graphs (`--execution compile-graph`) and TF32 network matrix products (`--matmul-precision nets_tf32`) |
 | Card | chosen at launch; the two trainings of a seed share the card model, source revision, image and engine, as `config.json` records them |
 | Saves | `actor_ema` of the numbered checkpoint `ckpt/it_NNNNNN.pkl` at 1,500 and 3,000 updates, rolled out with deterministic actions. A training gives two saves and the pair eight |
@@ -136,7 +136,7 @@ Here C0, C1, E0 and E1 are C and E of the control seeds 0 and 1 at that control 
 
 The outcome is the first of these rows that holds; `pair.json` gives each row's meaning and what it sends forward.
 
-1. **run_stopped**: a training ends before 3,000 updates by an engine capacity overflow or by the wall time. This row
+1. **run_stopped**: a training ends before 3,000 updates by an engine capacity overflow. This row
    is decided from the trainings' ends before any save is read.
 2. **split_seeds**: one seed is gets_up and the other near_zero.
 3. **control_within**: at each seed the control's R at 3,000 is above 5 and within 10 of the recovery R.
@@ -156,14 +156,14 @@ The outcome is the first of these rows that holds; `pair.json` gives each row's 
 An unavailable J over R is neither below nor at its margin, so a row that needs its value at that seed does not hold.
 
 A training ends by its 3,000 updates, by a capacity overflow (a `FAILED.json` whose invalid counters include a contact
-or constraint-row overflow, whatever other counters it names), by the wall time, or otherwise. The trainer ends a run
+or constraint-row overflow, whatever other counters it names), or otherwise. The trainer ends a run
 on any non-zero non-finite counter; such a run ends otherwise.
 
 **Unreadable.** No outcome is given, and the reasons are written instead, when any of these holds:
 
 - a declared save has no reading, or its E is unavailable because a clip has no body-position error;
-- a training's `config.json` names another seed, other updates, another checkpoint interval or another wall time than
-  declared, or has recovery options that do not fit its condition;
+- a training's `config.json` names another seed, other updates or another checkpoint interval than declared, a
+  wall-time limit, or recovery options that do not fit its condition;
 - the two trainings of a seed have `config.json` files that differ outside the recovery options, `out`, `config` and
   the location of the compiled engine library (`engine.path`, `engine.artifact`). This covers the card, the source
   revision, the image, the engine's identity (`engine.key`, `engine.sources_sha256`, `engine.consts_sha256`) and
@@ -186,9 +186,9 @@ variables `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and `MENAGERIE_DIR` stay the same 
    ```bash
    for seed in 0 1; do
      python -m nablamimic.torch_train --config configs/absolute.args --seed $seed --iters 3000 --ckpt-every 250 \
-         --hours 4 --out $RUNS/control_s$seed
+         --out $RUNS/control_s$seed
      python -m nablamimic.torch_train --config configs/recovery.args --seed $seed --iters 3000 --ckpt-every 250 \
-         --hours 4 --out $RUNS/recovery_s$seed
+         --out $RUNS/recovery_s$seed
    done
    ```
 

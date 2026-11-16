@@ -146,7 +146,7 @@ def engine(condition, **changes):
 
 def config(condition, run_seed, **changes):
     """A config.json of the trainings' fields that the programs read, with ``changes``."""
-    return {"seed": run_seed, "iters": 3000, "ckpt_every": 250, "hours": 4, "num_envs": 4096, "horizon": 64,
+    return {"seed": run_seed, "iters": 3000, "ckpt_every": 250, "hours": None, "num_envs": 4096, "horizon": 64,
             "out": f"runs/{condition}_s{run_seed}", "config": DECLARATION["trainings"]["conditions"][condition],
             "gpu": "card", "git_commit": "abc", "declared_environment": "image", "torch_version": "2.9.1",
             "engine": engine(condition), **RECOVERY_OPTIONS[condition], **changes}
@@ -233,8 +233,8 @@ class PairTest(unittest.TestCase):
             result = self.read(configs={("recovery", 0): config("recovery", 0, engine=changed)})
             self.assertEqual(result["unreadable"], [f"seed 0: the two config.json files differ in ['engine.{field}']"])
 
-    def test_a_capacity_overflow_or_the_wall_time_gives_run_stopped(self):
-        for cause in ("capacity_overflow", "wall_time"):
+    def test_a_capacity_overflow_gives_run_stopped(self):
+        for cause in ("capacity_overflow",):
             result = self.read(readings=[reading("control", 0, 1500)],
                                ends={("recovery", 1): dict(completed=False, cause=cause, completed_updates=1200,
                                                            detail="")})
@@ -272,7 +272,7 @@ class TrainingEndTest(unittest.TestCase):
         cases = (({"terminal.json": dict(status="completed", completed_updates=3000), "DONE": "completed\n"},
                   (True, None)),
                  ({"terminal.json": dict(status="completed", completed_updates=2100), "DONE": "completed\n"},
-                  (False, "wall_time")),
+                  (False, "other")),
                  ({"terminal.json": dict(status="interrupted", completed_updates=2100)}, (False, "other")),
                  ({"FAILED.json": failed({"fwd_row_overflow_worlds": 3})}, (False, "capacity_overflow")),
                  # Both kinds of counter: the overflow ends the run as a capacity overflow.

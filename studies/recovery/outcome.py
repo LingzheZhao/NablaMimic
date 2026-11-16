@@ -12,7 +12,7 @@ readable rejoin), F (twins with a counted fall), C (first-row clips completed), 
 get-up clip) and E (aligned body-position error). Nothing is pooled across saves or seeds.
 
 How a training ends and when no outcome is given are those of README.md, "Classes, margins and outcomes": training_end
-reads the end from DONE, terminal.json (completed before the declared updates: the wall time) and FAILED.json.
+reads the end from DONE, terminal.json and FAILED.json.
 """
 import argparse
 import json
@@ -51,7 +51,7 @@ def flat(config, prefix=""):
 
 
 def training_end(root, updates):
-    """How a training ended: completed, or the cause of an early end (capacity_overflow, wall_time or other)."""
+    """How a training ended: completed, or the cause of an early end (capacity_overflow or other)."""
     root = Path(root)
     if (root/"FAILED.json").is_file():
         failed = json.loads((root/"FAILED.json").read_text())
@@ -64,8 +64,7 @@ def training_end(root, updates):
     done = terminal["completed_updates"]
     if terminal["status"] == "completed" and done == updates and (root/"DONE").is_file():
         return dict(completed=True, cause=None, completed_updates=done, detail=None)
-    cause = "wall_time" if terminal["status"] == "completed" and done < updates else "other"
-    return dict(completed=False, cause=cause, completed_updates=done,
+    return dict(completed=False, cause="other", completed_updates=done,
                 detail=f"terminal.json status {terminal['status']}")
 
 
@@ -83,7 +82,7 @@ def declared_recovery_options(declaration):
 def training_problems(declaration, configs, options):
     """The declaration's unreadable_when on the trainings' config.json files {(condition, seed): config}."""
     trainings = declaration["trainings"]
-    declared = dict(iters=trainings["updates"], ckpt_every=trainings["checkpoint_every"], hours=trainings["hours"])
+    declared = dict(iters=trainings["updates"], ckpt_every=trainings["checkpoint_every"], hours=None)
     problems = []
     for (condition, seed), config in configs.items():
         values = dict(seed=seed, **declared)
@@ -235,7 +234,7 @@ def read_pair(declaration, readings, trainings, configs, ends, options):
                    for seed in trainings_declared["seeds"] if (condition, seed) not in trainings]
     unreadable += training_problems(declaration, configs, options)
     stopped = [f"{condition} seed {seed}: {end['cause']} at {end['completed_updates']} updates ({end['detail']})"
-               for (condition, seed), end in ends.items() if end["cause"] in ("capacity_overflow", "wall_time")]
+               for (condition, seed), end in ends.items() if end["cause"] == "capacity_overflow"]
     unreadable += [f"{condition} seed {seed}: the training ended otherwise at {end['completed_updates']} updates "
                    f"({end['detail']})" for (condition, seed), end in ends.items() if end["cause"] == "other"]
     out = dict(saves={f"{c}/seed {s}/{u} updates": values.get((c, s, u)) for c, s, u in wanted},
