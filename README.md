@@ -107,6 +107,9 @@ explicit CUDA Graphs. Its validation and current limitations are described separ
 bash scripts/evaluate_run.sh runs/ours_s0    # every LAFAN1 clip once, on MuJoCo Warp -> runs/ours_s0/eval_nominal.json
 ```
 
+To execute a trained policy outside this package, [export](EXPORT.md) its actor
+and optional critic as NumPy files, and its reference cache as a JSON manifest.
+
 ## 📚 Citation
 
 ```bibtex
