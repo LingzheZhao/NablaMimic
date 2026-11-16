@@ -103,7 +103,7 @@ Under `recipe` a placed lying start ends at its first control, because a
 lying body is more than 0.25 m below the command's pelvis height; placed
 starts are therefore run with `nonfinite`.
 
-Neither the clip end nor an episode limit ends a trial. An ended trial keeps
+Neither the clip end nor the episode limit of training ends a trial. An ended trial keeps
 the state it started its last control from: the batched step still computes
 it, its result is not used, no non-finite state reaches the engine again and
 no other trial depends on it. The control that ends a trial is recorded
@@ -125,7 +125,7 @@ library paths; and, after the rollouts, `engine_diagnostics`, the engine
 counters of the rollouts. The counters include the steps of ended trials,
 which the batch still computes; per-trial counts come from the fields below.
 
-`rollouts.npz` holds, per control and trial (time-major, `[C, T, ...]` with
+`rollouts.npz` holds, per control and trial (`[C, T, ...]` with
 `C` controls and `T` trials; after a trial's end NaN, -1 or false):
 
 | Field | Shape, type | Meaning |

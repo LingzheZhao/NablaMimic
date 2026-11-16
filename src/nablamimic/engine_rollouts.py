@@ -31,9 +31,9 @@ LIBRARY_INPUTS = ("LAFAN1_G1_DIR", "MOTION_CACHE_DIR", "MENAGERIE_DIR")
 
 class TapeFreeStep:
     """``torch_ffi.step`` as ``TorchTrackingEnv.step`` calls it, through ``forward`` (``torch_ffi.forward``) without a
-    tape, keeping the per-environment ``info`` [B, 4] of the last call (Newton iterations of the last substep, contacts,
-    constraint rows, capacity bits). Without autograd ``step`` returns ``forward``'s outputs without the info; its
-    backward options do not act on a forward."""
+    tape, keeping the per-environment ``info`` [B, 4] (B environments) of the last call (Newton iterations of the last
+    substep, contacts, constraint rows, capacity bits). Without autograd ``step`` returns ``forward``'s outputs
+    without the info; its backward options do not act on a forward."""
 
     def __init__(self, forward):
         self.forward, self.info = forward, None
@@ -66,9 +66,9 @@ def _positive(value, what):
 
 def trial_inputs(scene, env, controls):
     """The inputs of ``controls`` controls for the trials of a scene document (ROLLOUTS.md, "Scene"): command and
-    body rows [T], the reset noise {name: [T, n]}, the push controls [T] (-1 without a push), the world velocity
-    changes [T, 2] and the changes in the pelvis yaw frame [T, 2]. Unknown keys, rows outside the library, uniforms
-    outside [-1, 1] and push controls outside the rollout are refused."""
+    body rows [T] (T trials), the reset noise {name: [T, n]} (n values per name), the push controls [T] (-1 without a
+    push), the world velocity changes [T, 2] and the changes in the pelvis yaw frame [T, 2]. Unknown keys, rows
+    outside the library, uniforms outside [-1, 1] and push controls outside the rollout are refused."""
     if not isinstance(scene, dict) or set(scene) != {"trials"} or not isinstance(scene["trials"], list) \
             or not scene["trials"]:
         raise ValueError(f"a scene is {{'trials': [trial, ...]}} with at least one trial, got keys "
@@ -124,7 +124,8 @@ def trial_inputs(scene, env, controls):
 
 
 def after_end(ended, value):
-    """``value`` [B, ...] with NaN, -1 or false (by its type) in the trials that ``ended`` before this control."""
+    """``value`` [B, ...] (B trials) with NaN, -1 or false (by its type) in the trials that ``ended`` before this
+    control."""
     missing = float("nan") if value.is_floating_point() else False if value.dtype == torch.bool else -1
     return torch.where(ended.reshape(ended.shape + (1,)*(value.ndim - 1)), missing, value)
 

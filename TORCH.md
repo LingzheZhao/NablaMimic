@@ -203,8 +203,9 @@ defaults) with absolute actions on NablaEngine. `configs/recovery.args` adds the
 train recovery from placed lying starts against a hidden get-up reference;
 [RECOVERY.md](RECOVERY.md) describes the setting, its log columns and its
 records.
-[ROLLOUTS.md](ROLLOUTS.md) runs the policy of a checkpoint closed-loop from
-placed starts and after pushes and records each rollout.
+`python -m nablamimic.engine_rollouts` runs the policy of a checkpoint
+closed-loop from placed starts and after pushes and records each rollout
+([ROLLOUTS.md](ROLLOUTS.md)).
 
 Network matmuls permit TF32 by default (`--matmul-precision nets_tf32`). Select
 `--matmul-precision highest` to disable TF32 before compilation and capture.
