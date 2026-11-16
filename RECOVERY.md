@@ -10,9 +10,10 @@ command.
 
 The method follows StableMimic (arXiv 2608.02385v1) as the BeyondMimic
 reproduction (BM) implemented it in its own NablaMimic trainer. Each value
-below is marked as **BM's reading of StableMimic** (a value BM's recipe
-attributes to the paper) or **BM's choice**. These attributions are BM's; they
-are not checked against the paper in this repository.
+below is marked as **BM's reading of StableMimic** (a value that BM's
+recipes, code or results attribute to the paper) or **BM's choice**. These
+attributions are BM's; they are not checked against the paper in this
+repository.
 
 ```bash
 python -m nablamimic.torch_train --config configs/recovery.args --out runs/recovery_s0 --iters 3000
@@ -184,8 +185,12 @@ as they are. The critic normaliser is updated from all rows.
 `RUN/recovery.json` holds the setting (with the two clip lists), the six row
 counts and which parts read the hidden row and which the command row. It is a
 separate file because the exporter checks the fields of `config.json`
-exactly; `config.json` records the options as parsed arguments. The
-checkpoints hold no recovery fields.
+exactly. `config.json`, the `resolved_config` of the full training state
+(`training_state_itNNNNNN.pt`) and the exported policy's
+`source_run.parsed_arguments` record the seven options as parsed arguments,
+with null values in a run without them. With the options, the collector and
+replay states in the full training state also hold the five recovery keys.
+`ckpt/it_N.pkl` holds no recovery fields.
 
 `log.jsonl` gains these columns per update, over the window's rows (controls
 times environments) by the regime each control started in:
@@ -247,7 +252,15 @@ which the critic file's input declaration does not describe.
 stand-in step that holds or scripts the root. It covers the row tables, the
 draws and placement of the starts, the unchanged path without the options,
 the readers of the hidden row on both action bases, the clocks, the stop, the
-switch and the blend, the reward's form, the replay keys, a stop inside a
-window, the reset-bin mask, the log columns and the option refusals. Compiled
-execution, CUDA-graph capture with the recovery keys and the memory of a
-full-size run need a GPU and are not covered by these tests.
+switch, the blend and the switch yaw, the reward's form and gradient, the
+termination penalty at the hidden row, the replay keys, a stop inside a
+window, the reset-bin mask, the log columns and the option refusals.
+
+`TorchTrainer` needs CUDA, so these tests do not cover the trainer's own
+wiring: the recovery starts among the collector's initial states with their
+random episode ages, the replay ring with the recovery keys, the reset-bin
+update fed with the regimes of the training window, the merge of the
+recovery columns into the log row, and that whole training updates without
+the options compute what the recipe computes. Compiled execution, CUDA-graph
+capture with the recovery keys and the memory of a full-size run also need a
+GPU and are not covered by these tests.
