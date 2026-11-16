@@ -116,7 +116,8 @@ def test_ppo():
 @unittest.skipIf(importlib.util.find_spec("torch") is None, "Optional PyTorch backend is not installed")
 class RecoveryConfigTest(unittest.TestCase):
     """configs/absolute.args is the 0.2.0 recipe on NablaEngine with absolute actions, and configs/recovery.args adds
-    the recovery options with BM's values and nothing else; both pass the PyTorch trainer's validation."""
+    the recovery options with the values RECOVERY.md gives and nothing else; both pass the PyTorch trainer's
+    validation."""
 
     def test_recovery_adds_only_the_recovery_options(self):
         from nablamimic import torch_train

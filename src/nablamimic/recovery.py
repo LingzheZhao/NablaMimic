@@ -1,5 +1,5 @@
-"""Recovery training from placed lying starts against a hidden get-up reference (RECOVERY.md), after StableMimic
-(arXiv 2608.02385v1) as BM's NablaMimic trainer implemented it.
+"""Recovery training from placed lying starts against a hidden get-up reference (RECOVERY.md), in a reduced,
+single-network form of StableMimic (arXiv 2608.02385v1).
 
 A share of the reset draws places the body at a low row of a get-up recording, with the recipe's reset noise, while
 the command the actor reads starts at a separate upright row. The episode's reward then tracks the get-up recording
