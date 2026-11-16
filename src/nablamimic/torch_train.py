@@ -630,8 +630,9 @@ def validate_args(args):
 
 def build_environment(args, recovery_settings=None, step_fn=None, **conditions):
     """The environment of a run with the parsed arguments ``args``: the motion library of ``--clips`` (the complete
-    40-clip library for 'all'), the run's EnvConfig with the EnvConfig fields ``conditions`` changed, the recovery
-    setting and the engine step ``step_fn`` (NablaEngine's ``torch_ffi.step`` when None)."""
+    40-clip library for 'all'), the run's EnvConfig with the EnvConfig fields given as keyword arguments
+    (``conditions``) changed, the recovery setting and the engine step ``step_fn`` (NablaEngine's ``torch_ffi.step``
+    when None)."""
     from .env import BM_BODIES, EnvConfig
     from .motion import all_clip_names, load_library
     names = all_clip_names() if args.clips == ['all'] else args.clips

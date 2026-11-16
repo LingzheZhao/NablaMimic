@@ -230,6 +230,12 @@ settings table gives the paper's side.
 The policy of a recovery run exports like any other run; `--critic-out` is
 refused for it ([EXPORT.md](EXPORT.md)).
 
+## Rollouts
+
+[ROLLOUTS.md](ROLLOUTS.md) runs a trained policy closed-loop from placed lying
+starts, their upright twins, clips' first rows and pushes, and records each
+rollout.
+
 ## Tests
 
 `tests/test_recovery.py` runs on CPU with a synthetic get-up library and a

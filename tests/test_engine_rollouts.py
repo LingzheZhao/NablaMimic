@@ -1,4 +1,4 @@
-"""Rollouts of a trained policy (engine_rollouts, RECOVERY.md) on a synthetic library with a stand-in engine forward;
+"""Rollouts of a trained policy (engine_rollouts, ROLLOUTS.md) on a synthetic library with a stand-in engine forward;
 no assets, simulator, GPU or stored outputs.
 
 Library (clips in this order): getup (80 rows: rows 0-29 lying at pelvis height 0.2 m, pitched 90 degrees about y,
@@ -393,7 +393,7 @@ class SceneTest(unittest.TestCase):
         inputs = rollouts.trial_inputs({"trials": [walk(0)]}, env, 2)
         with self.assertRaisesRegex(ValueError, "termination 'fall'"):
             rollouts.rollout(env, actor(), inputs, "fall")
-        # Each environment differs from the rollout environment in one property.
+        # Each environment differs from the rollout environment in one setting.
         settings = "reset noise on and domain randomisation and observation noise off"
         cases = dict(
             recovery=(environment(rollouts.TapeFreeStep(SinkingForward()), recovery_settings()), "recovery setting"),

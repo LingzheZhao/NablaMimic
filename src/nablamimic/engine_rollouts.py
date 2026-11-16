@@ -1,8 +1,8 @@
-"""Closed-loop rollouts of a trained policy on NablaEngine, the training simulator, for the trials of a scene file:
-placed starts, starts at a command row alone, a clip's first row, and pushes. RECOVERY.md, "Reading a trained policy",
-gives the scene file, the environment, the termination and the record.
+"""Closed-loop rollouts of a trained policy on NablaEngine, the simulator the trainer uses, for the trials of a scene
+file: placed starts, starts at a command row alone, a clip's first row, and pushes. ROLLOUTS.md gives the scene file,
+the environment, the terminations and the record.
 
-  python -m nablamimic.engine_rollouts --run RUN --iter 3000 --scene scene.json --termination recipe \\
+  python -m nablamimic.engine_rollouts --run RUN --iter 3000 --scene scene.json --termination nonfinite \\
       --controls 1000 --out OUT
 """
 
@@ -65,10 +65,10 @@ def _positive(value, what):
 
 
 def trial_inputs(scene, env, controls):
-    """The inputs of ``controls`` controls for the trials of a scene document (RECOVERY.md, "Reading a trained
-    policy"): command and body rows [T], the reset noise {name: [T, n]}, the push controls [T] (-1 without a push),
-    the world velocity changes [T, 2] and the changes in the pelvis yaw frame [T, 2]. Unknown keys, rows outside the
-    library, uniforms outside [-1, 1] and push controls outside the rollout are refused."""
+    """The inputs of ``controls`` controls for the trials of a scene document (ROLLOUTS.md, "Scene"): command and
+    body rows [T], the reset noise {name: [T, n]}, the push controls [T] (-1 without a push), the world velocity
+    changes [T, 2] and the changes in the pelvis yaw frame [T, 2]. Unknown keys, rows outside the library, uniforms
+    outside [-1, 1] and push controls outside the rollout are refused."""
     if not isinstance(scene, dict) or set(scene) != {"trials"} or not isinstance(scene["trials"], list) \
             or not scene["trials"]:
         raise ValueError(f"a scene is {{'trials': [trial, ...]}} with at least one trial, got keys "
@@ -130,9 +130,9 @@ def after_end(ended, value):
 
 
 def rollout(env, actor, inputs, termination):
-    """The records (RECOVERY.md, "Reading a trained policy") of the deterministic controls of ``actor`` for the trial
-    ``inputs`` of ``trial_inputs`` on ``env``, whose step is a ``TapeFreeStep``, with the trial end ``termination``
-    (recipe or nonfinite)."""
+    """The records (ROLLOUTS.md, "Record") of the deterministic controls of ``actor`` for the trial ``inputs`` of
+    ``trial_inputs`` on ``env``, whose step is a ``TapeFreeStep``, with the trial end ``termination`` (recipe or
+    nonfinite)."""
     if termination not in TERMINATIONS:
         raise ValueError(f"termination {termination!r} is not one of {TERMINATIONS}")
     if env.recovery is not None:
@@ -197,7 +197,8 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="python -m nablamimic.engine_rollouts",
                                      description="Closed-loop NablaEngine rollouts of a PyTorch-trainer checkpoint.")
     parser.add_argument("--run", type=Path, required=True, help="run directory of torch_train (config.json, ckpt/)")
-    parser.add_argument("--iter", type=int, required=True, help="update of the numbered checkpoint ckpt/it_N.pkl")
+    parser.add_argument("--iter", type=int, required=True,
+                        help="update of the numbered checkpoint ckpt/it_NNNNNN.pkl (six digits)")
     parser.add_argument("--actor-key", choices=("actor_ema", "actor"), default="actor_ema",
                         help="actor_ema: the running average of the weights; actor: the weights as trained")
     parser.add_argument("--scene", type=Path, required=True, help="scene file (JSON) of the trials")
