@@ -6,6 +6,7 @@ regression and critic work. No compile/capture error silently selects eager mode
 Random samples are explicit graph inputs and are generated outside captures.
 """
 import argparse
+import dataclasses
 import json
 import math
 import os
@@ -21,6 +22,7 @@ os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 import numpy as np
 import torch
 
+from . import recovery
 from . import torch_nets as nets
 from .torch_env import TorchTrackingEnv, select_reset
 
@@ -147,6 +149,9 @@ def make_control_body(env, gamma, max_episode_steps, act_clip, term_penalty, *, 
                        frame=stepped['frame'], terms={k: v.detach() for k, v in terms.items()},
                        hist=history.detach().to(torch.bfloat16), goal=goal.detach().to(torch.bfloat16),
                        a_pi=policy_action.detach())
+        if env.recovery is not None:
+            outputs.update(env.recovery_outputs(state, stepped), clip_end=env.clip_ended(stepped),
+                           limit=stepped['ep'] >= max_episode_steps)
         return (next_state, torch.where(done, 0.0, next_acc),
                 torch.where(done, 1.0, next_discount), total, reset_age), outputs
     return body
@@ -209,20 +214,59 @@ class ResetSampler:
         return .5*uniform + .4*per_frame(self.bin_weights(self.bin_q[0])) + .1*per_frame(self.bin_q[1]/self.bin_q[1].sum())
 
     def sample(self, count):
+        """Resets at bin-sampled rows. With the recovery setting a share of them, drawn after the rows and the reset
+        noise (share uniforms, start rows, command rows), place the body at a start row with the same noise and start
+        the command at a command row."""
         with torch.no_grad():
             frames = torch.multinomial(self.probs, count, replacement=True).to(torch.int32)
-            return self.env.reset(frames, self.env.sample_reset_noise(count))
+            noise = self.env.sample_reset_noise(count)
+            settings, env = self.env.recovery, self.env
+            if settings is None:
+                return env.reset(frames, noise)
+            chosen = torch.rand(count, device=env.device) < settings.share
+            start = env.start_frames[torch.randint(env.start_frames.shape[0], (count,), device=env.device)]
+            command = env.command_frames[torch.randint(env.command_frames.shape[0], (count,), device=env.device)]
+            return env.reset(torch.where(chosen, command, frames), noise, body_frame=torch.where(chosen, start, frames))
 
     def update(self, outs, targets, cnorm):
         normalizer = nets.update_normalizer(cnorm, outs['cobs'].reshape(-1, self.env.critic_dim))
         bins = self.bin_index[outs['frame'].reshape(-1).to(torch.int64)]
-        sums = torch.zeros_like(self.bin_count).scatter_add(0, bins, (targets/self.g_max).reshape(-1))
-        counts = torch.zeros_like(self.bin_count).scatter_add(0, bins, torch.ones_like(targets).reshape(-1))
+        values, ones = (targets/self.g_max).reshape(-1), torch.ones_like(targets).reshape(-1)
+        if self.env.recovery is not None:
+            # Recovery and blend transitions leave the bins of the command rows as they are.
+            kept = (outs['regime'] == recovery.TRACKING).reshape(-1)
+            values, ones = torch.where(kept, values, 0.0), torch.where(kept, ones, 0.0)
+        sums = torch.zeros_like(self.bin_count).scatter_add(0, bins, values)
+        counts = torch.zeros_like(self.bin_count).scatter_add(0, bins, ones)
         stat = torch.where(counts > 0, .9*self.bin_q[0] + .1*sums/torch.clamp_min(counts, 1), self.bin_q[0])
         past = .995*self.bin_q[1] + .005*self.bin_weights(stat)
         nets.copy_tree_(cnorm, normalizer)
         self.bin_q.copy_(torch.stack((stat, past)))
         self.probs.copy_(self.frame_probabilities())
+
+
+def recovery_metrics(outs, max_reward, tracking_rows_before):
+    """The log columns of one window's outputs with the recovery setting (RECOVERY.md). Shares and counts are over
+    the window's rows (controls x environments) by the regime each control started in; a column without rows to
+    average is None."""
+    regime = outs['regime']
+    tracking, recovering, blending = (regime == value for value in (recovery.TRACKING, recovery.RECOVERY,
+                                                                     recovery.BLEND))
+    rows = regime.numel()
+    yaw = outs['switch_yaw'][outs['switched']].to(torch.float64).cpu()
+    reward = outs['r'][tracking].to(torch.float64)
+    return dict(
+        recovery_window_row_share_tracking=int(tracking.sum())/rows,
+        recovery_window_row_share_recovery=int(recovering.sum())/rows,
+        recovery_window_row_share_blend=int(blending.sum())/rows,
+        recovery_tracking_window_rows_total=tracking_rows_before+int(tracking.sum()),
+        recovery_switches=int(outs['switched'].sum()), recovery_stops=int(outs['stop'].sum()),
+        recovery_switch_yaw_mean_rad=float(yaw.mean()) if yaw.numel() else None,
+        recovery_switch_yaw_p90_rad=float(torch.quantile(yaw, .9)) if yaw.numel() else None,
+        recovery_clip_ends=int((outs['clip_end'] & recovering).sum()),
+        recovery_episode_limits=int((outs['limit'] & recovering).sum()),
+        recovery_terminations_in_blend=int((outs['term'] & blending).sum()),
+        recovery_tracking_reward_mean=float(reward.mean()/max_reward) if reward.numel() else None)
 
 
 class TorchTrainer:
@@ -248,6 +292,7 @@ class TorchTrainer:
         self.outer_step = torch.zeros((), device=self.device, dtype=torch.int32)
         self.total_collector_steps = 0
         self.completed_updates = 0
+        self.tracking_window_rows = 0
         self.col_accumulator = 0.0
         self.graphs = {}
         self.setup_record = {}
@@ -488,6 +533,9 @@ class TorchTrainer:
             clip_stats=result[2].detach().cpu().tolist(), target_stats=self.target_data['at_clip'].cpu().tolist(),
             memory=dict(allocated=torch.cuda.memory_allocated(),reserved=torch.cuda.memory_reserved(),
                         peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved()))
+        if self.env.recovery is not None:
+            metrics.update(recovery_metrics(self.training_data, self.env.max_reward, self.tracking_window_rows))
+            self.tracking_window_rows = metrics['recovery_tracking_window_rows_total']
         expected_ema = self.completed_updates if self.args.actor_ema > 0 else 0
         if expected_ema != metrics['ema_updates'] or metrics['actor_optimizer_steps'] != self.completed_updates*int(self.args.action_target[0]) or metrics['critic_optimizer_steps'] != self.completed_updates*self.args.critic_epochs*self.args.critic_minibatches:
             raise RuntimeError('Training/EMA/optimizer counters disagree')
@@ -535,6 +583,24 @@ def build_parser():
     parser.add_argument('--initial-checkpoint',type=Path,help='Current official numbered JAX checkpoint with iter=0 and env_steps=0; imports initial weights only')
     parser.add_argument('--save-wall-minutes',type=float,nargs='+',default=[8,20,60,90,180])
     parser.add_argument('--full-state-at-end',action=argparse.BooleanOptionalAction,default=True)
+    # Recovery training from placed lying starts against a hidden get-up reference (RECOVERY.md): all or none.
+    parser.add_argument('--recovery-share', type=float,
+                        help='probability that a reset draw is a recovery start')
+    parser.add_argument('--recovery-hidden-clips', nargs='+', metavar='CLIP',
+                        help='clips whose low rows are recovery starts and whose rows are the hidden reference')
+    parser.add_argument('--recovery-command-excluded-clips', nargs='+', metavar='CLIP',
+                        help='clips that never give the command row of a recovery start')
+    parser.add_argument('--recovery-low-pelvis', type=float, nargs=2, metavar=('HEIGHT', 'UPZ'),
+                        help='a reference row is low below this pelvis height (m) or pelvis up-axis world z')
+    parser.add_argument('--recovery-rows', type=int, nargs=3,
+                        metavar=('UPRIGHT_RUN', 'LONGEST_SPAN', 'COMMAND_UPRIGHT'),
+                        help='upright rows that end a get-up; most rows from a start row to its get-up end; upright '
+                             'rows a command row needs ahead')
+    parser.add_argument('--recovery-reward-scale', type=float,
+                        help='factor on the six tracking terms while the hidden row is followed')
+    parser.add_argument('--recovery-controls', type=int, nargs=2, metavar=('STOP', 'BLEND'),
+                        help='consecutive controls of target error that stop a recovery episode; controls of the '
+                             'blend back to the command')
     return parser
 
 
@@ -557,6 +623,9 @@ def validate_args(args):
         raise ValueError('This collector requires at least one step per outer update (0 < utd <= 1)')
     if args.term_penalty is None or len(args.term_penalty)!=3:
         raise ValueError('Three termination-penalty parameters required')
+    if recovery.settings_from_args(args) is not None and args.residual_action:
+        raise ValueError('The recovery options are implemented on the absolute action base; --residual-action is '
+                         'refused with them')
 
 
 def main(argv=None):
@@ -588,8 +657,16 @@ def main(argv=None):
     names=all_clip_names() if args.clips==['all'] else args.clips
     if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
     library=load_library(names,bodies=BM_BODIES)
+    recovery_settings=recovery.settings_from_args(args)
     env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
-        residual_action=args.residual_action,action_rate_space=args.action_rate_space))
+        residual_action=args.residual_action,action_rate_space=args.action_rate_space),recovery=recovery_settings)
+    if recovery_settings is not None:
+        write_json(output/'recovery.json',dict(settings=dataclasses.asdict(recovery_settings),
+            rows=env.recovery_counts,
+            hidden_row_readers='the training reward, the termination penalty, the recovery stop and the critic',
+            command_row_readers="the actor's goal and anchor orientation, the action base, the encoder latents, the "
+                                "clip end, the reset bins and the recipe's height and tilt termination outside "
+                                'recovery'))
     engine=torch_ffi.init(model=env.m,foot_pairs=np.asarray(env.foot_pairs),device=env.device)
     config['engine']=engine;write_json(output/'config.json',config)
     if args.initial_checkpoint:
