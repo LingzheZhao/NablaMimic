@@ -1,7 +1,9 @@
-"""Export the actor of a train.py checkpoint as a BM tracking policy file (format "bm-nabla-tracking-policy-v1").
+"""Export the actor of a train.py or torch_train.py checkpoint as a BM tracking policy file (format
+"bm-nabla-tracking-policy-v1").
 
-A checkpoint (ckpt/it_N.pkl) pickles optax states and needs this package's environment to load. The policy file holds
-only what executing the policy needs, readable with numpy alone (np.load(path, allow_pickle=False)):
+A train.py checkpoint (ckpt/it_N.pkl) pickles optax states and needs this package's environment to load; a
+torch_train.py checkpoint holds numpy arrays and Python values. The policy file holds only what executing the policy
+needs, readable with numpy alone (np.load(path, allow_pickle=False)):
 
   encoder.0.weight ... encoder.8.bias   the goal encoder in torch Linear layout: weight [out, in], bias [out]
   decoder.0.weight ... decoder.8.bias   the decoder, likewise
@@ -24,14 +26,24 @@ value comes from the checkpoint, the run's config.json, the model build_model co
 names, nominal pose, gains, torque limits, setpoint range: the values the policy trained with), the reference manifest
 (export_reference_manifest) or a required argument; a missing or inconsistent value is refused, never defaulted.
 
-Only the current upstream JAX train.py checkpoint/configuration schema is supported.
-The run must be fresh, single-device and not resumed, diverged or guard-halted.
-A numbered it_N.pkl is saved before update N: it holds N completed outer updates,
-and env_steps must equal N * num_envs * horizon. The native checkpoint has no
-completed-update or averaging counter. With actor_ema > 0 it holds actor_ema and,
-under this fresh-run contract, that actor has exactly N averaging updates.
-No checkpoint fields are added or converted. Torch checkpoints are outside this
-command's supported schema.
+Two trainers write the runs this command reads, and config.json tells them apart: train.py (JAX) records no
+training_framework, torch_train.py (PyTorch) records training_framework "torch"; any other value is refused. Both
+save the actor, the critic and the normaliser as the same trees of numpy arrays with kernels in [in, out] layout
+(torch_nets computes x @ w + b as nets does), so the key mapping above applies to both. No checkpoint fields are added
+or converted.
+
+A train.py run must be on one device, not resumed, not diverged and not halted by the SHAC guard. A numbered it_N.pkl
+is saved before update N: it holds N completed outer updates, and env_steps must equal N * num_envs * horizon. Its
+checkpoint has no completed-update or averaging counter. With actor_ema > 0 it holds actor_ema, which in a run that
+was never resumed has exactly N averaging updates.
+
+A torch_train.py run must be on one device, not resumed and completed as that trainer records it: DONE holds
+"completed", terminal.json has status "completed" and a completed_updates of at least N, and there is no FAILED.json.
+Its config.json holds exactly the parser's arguments, train.FIXED and TORCH_RECORDED_FIELDS. Its it_N.pkl holds
+exactly TORCH_CHECKPOINT_FIELDS (and actor_ema when actor_ema > 0), with its own counts completed_updates and
+ema_updates: iter and completed_updates must equal N, env_steps N * num_envs * horizon, and ema_updates N with
+averaging and 0 without. A run started with --initial-checkpoint counts its updates from 0 like any other; the
+declaration names the file its initial weights came from.
 
   python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_011667.pkl --run-config RUN --policy live \\
       --artifact-id POLICY_ID --source-artifact-id CHECKPOINT_ID --reference-manifest MANIFEST.json \\
@@ -76,6 +88,14 @@ CORE_CONFIG_FIELDS = frozenset({
     "residual_action", "resume", "reward_frame", "robot", "seed", "shac_strict", "solver_iterations",
     "state_select", "term_penalty", "uniform_over", "utd", "v_bound", "ws_shards", "ws_swap",
 })
+# Top-level config.json fields that torch_train.py writes beside its parsed arguments and train.FIXED.
+TORCH_RECORDED_FIELDS = frozenset({
+    "training_framework", "git_commit", "devices", "processes", "observed_precision", "gpu", "torch_version",
+    "torch_cuda", "random_stream", "clock", "inputs", "declared_environment", "engine"})
+# The fields torch_train.TorchTrainer.save writes into a numbered checkpoint, besides actor_ema (with actor_ema > 0).
+TORCH_CHECKPOINT_FIELDS = frozenset({
+    "actor", "critic", "cnorm", "bin_q", "iter", "completed_updates", "ema_updates", "wall_s", "env_steps",
+    "training_framework", "execution"})
 
 # Per-frame proprioception (env.TrackingEnv.proprio), in order: (name, width, factor applied to the quantity).
 PROPRIOCEPTION_TERMS = (
@@ -131,12 +151,44 @@ def training_model(cfg):
     return model
 
 
-def run_markers(run_dir):
-    """The current trainer's DONE marker; divergence or a guard halt is refused."""
+def training_framework(cfg):
+    """The trainer that wrote config.json: "torch" where it records training_framework "torch" (torch_train.py),
+    "jax" where it records no training_framework (train.py); any other value is refused."""
+    if "training_framework" not in cfg:
+        return "jax"
+    if cfg["training_framework"] != "torch":
+        raise ValueError(f"training_framework {cfg['training_framework']!r}: only train.py runs (no "
+                         "training_framework) and torch_train.py runs (\"torch\") are exported")
+    return "torch"
+
+
+def torch_argument_fields():
+    """The argument names of torch_train.py's parser (imported only here: torch_train imports torch)."""
+    from .torch_train import build_parser
+    return {action.dest for action in build_parser()._actions} - {"help"}
+
+
+def run_markers(run_dir, framework):
+    """The end records of a run. train.py: its DONE marker if present (the last update); divergence or a guard halt
+    is refused. torch_train.py: DONE holding "completed" and terminal.json with status "completed" are required (it
+    writes both at the end of a run that was not interrupted), and FAILED.json is refused."""
     run_dir = Path(run_dir)
-    for name in ("DIVERGED", "HALTED"):
+    refused = ("DIVERGED", "HALTED", "FAILED.json") if framework == "torch" else ("DIVERGED", "HALTED")
+    for name in refused:
         if (run_dir / name).exists():
-            raise ValueError(f"{run_dir} holds {name}; this exporter requires an unhalted, nondiverged run")
+            raise ValueError(f"{run_dir} holds {name}; a run that diverged, halted or failed is not exported")
+    if framework == "torch":
+        done = (run_dir / "DONE").read_text().strip() if (run_dir / "DONE").exists() else None
+        if done != "completed":
+            raise ValueError(f"{run_dir / 'DONE'}: {done!r}; torch_train.py writes 'completed' at the end of a "
+                             "completed run, and only such a run is exported")
+        terminal = json.loads((run_dir / "terminal.json").read_text())
+        if not isinstance(terminal, dict) or terminal.get("status") != "completed":
+            raise ValueError(f"{run_dir / 'terminal.json'} does not state status 'completed'")
+        count = terminal.get("completed_updates")
+        if type(count) is not int or count < 0:
+            raise ValueError(f"{run_dir / 'terminal.json'}: completed_updates {count!r} is not a nonnegative integer")
+        return {"DONE": dict(content=done), "terminal.json": dict(status="completed", completed_updates=count)}
     markers = {}
     if (run_dir / "DONE").exists():
         done = (run_dir / "DONE").read_text().strip()
@@ -149,7 +201,12 @@ def run_markers(run_dir):
 def run_arguments(cfg):
     """The run's arguments as config.json records them. With --config, train.py records argv (the arguments used,
     without --config, --out and --resume), config_args (those of the file) and config_file; without --config it
-    records none of them, and the parsed arguments are the top-level fields other than NON_ARGUMENT_FIELDS."""
+    records none of them, and the parsed arguments are the top-level fields other than NON_ARGUMENT_FIELDS.
+    torch_train.py records none of the three in either case (with --config, the field config names the file): its
+    parsed arguments are the fields of its parser's argument names."""
+    if training_framework(cfg) == "torch":
+        return dict(arguments_source="parsed_arguments_in_config_json_written_by_torch_train",
+                    parsed_arguments={k: cfg[k] for k in sorted(torch_argument_fields())})
     recorded = {k: cfg[k] for k in ("argv", "config_args", "config_file") if k in cfg}
     if "argv" in cfg:
         return dict(arguments_source="argv_recorded_at_first_start_with_config_file", **recorded)
@@ -164,7 +221,45 @@ def _require(cfg, key):
 
 
 def validate_run_config(cfg):
-    """Validate the current upstream JAX producer's complete fresh-run schema."""
+    """Validate config.json against the trainer that wrote it (training_framework), then the fields both record."""
+    if training_framework(cfg) == "torch":
+        validate_torch_run_config(cfg)
+    else:
+        validate_jax_run_config(cfg)
+    for key in ("num_envs", "horizon", "devices", "processes"):
+        if type(cfg[key]) is not int or cfg[key] <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+    decay = cfg["actor_ema"]
+    if isinstance(decay, bool) or not isinstance(decay, (int, float)) or not 0 <= decay < 1:
+        raise ValueError("actor_ema must be a finite decay in [0, 1)")
+    if type(cfg["actor_ema_warmup"]) is not bool:
+        raise ValueError("actor_ema_warmup must be boolean")
+
+
+def validate_torch_run_config(cfg):
+    """A torch_train.py config.json: exactly its parser's arguments, train.FIXED and TORCH_RECORDED_FIELDS; one device,
+    one process, no resume, no SHAC guard; a recorded source revision and engine; initial_checkpoint null or a path."""
+    from .train import FIXED
+
+    expected = torch_argument_fields() | FIXED.keys() | TORCH_RECORDED_FIELDS
+    missing, extra = expected - cfg.keys(), cfg.keys() - expected
+    if missing or extra:
+        raise ValueError(f"config.json fields of a torch_train.py run: missing {sorted(missing)}, unsupported "
+                         f"{sorted(extra)}")
+    if cfg["resume"] is not None or cfg["devices"] != 1 or cfg["processes"] != 1 or cfg["shac_strict"]:
+        raise ValueError("Export requires a single-device torch_train.py run without resume or the SHAC guard")
+    if not isinstance(cfg["git_commit"], str) or not cfg["git_commit"]:
+        raise ValueError(f"git_commit {cfg['git_commit']!r}: torch_train.py records the source revision it ran")
+    if not isinstance(cfg["engine"], dict):
+        raise ValueError("engine must be the engine record torch_train.py writes")
+    initial = cfg["initial_checkpoint"]
+    if initial is not None and (not isinstance(initial, str) or not initial):
+        raise ValueError(f"initial_checkpoint {initial!r} must be null or the path of the initial checkpoint")
+
+
+def validate_jax_run_config(cfg):
+    """A train.py config.json: the required core fields, no field outside its parser's arguments and
+    NON_ARGUMENT_FIELDS, one device, one process, one training segment, no resume, no SHAC guard."""
     from .train import build_parser
 
     arguments = {action.dest for action in build_parser()._actions} - {"help"}
@@ -178,14 +273,6 @@ def validate_run_config(cfg):
         segments = cfg["segments"]
         if not isinstance(segments, list) or len(segments) != 1 or segments[0]["resume"] is not None:
             raise ValueError("Export requires exactly one fresh training segment")
-    for key in ("num_envs", "horizon", "devices", "processes"):
-        if type(cfg[key]) is not int or cfg[key] <= 0:
-            raise ValueError(f"{key} must be a positive integer")
-    decay = cfg["actor_ema"]
-    if isinstance(decay, bool) or not isinstance(decay, (int, float)) or not 0 <= decay < 1:
-        raise ValueError("actor_ema must be a finite decay in [0, 1)")
-    if type(cfg["actor_ema_warmup"]) is not bool:
-        raise ValueError("actor_ema_warmup must be boolean")
     recorded = {"argv", "config_args", "config_file"} & cfg.keys()
     if recorded and recorded != {"argv", "config_args", "config_file"}:
         raise ValueError("The current trainer records argv, config_args and config_file together")
@@ -200,16 +287,29 @@ def validate_run_config(cfg):
 
 
 def update_counts(checkpoint, cfg, label):
-    """Current numbered checkpoint count; EMA count is derived for a fresh run."""
+    """(completed outer updates, the source of that count, averaging updates) of numbered checkpoint it_N.pkl. A
+    train.py checkpoint records no counter: N is the label, checked against iter and env_steps, and the averaging
+    count is N with actor_ema > 0 in a run that was never resumed. A torch_train.py checkpoint records
+    completed_updates and ema_updates, which must agree with the label, iter, env_steps and the configured averaging."""
     validate_run_config(cfg)
-    expected = {"actor", "critic", "cnorm", "st_a", "st_c", "bin_q", "iter", "wall_s", "env_steps"}
-    if cfg["action_target"]:
-        expected.add("st_r")
+    torch_run = training_framework(cfg) == "torch"
+    if torch_run:
+        trainer, expected = "torch_train.py", set(TORCH_CHECKPOINT_FIELDS)
+    else:
+        trainer, expected = "train.py", {"actor", "critic", "cnorm", "st_a", "st_c", "bin_q", "iter", "wall_s",
+                                         "env_steps"}
+        if cfg["action_target"]:
+            expected.add("st_r")
     if cfg["actor_ema"] > 0:
         expected.add("actor_ema")
-    if not isinstance(checkpoint, dict) or checkpoint.keys() != expected:
-        raise ValueError(f"Checkpoint must have the current train.py fields {sorted(expected)}")
-    for name, value in (("label", label), ("iter", checkpoint["iter"]), ("env_steps", checkpoint["env_steps"])):
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"checkpoint is a {type(checkpoint).__name__}, expected the dict {trainer} saves")
+    if checkpoint.keys() != expected:
+        raise ValueError(f"checkpoint fields: missing {sorted(expected - checkpoint.keys())}, unexpected "
+                         f"{sorted(checkpoint.keys() - expected)} ({trainer} with this configuration saves "
+                         f"{sorted(expected)})")
+    counted = ("iter", "env_steps", "completed_updates", "ema_updates") if torch_run else ("iter", "env_steps")
+    for name, value in (("label", label), *((k, checkpoint[k]) for k in counted)):
         if type(value) is not int or value < 0:
             raise ValueError(f"{name} must be a nonnegative integer")
     per_update = cfg["num_envs"] * cfg["devices"] * cfg["horizon"]
@@ -218,7 +318,18 @@ def update_counts(checkpoint, cfg, label):
     wall = checkpoint["wall_s"]
     if isinstance(wall, bool) or not isinstance(wall, (int, float)) or not np.isfinite(wall) or wall < 0:
         raise ValueError("wall_s must be a finite nonnegative elapsed time")
-    return label, "numbered_checkpoint_label_and_env_steps", label if cfg["actor_ema"] > 0 else 0
+    if not torch_run:
+        return label, "numbered_checkpoint_label_and_env_steps", label if cfg["actor_ema"] > 0 else 0
+    if checkpoint["training_framework"] != "torch" or checkpoint["execution"] != cfg["execution"]:
+        raise ValueError(f"checkpoint training_framework {checkpoint['training_framework']!r} and execution "
+                         f"{checkpoint['execution']!r} differ from config.json's 'torch' and {cfg['execution']!r}")
+    completed, averaging = checkpoint["completed_updates"], checkpoint["ema_updates"]
+    if completed != label:
+        raise ValueError(f"checkpoint completed_updates {completed} differs from its label {label}")
+    if averaging != (completed if cfg["actor_ema"] > 0 else 0):
+        raise ValueError(f"checkpoint ema_updates {averaging} after {completed} completed updates with actor_ema "
+                         f"{cfg['actor_ema']}: torch_train.py averages once per completed update when actor_ema > 0")
+    return completed, "checkpoint_completed_updates", averaging
 
 
 def select_actor(checkpoint, policy):
@@ -339,7 +450,7 @@ def build_critic_file(checkpoint, cfg, *, label, checkpoint_name, run_dir, sourc
         format=CRITIC_FORMAT,
         checkpoint=str(checkpoint_name), run=str(run_dir), checkpoint_label=label, completed_updates=completed,
         source_revision=source_revision, run_git_commit=recorded,
-        training_framework="jax",
+        training_framework=training_framework(cfg),
         input_layout=[[n, w] for n, w, _ in terms],
         input_terms=[dict(name=n, width=w, content=c) for n, w, c in terms],
         input_width=width, activation="ELU", hidden=hidden, output=1,
@@ -392,7 +503,11 @@ def reference_record(manifest, cfg):
 
 
 def source_run_record(cfg):
-    """Arguments and source state declared by the current JAX trainer."""
+    """The run's arguments and source state as its trainer records them. train.py records git_commit, git_dirty and
+    gpu; torch_train.py records git_commit, gpu, its torch build and the declared environment, and no git_dirty."""
+    if training_framework(cfg) == "torch":
+        return dict(**run_arguments(cfg), training_framework="torch",
+                    **{k: cfg[k] for k in ("git_commit", "gpu", "torch_version", "torch_cuda", "declared_environment")})
     record = dict(**run_arguments(cfg), training_framework="jax", git_commit=_require(cfg, "git_commit"),
                   git_dirty=_require(cfg, "git_dirty"))
     record["gpu"] = _require(cfg, "gpu")
@@ -408,6 +523,14 @@ def engine_records(cfg):
     if not records:
         raise ValueError("config.json records no engine identity")
     return records
+
+
+def initial_weights_record(cfg):
+    """Where a torch_train.py run's initial actor and critic came from: the file given as --initial-checkpoint (a
+    train.py checkpoint at update 0), or, without one, nets.actor_init and nets.mlp_init with the run's seed."""
+    if cfg["initial_checkpoint"] is not None:
+        return dict(kind="initial_checkpoint", path=cfg["initial_checkpoint"])
+    return dict(kind="initialised_from_seed", seed=cfg["seed"])
 
 
 def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact_id, source_artifact_id,
@@ -426,9 +549,16 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
     model = training_model(cfg)
     if not isinstance(end_markers, dict):
         raise TypeError("end_markers must be the mapping run_markers() returns")
-    if end_markers.keys() - {"DONE"}:
-        raise ValueError("Only an unhalted, nondiverged run can be exported")
-    if "DONE" in end_markers and label > end_markers["DONE"]["last_update"]:
+    torch_run = training_framework(cfg) == "torch"
+    if torch_run:
+        if end_markers.keys() != {"DONE", "terminal.json"}:
+            raise ValueError("A torch_train.py run is exported only when DONE and terminal.json record its completion")
+        final = end_markers["terminal.json"]["completed_updates"]
+    else:
+        if end_markers.keys() - {"DONE"}:
+            raise ValueError("Only an unhalted, nondiverged run can be exported")
+        final = end_markers["DONE"]["last_update"] if "DONE" in end_markers else None
+    if final is not None and label > final:
         raise ValueError("Checkpoint label is later than the run's declared final update")
     if int(_require(cfg, "hist_len")) != HIST or _require(cfg, "obs_mode") != "anchor_ori":
         raise ValueError("config.json must declare hist_len 10 and obs_mode anchor_ori (the inputs of env.py)")
@@ -450,9 +580,11 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
             selected_weights="averaged" if policy == "ema" else "live",
             checkpoint_label=label, checkpoint_evaluation_policy=None,
             averaging=dict(decay=cfg["actor_ema"], warmup=cfg["actor_ema_warmup"],
-                           count_source="fresh_run_one_average_per_completed_outer_update"),
+                           count_source="checkpoint_ema_updates" if torch_run
+                           else "fresh_run_one_average_per_completed_outer_update"),
             source_checkpoint=str(source_checkpoint), source_run_configuration=str(source_config),
-            run_end_markers=end_markers),
+            run_end_markers=end_markers,
+            **({"initial_weights": initial_weights_record(cfg)} if torch_run else {})),
         architecture=architecture,
         inputs=dict(
             proprioception=dict(terms=_terms(PROPRIOCEPTION_TERMS), width=PROPRIO_DIM,
@@ -529,8 +661,9 @@ def write_policy_file(arrays, declaration, out, *, file_format=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m nablamimic.export_bm_policy",
-                                 description="Export a train.py checkpoint's actor as a BM tracking policy file "
-                                             f"({FORMAT}): torch-layout weights and a JSON declaration in one npz.")
+                                 description="Export the actor of a train.py or torch_train.py checkpoint as a BM "
+                                             f"tracking policy file ({FORMAT}): torch-layout weights and a JSON "
+                                             "declaration in one npz.")
     ap.add_argument("--checkpoint", required=True, help="RUN/ckpt/it_N.pkl")
     ap.add_argument("--run-config", required=True,
                     help="the run's config.json, or the run directory holding it (the checkpoint must lie in its ckpt/)")
@@ -566,7 +699,7 @@ def main(argv=None):
     if Path(args.checkpoint).resolve().parent != (run_dir / "ckpt").resolve():
         ap.error(f"--checkpoint must lie in the run directory's ckpt/: {run_dir / 'ckpt'}")
     validate_run_config(cfg)
-    markers = run_markers(run_dir)
+    markers = run_markers(run_dir, training_framework(cfg))
     manifest = read_manifest(args.reference_manifest)
     with open(args.checkpoint, "rb") as f:
         checkpoint = pickle.load(f)

@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import importlib.util
 import io
 import json
 import pickle
@@ -623,6 +624,239 @@ class RunDirectoryTests(unittest.TestCase):
             self.assertFalse(output.exists())
             (self.run / marker).unlink()
 
+
+def torch_run_config(**override):
+    """config.json as torch_train.main writes it: the parser's values, train.FIXED and its recorded fields."""
+    from nablamimic.torch_train import build_parser
+    from nablamimic.train import FIXED
+    cfg = dict(vars(build_parser().parse_args(["--out", "RUN"])), **FIXED)
+    cfg.update(physics="engine", num_envs=16, horizon=4, anchor_to_decoder=True, actor_obs_norm=False,
+               enc_hoist="on", critic_pre_state=True, actor_hidden=list(HIDDEN), actor_latent=LATENT,
+               critic_hidden=list(CRITIC_HIDDEN), residual_action=False, action_rate_space="setpoint",
+               actor_ema=.999, actor_ema_warmup=True, clips=["all"], config="synthetic.args",
+               initial_checkpoint="inputs/initial-it000000.pkl",
+               training_framework="torch", git_commit="fork-commit", devices=1, processes=1,
+               observed_precision=dict(float32_matmul_precision="high"), gpu="test card", torch_version="2.9.1",
+               torch_cuda="12.8", random_stream="Torch default generators", clock="training_s excludes setup",
+               inputs=dict(LAFAN1_G1_DIR="lafan1"), declared_environment="test image",
+               engine=dict(version="0.1.0", key="library-key", arch="sm_89"))
+    cfg.update(override)
+    return cfg
+
+
+@unittest.skipIf(importlib.util.find_spec("torch") is None, "the optional PyTorch backend is not installed")
+class TorchRunTests(unittest.TestCase):
+    """A torch_train.py run directory: the checkpoint is written by TorchTrainer.save itself from small networks;
+    compiled_action_parameters (Menagerie) is replaced by the synthetic values."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.run = self.root / "run"
+        (self.run / "ckpt").mkdir(parents=True)
+        self.write_run(torch_run_config())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_run(self, cfg, averaging_updates=LABEL):
+        """config.json, the end records of a completed run and it_LABEL.pkl saved by TorchTrainer.save."""
+        import torch
+        from nablamimic import torch_nets
+        from nablamimic.torch_train import TorchTrainer
+        source = averaged_checkpoint()
+        (self.run / "config.json").write_text(json.dumps(cfg))
+        (self.run / "DONE").write_text("completed\n")
+        (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL)))
+        trainer = types.SimpleNamespace(
+            completed_updates=LABEL, n=cfg["num_envs"], h=cfg["horizon"],
+            actor=torch_nets.tree_from_jax(source["actor"]), critic=torch_nets.tree_from_jax(source["critic"]),
+            ema=torch_nets.tree_from_jax(source["actor_ema"]), ema_count=torch.tensor(averaging_updates),
+            cnorm=torch_nets.tree_from_jax(source["cnorm"]),
+            sampler=types.SimpleNamespace(bin_q=torch.ones((2, 1))),
+            args=types.SimpleNamespace(actor_ema=cfg["actor_ema"], execution=cfg["execution"]))
+        for old in (self.run / "ckpt").iterdir():
+            old.unlink()
+        self.checkpoint = Path(TorchTrainer.save(trainer, self.run, 1.5))
+        with open(self.checkpoint, "rb") as f:
+            self.saved = pickle.load(f)
+
+    def rewrite_checkpoint(self, checkpoint):
+        self.checkpoint.unlink()
+        with open(self.checkpoint, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+    def main(self, out, policy="ema", extra=()):
+        argv = ["--checkpoint", str(self.checkpoint), "--run-config", str(self.run), "--policy", policy,
+                "--artifact-id", "policy-from-main", "--source-artifact-id", "checkpoint-from-main",
+                "--reference-manifest", str(self.write_manifest()), "--engine-revision", "engine-from-main",
+                "--engine-contact-capacity", "96", "--engine-constraint-row-capacity", "288", "--out", str(out),
+                *extra]
+        with mock.patch.object(ebp, "compiled_action_parameters", return_value=action_parameters()), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            ebp.main(argv)
+
+    def write_manifest(self):
+        path = self.root / "manifest.json"
+        path.write_text(json.dumps(manifest()))
+        return path
+
+    def load(self, out):
+        with np.load(out, allow_pickle=False) as z:
+            arrays = {k: z[k] for k in z.files}
+        return arrays, json.loads(arrays.pop("declaration").item())
+
+    def refused(self, policy="ema"):
+        out = self.root / "refused.npz"
+        with self.assertRaises((ValueError, KeyError, TypeError, FileNotFoundError)):
+            self.main(out, policy=policy)
+        self.assertFalse(out.exists())
+
+    def test_saved_checkpoint_has_the_declared_fields(self):
+        self.assertEqual(set(self.saved), ebp.TORCH_CHECKPOINT_FIELDS | {"actor_ema"})
+        self.assertEqual((self.saved["iter"], self.saved["completed_updates"], self.saved["ema_updates"],
+                          self.saved["env_steps"]), (LABEL, LABEL, LABEL, LABEL * PER_UPDATE))
+
+    def test_exports_averaged_and_trained_weights(self):
+        import torch
+        from nablamimic import torch_nets
+        for policy, key, selected in (("ema", "actor_ema", "averaged"), ("live", "actor", "live")):
+            with self.subTest(policy=policy):
+                out = self.root / f"{policy}.npz"
+                self.main(out, policy=policy)
+                arrays, d = self.load(out)
+                actor = self.saved[key]
+                self.assertEqual(set(arrays), {f"{p}.{n}.{s}" for p in ("encoder", "decoder") for n in (0, 2, 4)
+                                               for s in ("weight", "bias")})
+                for tree, prefix in (("enc", "encoder"), ("dec", "decoder")):
+                    for i, (w, b) in enumerate(actor[tree]):
+                        weight, bias = arrays[f"{prefix}.{2 * i}.weight"], arrays[f"{prefix}.{2 * i}.bias"]
+                        np.testing.assert_array_equal(weight, w.T)  # [out, in]
+                        np.testing.assert_array_equal(bias, b)
+                        self.assertEqual((weight.dtype, bias.dtype), (np.float32, np.float32))
+                self.assertEqual(arrays["encoder.0.weight"].shape, (HIDDEN[0], 680))
+                self.assertEqual(arrays["decoder.4.weight"].shape, (NU, HIDDEN[-1]))
+                rng = np.random.default_rng(3)
+                hist = rng.normal(size=(4, 930)).astype(np.float32)
+                goal = rng.normal(size=(4, 686)).astype(np.float32)
+                with torch.no_grad():
+                    want = torch_nets.actor_apply(torch_nets.tree_from_jax(actor), torch.from_numpy(hist),
+                                                  torch.from_numpy(goal)).numpy()
+                np.testing.assert_allclose(numpy_forward(arrays, hist, goal), want, rtol=1e-5, atol=1e-6)
+                src = d["policy_source"]
+                self.assertEqual((src["kind"], src["selected_weights"]), ("imported_nablamimic", selected))
+                self.assertEqual(src["counts"], dict(completed_outer_updates=LABEL, averaging_updates=LABEL))
+                self.assertEqual(src["completed_outer_updates_source"], "checkpoint_completed_updates")
+                self.assertEqual(src["averaging"], dict(decay=.999, warmup=True, count_source="checkpoint_ema_updates"))
+                self.assertEqual(src["run_end_markers"], {"DONE": dict(content="completed"),
+                                                          "terminal.json": dict(status="completed",
+                                                                                completed_updates=LABEL)})
+                self.assertEqual(src["initial_weights"], dict(kind="initial_checkpoint",
+                                                              path="inputs/initial-it000000.pkl"))
+                self.assertEqual(src["source_checkpoint"], str(self.checkpoint.resolve()))
+                self.assertEqual(d["action"]["baseline"], dict(kind="nominal_joint_position"))
+                self.assertEqual(d["inputs"]["previous_action"], "executed_with_exploration_noise")
+                dom = d["training_domain"]
+                self.assertEqual(dom["training_matmul_precision"], "nets_tf32")
+                self.assertEqual(dom["engine"]["reported"], [dict(version="0.1.0", key="library-key", arch="sm_89")])
+                self.assertEqual((dom["engine"]["contact_capacity"], dom["engine"]["declared_revision"]),
+                                 (96, "engine-from-main"))
+                run = dom["source_run"]
+                self.assertEqual((run["training_framework"], run["git_commit"], run["torch_version"]),
+                                 ("torch", "fork-commit", "2.9.1"))
+                self.assertNotIn("git_dirty", run)
+                self.assertEqual(run["arguments_source"], "parsed_arguments_in_config_json_written_by_torch_train")
+                self.assertEqual((run["parsed_arguments"]["execution"], run["parsed_arguments"]["num_envs"],
+                                  run["parsed_arguments"]["config"]), ("compile-graph", 16, "synthetic.args"))
+                for field in ("robot", "engine", "training_framework", "gpu", "actor_hidden"):
+                    self.assertNotIn(field, run["parsed_arguments"])
+
+    def test_action_baseline_follows_residual_action(self):
+        for residual, baseline in ((False, dict(kind="nominal_joint_position")),
+                                   (True, dict(kind="next_reference_joint_position",
+                                               row="min(current_row + 1, clip_last_row)"))):
+            with self.subTest(residual_action=residual):
+                cfg = torch_run_config(residual_action=residual)
+                _, d = ebp.build_policy_file(
+                    self.saved, cfg, action_parameters(), manifest(), policy="ema", label=LABEL,
+                    artifact_id="policy-test", source_artifact_id="checkpoint-test", engine_revision="engine-test",
+                    contact_capacity=96, constraint_row_capacity=288, end_markers=ebp.run_markers(self.run, "torch"))
+                self.assertEqual(d["action"]["baseline"], baseline)
+
+    def test_seed_initialised_run_declares_its_seed(self):
+        self.write_run(torch_run_config(initial_checkpoint=None, seed=3))
+        out = self.root / "seeded.npz"
+        self.main(out)
+        self.assertEqual(self.load(out)[1]["policy_source"]["initial_weights"],
+                         dict(kind="initialised_from_seed", seed=3))
+
+    def test_critic_file(self):
+        out, critic = self.root / "policy.npz", self.root / "critic.npz"
+        self.main(out, extra=["--critic-out", str(critic), "--source-revision", "fork-commit"])
+        with np.load(critic, allow_pickle=False) as z:
+            arrays = {k: z[k] for k in z.files}
+        d = json.loads(arrays.pop("declaration").item())
+        self.assertEqual(arrays.pop("format").item(), ebp.CRITIC_FORMAT)
+        for i, (w, b) in enumerate(self.saved["critic"]):
+            np.testing.assert_array_equal(arrays.pop(f"critic.{2 * i}.weight"), w.T)
+            np.testing.assert_array_equal(arrays.pop(f"critic.{2 * i}.bias"), b)
+        np.testing.assert_array_equal(arrays.pop("normalizer.mean"), self.saved["cnorm"][0])
+        np.testing.assert_array_equal(arrays.pop("normalizer.variance"), self.saved["cnorm"][1])
+        self.assertEqual(arrays, {})
+        self.assertEqual((d["training_framework"], d["completed_updates"], d["fitted_inputs"]),
+                         ("torch", LABEL, "pre_step_state"))
+
+    def test_averaged_weights_missing(self):
+        checkpoint = dict(self.saved)
+        del checkpoint["actor_ema"]
+        self.rewrite_checkpoint(checkpoint)
+        self.refused()  # the configuration averages, so the checkpoint must hold actor_ema
+        self.write_run(torch_run_config(actor_ema=0.0), averaging_updates=0)
+        self.assertNotIn("actor_ema", self.saved)
+        self.main(self.root / "trained.npz", policy="live")
+        self.refused(policy="ema")
+
+    def test_checkpoint_fields(self):
+        for change in (dict(evaluation_policy="live"), dict(st_a=()), dict(ema_updates=LABEL - 1),
+                       dict(completed_updates=LABEL - 1), dict(env_steps=LABEL * PER_UPDATE + 1),
+                       dict(training_framework="jax"), dict(execution="eager"), dict(completed_updates=float(LABEL))):
+            with self.subTest(change=change):
+                self.rewrite_checkpoint(dict(self.saved, **change))
+                self.refused()
+        for field in ("completed_updates", "ema_updates", "execution"):
+            with self.subTest(missing=field):
+                self.rewrite_checkpoint({k: v for k, v in self.saved.items() if k != field})
+                self.refused()
+
+    def test_completion_records(self):
+        for content in ("12", "interrupted", ""):
+            with self.subTest(DONE=content):
+                (self.run / "DONE").write_text(content)
+                self.refused()
+        (self.run / "DONE").unlink()
+        self.refused()
+        (self.run / "DONE").write_text("completed\n")
+        for terminal in (dict(status="interrupted", completed_updates=LABEL), dict(status="completed"),
+                         dict(status="completed", completed_updates=LABEL - 1)):
+            with self.subTest(terminal=terminal):
+                (self.run / "terminal.json").write_text(json.dumps(terminal))
+                self.refused()
+        (self.run / "terminal.json").unlink()
+        self.refused()
+        (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL)))
+        (self.run / "FAILED.json").write_text("{}")
+        self.refused()
+
+    def test_configuration(self):
+        cfg = torch_run_config()
+        del cfg["execution"]
+        for changed in (torch_run_config(resume="RUN/ckpt/it_000006.pkl"), torch_run_config(unrecognized_field=1),
+                        torch_run_config(git_dirty=False), torch_run_config(training_framework="jax"),
+                        torch_run_config(devices=2), torch_run_config(git_commit=None),
+                        torch_run_config(engine=None), cfg):
+            with self.subTest(changed={k: changed.get(k) for k in ("resume", "devices", "training_framework")}):
+                (self.run / "config.json").write_text(json.dumps(changed))
+                self.refused()
 
 
 @unittest.skipIf(not SCENE.exists(), f"no Menagerie checkout at {SCENE} (scripts/setup_menagerie.sh)")

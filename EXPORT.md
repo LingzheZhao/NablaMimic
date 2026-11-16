@@ -5,14 +5,18 @@ JSON. Loading the source checkpoint still requires this package's pinned
 dependency environment because it contains optimizer state. Output files are
 written once; existing destinations are refused.
 
-The supported producer is the current upstream JAX `train.py`, on one device,
-started fresh without resume or the SHAC guard. Only numbered
-`RUN/ckpt/it_N.pkl` checkpoints are supported. `params.pkl` is saved at a
+The command reads runs of both trainers in this package: the JAX `train.py`
+and the PyTorch `torch_train.py`. The run's `config.json` names the trainer: a
+`torch_train.py` run records `training_framework` as `"torch"`, a `train.py`
+run records no `training_framework`, and any other value is refused. Either
+run must be on one device, without resume or the SHAC guard. Only numbered
+`RUN/ckpt/it_N.pkl` checkpoints are read. `params.pkl` is saved at a
 different point in the update loop and is not an export input. A run marked
-`DIVERGED` or `HALTED` is refused. Torch checkpoints and configurations are
-outside this command's schema.
+`DIVERGED` or `HALTED` is refused. The sections below describe a `train.py`
+run first; [PyTorch-trainer runs](#pytorch-trainer-runs) gives what differs
+for a `torch_train.py` run.
 
-## Current checkpoint counts and EMA
+## train.py checkpoint counts and EMA
 
 The trainer saves numbered checkpoint N before starting update N, after N
 completed outer updates. Its native `env_steps` must equal
@@ -38,6 +42,59 @@ Known optional CLI records may be present without becoming mandatory core
 fields, and absent optional records are not filled with defaults. This keeps
 the baseline schema usable when an optional feature is added to the parser.
 Policy export still requires the explicit `obs_mode=anchor_ori` contract.
+
+## PyTorch-trainer runs
+
+A `torch_train.py` run is read by the records that trainer writes:
+
+- `config.json` holds exactly the trainer's parsed arguments (its parser adds
+  `--matmul-precision`, `--execution`, `--regression-batch`,
+  `--initial-checkpoint`, `--save-wall-minutes` and `--full-state-at-end` to
+  that of `train.py`), the fields of `train.FIXED` and the fields the trainer
+  adds: `training_framework`, `git_commit`, `devices`, `processes`,
+  `observed_precision`, `gpu`, `torch_version`, `torch_cuda`, `random_stream`,
+  `clock`, `inputs`, `declared_environment` and `engine`. A missing field or a
+  field outside that set is refused. The trainer records no `argv`,
+  `config_args`, `config_file`, `segments` or `git_dirty`. The declaration's
+  `source_run` holds the parsed arguments, the source revision, the GPU, the
+  torch build and the declared environment, and no `git_dirty`.
+- The run must be completed: `DONE` holds `completed`, `terminal.json` has
+  status `completed`, and there is no `FAILED.json`. The trainer writes these
+  at the end of a run that was not interrupted, which includes a run stopped
+  by its `--hours` budget, so the terminal `completed_updates` can be below
+  `iters`. The declaration records both files in `run_end_markers`, and a
+  checkpoint label above the terminal `completed_updates` is refused.
+- Checkpoint fields are exactly `actor`, `critic`, `cnorm`, `bin_q`, `iter`,
+  `completed_updates`, `ema_updates`, `wall_s`, `env_steps`,
+  `training_framework` and `execution`, with `actor_ema` added when
+  `actor_ema > 0`. They hold no optimizer state. At checkpoint N, `iter` and
+  `completed_updates` must equal N, `env_steps` must equal
+  `N * num_envs * horizon`, `ema_updates` must equal N with averaging and 0
+  without, and `training_framework` and `execution` must be `"torch"` and the
+  configured execution. The declaration takes its counts from
+  `completed_updates` and `ema_updates`.
+- A run started with `--initial-checkpoint` counts its updates from zero like
+  any other run. The declaration's `policy_source.initial_weights` gives the
+  path of that file as `config.json` records it; a run started without one
+  records the seed its networks were initialised with.
+- The networks are saved as the same trees of `[in, out]` kernels as in a
+  `train.py` checkpoint, so the policy and critic files have the same entries,
+  shapes and orientation.
+- The configuration check imports the parser of `torch_train.py`, so exporting
+  such a run needs the optional `torch` dependency in addition to the JAX and
+  MuJoCo packages that compiling the model needs.
+
+The policy inputs and the action map of `torch_env.py` are those of `env.py`,
+so a declaration states them in the same terms for both trainers: the five
+proprioception terms in the same order and scaling, a history of ten frames
+oldest first with the newest appended last and the first frame tiled at a
+reset with a zero previous action, the previous action as executed with its
+exploration noise, ten goal rows held at the clip end, the first two columns of
+the anchor's relative rotation, and setpoints
+`clip(baseline + 0.25 * effort / kp * action, setpoint_lower, setpoint_upper)`
+around the knees-bent default pose (`nominal_joint_position`) or, with
+`residual_action`, the next reference row's joint positions.
+The critic inputs, the normalizer and its update are also the same.
 
 ## Reference manifest
 
@@ -140,8 +197,10 @@ Fresh current-schema inputs test native count semantics, live/EMA selection,
 configuration and marker rejection, action/critic layout, NumPy execution against
 the actual JAX networks, output-path protection and reference manifest order.
 The compiled-model comparison runs when the current Menagerie checkout is
-available. These tests do not establish a downstream executor's physical
-behavior, nor do earlier exports validate the updated source automatically.
+available. The `torch_train.py` run tests need the optional `torch`
+dependency and are skipped without it. These tests do not establish a
+downstream executor's physical behavior, nor do earlier exports validate the
+updated source automatically.
 
 The pinned provisioned CPU suite passed all 78 tests with no skips. An integration
 run then used the actual official seed-zero checkpoint after 1,500 updates and
