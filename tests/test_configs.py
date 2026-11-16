@@ -2,6 +2,7 @@
 data needed)."""
 
 from argparse import Namespace
+import importlib.util
 from pathlib import Path
 import unittest
 
@@ -112,6 +113,7 @@ def test_ppo():
         assert (x.hours, x.ckpt_minutes, x.ckpt_dense, x.solver_iterations) == (6, 15, [1, 2], 10)
 
 
+@unittest.skipIf(importlib.util.find_spec("torch") is None, "Optional PyTorch backend is not installed")
 class RecoveryConfigTest(unittest.TestCase):
     """configs/absolute.args is the 0.2.0 recipe on NablaEngine with absolute actions, and configs/recovery.args adds
     the recovery options with BM's values and nothing else; both pass the PyTorch trainer's validation."""
