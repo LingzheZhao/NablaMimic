@@ -857,7 +857,11 @@ class TorchRunTests(unittest.TestCase):
         (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL)))
         (self.run / "config.json").write_text(json.dumps(torch_run_config(iters=LABEL + 1)))
         self.refused()  # stopped by its --hours budget after LABEL of LABEL + 1 requested updates
+        (self.run / "config.json").write_text(json.dumps(torch_run_config(iters=LABEL - 1)))
+        (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL - 1)))
+        self.refused()  # a checkpoint label above the run's final update
         (self.run / "config.json").write_text(json.dumps(torch_run_config()))
+        (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL)))
         (self.run / "FAILED.json").write_text("{}")
         self.refused()
 
