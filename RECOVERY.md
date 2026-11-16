@@ -263,8 +263,9 @@ python -m nablamimic.engine_rollouts --run runs/recovery_s0 --iter 3000 \
 recovery options, so no hidden row, recovery stop or termination masking
 enters a rollout; domain randomisation is off (foot friction 1, zero
 joint-encoder bias, zero torso centre-of-mass offset), observation noise is
-off and the actions are the actor's output without noise. The network matmul
-precision is the run's. The values of `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and
+off and the actions are the actor's output without noise. The policy acts as
+the trainer's collector acts: `env.policy_obs` into `actor_apply`. The
+network matmul precision is the run's. The values of `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR` and
 `MENAGERIE_DIR` must equal the run's (its `config.json`), since the scene's
 rows index the motion library they locate; the program compares the values,
 not the files. The scene is checked against the library before the output
