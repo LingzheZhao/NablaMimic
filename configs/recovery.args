@@ -8,8 +8,8 @@
 --recovery-hidden-clips fallAndGetUp1_subject1 fallAndGetUp1_subject5 fallAndGetUp2_subject2 fallAndGetUp2_subject3
     fallAndGetUp3_subject1
 # StableMimic, Section IV-A: no command comes from a get-up recording (its commands come only from the LAFAN1 dance
-# subset, disjoint from its get-up library). Excluding every get-up recording of the library, fallAndGetUp1_subject4
-# included, and drawing commands from all other clips is this repository's choice.
+# subset, disjoint from its get-up library). The list (the six get-up recordings of the library, fallAndGetUp1_subject4
+# included) and drawing commands from every other clip are this repository's choice.
 --recovery-command-excluded-clips fallAndGetUp1_subject1 fallAndGetUp1_subject4 fallAndGetUp1_subject5
     fallAndGetUp2_subject2 fallAndGetUp2_subject3 fallAndGetUp3_subject1
 # A low row: pelvis below 0.50 m, or pelvis up axis tilted beyond 60 degrees (world z below 0.5).
