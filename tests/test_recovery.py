@@ -286,6 +286,49 @@ class RecoveryStartTest(unittest.TestCase):
                                                  "body_ang_vel", "action_rate", "joint_limit", "term_pen"})
 
 
+class TrackingControlTest(unittest.TestCase):
+    def test_tracking_controls_of_a_recovery_environment_equal_those_of_the_plain_environment(self):
+        """Ordinary resets and their controls in an environment with the recovery setting compute bit for bit what
+        the environment without it computes."""
+        for residual in (False, True):
+            with self.subTest(residual_action=residual):
+                env = environment(settings(), residual=residual, noise=True)
+                plain = environment(None, residual=residual, noise=True)
+                generator = torch.Generator().manual_seed(4)
+                frames = torch.tensor([WALK+40, WALK+300, 76])  # getup_a's clip ends three controls after row 76
+                noise = env.sample_reset_noise(3, generator)
+                state, base = env.reset(frames, noise), plain.reset(frames, noise)
+                self.assertFalse(state["recovering"].any())
+                for key in BASE_STATE_KEYS:
+                    self.assertTrue(torch.equal(state[key], base[key]), key)
+                action = 0.1*torch.randn((3, env.nu), generator=generator)
+                observation = env.sample_observation_noise(3, generator)
+                stepped = env.step(state, action, observation["proprio"])
+                base_stepped = plain.step(base, action, observation["proprio"])
+                reward, terms = env.reward(stepped, action, state["prev_a"], prev=state)
+                base_reward, base_terms = plain.reward(base_stepped, action, base["prev_a"], prev=base)
+                self.assertTrue(torch.equal(reward, base_reward))
+                self.assertEqual(set(terms), set(base_terms))
+                for name in terms:
+                    self.assertTrue(torch.equal(terms[name], base_terms[name]), name)
+                for one, two in ((env.terminated(stepped), plain.terminated(base_stepped)),
+                                 (env.hazard_features(stepped), plain.hazard_features(base_stepped)),
+                                 (env.critic_obs(state), plain.critic_obs(base)),
+                                 (env.critic_obs(stepped), plain.critic_obs(base_stepped)),
+                                 *zip(env.policy_obs(stepped, observation["goal"]),
+                                      plain.policy_obs(base_stepped, observation["goal"]))):
+                    self.assertTrue(torch.equal(one, two))
+                reset_frames = torch.tensor([WALK+9, WALK+10, WALK+11])
+                records = window_runner(env, 6, term_penalty=(2., .08, .10))[0](
+                    state, env.reset(reset_frames, noise))[3]
+                base_records = window_runner(plain, 6, term_penalty=(2., .08, .10))[0](
+                    base, plain.reset(reset_frames, noise))[3]
+                self.assertTrue(bool(records["done"][:, 2].any()))
+                self.assertTrue(bool((records["regime"] == TRACKING).all()))
+                for key in ("r", "term", "done", "cobs", "cobs_pre", "v2", "a_pi", "hist", "goal", "frame"):
+                    self.assertTrue(torch.equal(records[key], base_records[key]), key)
+
+
 class CommandReadersTest(unittest.TestCase):
     """Only the reward, the termination penalty, the recovery stop and the critic read the hidden row."""
 
