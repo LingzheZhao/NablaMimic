@@ -261,12 +261,12 @@ on the CPU on generated libraries, records and logs.
 
 ## Results
 
-**Conditions.** The trainings ran at revision 9245b4e0a477, whose code is that of the head of the branch
-`train-from-placed-lying-starts`; the scene, rollouts, readings, exposure and outcome ran at revision 7604830cb368.
-Every training and rollout ran on one NVIDIA GeForce RTX 4090 with 48 GB under a 350 W power limit, on NablaEngine with
-96 contacts and 416 constraint rows per environment. The largest counts in a rollout of the eight saves are 35 contacts
-and 140 constraint rows, and no trial exceeded the capacity. Every training completed its 3,000 updates; no training,
-rollout or reading failed or was skipped.
+**Conditions.** The trainings ran at revision 9245b4e0a477, which differs from the head of the branch
+`train-from-placed-lying-starts` only in comments, docstrings, one error message and test names; the scene, rollouts,
+readings, exposure and outcome ran at revision 7604830cb368. Every training and rollout ran on one NVIDIA GeForce RTX
+4090 with 48 GB under a 350 W power limit, on NablaEngine with 96 contacts and 416 constraint rows per environment. The
+largest counts in a rollout of the eight saves are 35 contacts and 140 constraint rows, and no trial exceeded the
+capacity. Every training completed its 3,000 updates; no training, rollout or reading failed or was skipped.
 
 | Save | Get up of 100 (R) | Rejoin of 100 (J) | Rejoined over got up (readable) | Twins that fall (F) | Clips completed of 40 (C) | Body-position error E (m) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -293,16 +293,16 @@ within on C and F, so E decides:
 
 The control at 1,500 updates, the save the recovery policy is within against, has fewer tracking window rows than the
 recovery save: 393,216,000, against 525,203,062 (seed 0) and 522,291,905 (seed 1) at the recovery save of 3,000, which
-the control reaches at updates 2,004 and 1,993. The control at 3,000 has 786,432,000. The row therefore does not
-show a comparison at equal tracking exposure.
+the control reaches at updates 2,004 and 1,993. The control at 3,000 has 786,432,000. The row therefore does not show
+a comparison at equal tracking exposure.
 
-**Saves at every 250 updates (exploratory).** These saves were read after the eight declared saves, by a rule written
-down before they were read, with the declared scene and readings. The control at 2,000 updates completes 40 clips at
-0.0319 m (seed 0) and 39 at 0.0321 m (seed 1); the recovery save at 3,000 is 0.0068 m and 0.0061 m above it. Two
-criteria were fixed from the declared saves' readings: a control tracks at the first save with C ≥ 38 and E ≤ 0.0341 m
-(the larger control E at 3,000 plus 0.005 m); a recovery policy gets up at the first save with R ≥ 50, R ≥ 52 (the
-larger control R at 3,000 plus 20) and J over R ≥ 0.5. The clock runs from the trainer's launch to the save's
-checkpoint file.
+**Saves at every 250 updates (exploratory).** These saves were rolled out and read after the eight declared saves,
+by the same programs at revision 7604830cb368 and by a rule written down before they were read. The control at 2,000
+updates completes 40 clips at 0.0319 m (seed 0) and 39 at 0.0321 m (seed 1); the recovery save at 3,000 is 0.0068 m
+and 0.0061 m above it. Two criteria were fixed before these saves were read, with thresholds from the declared saves'
+readings: a control tracks at the first save with C ≥ 38 and E ≤ 0.0341 m (the larger control E at 3,000 plus
+0.005 m); a recovery policy gets up at the first save with R ≥ 50, R ≥ 52 (the larger control R at 3,000 plus 20) and
+J over R ≥ 0.5. The clock runs from the trainer's launch to the save's checkpoint file.
 
 | Training | Criterion first met | R / C / E (m) at 250 | at 500 | at 1,000 | at 2,000 | at 3,000 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -314,7 +314,8 @@ checkpoint file.
 At 1,750 updates the controls read C 39 and 38 at E 0.0331 m and 0.0332 m; at 500 updates the recovery policies read
 J over R 92 / 93 and 94 / 96. The checkpoints at 3,000 updates lie at 1,784, 1,781, 1,804 and 1,806 s on this clock.
 
-**Training time** (`terminal.json`; `total_s` holds the set-up and training seconds):
+**Training time** (`terminal.json`: `total_s`, `setup.seconds` and `training_s`; the total is about 0.6 s more than
+set-up and training together):
 
 | Training | Total (s) | Set-up (s) | Training (s) |
 | --- | --- | --- | --- |
