@@ -274,9 +274,8 @@ reading failed or was skipped.
 Before the trainings, `pair.json` also set a 4 h wall-time limit, counted a training ended by it as stopped, and
 required the two trainings of a seed to have equal engine records. The trainings ran without a wall-time limit, and the
 engine library's location (`engine.path`, `engine.artifact`) differs by job, so under those rules the pair would have
-been unreadable. After the trainings began and before any save was rolled out or read, the limit was removed, the
-location exempted, and the first unreadable rule narrowed to an unavailable E (it also named R, F, C and C_getup; none
-was unavailable). The margins, the classes and the conditions of outcome rows 2 to 12 did not change.
+been unreadable. After the trainings began and before any save was rolled out or read, the limit was removed and the
+location exempted. The margins, the classes and the conditions of outcome rows 2 to 12 did not change.
 
 | Save | Get up of 100 (R) | Rejoin of 100 (J) | Rejoined over got up (readable) | Twins that fall (F) | Clips completed of 40 (C) | Body-position error E (m) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -305,7 +304,8 @@ save at 3,000 is within on C and F, so E decides:
   0.0030 m.
 
 E reads each clip up to its first termination, so where the completed clips differ the clips are read over different
-spans: 39 against 40 (control at 3,000) and 39 (control at 1,500) at seed 0, and 40 against 40 and 37 at seed 1.
+spans. At seed 0 the recovery save completes 39 (all but jumps1_subject2), the control 40 at 3,000 and 39 at 1,500
+(all but fallAndGetUp1_subject1); at seed 1 the recovery save completes 40, the control 40 at 3,000 and 37 at 1,500.
 
 The control at 1,500 updates, the save the recovery policy is within against, has fewer tracking window rows than the
 recovery save: 393,216,000, against 525,203,062 (seed 0) and 522,291,905 (seed 1) at the recovery save of 3,000, which
