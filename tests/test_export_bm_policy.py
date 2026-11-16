@@ -817,6 +817,20 @@ class TorchRunTests(unittest.TestCase):
         self.assertEqual((d["training_framework"], d["completed_updates"], d["fitted_inputs"]),
                          ("torch", LABEL, "pre_step_state"))
 
+    def test_recovery_run_exports_its_policy_and_refuses_its_critic(self):
+        recovery = dict(recovery_share=.5, recovery_hidden_clips=["fallAndGetUp1_subject1"],
+                        recovery_command_excluded_clips=["fallAndGetUp1_subject1"], recovery_low_pelvis=[.5, .5],
+                        recovery_rows=[50, 375, 500], recovery_reward_scale=2.5, recovery_controls=[100, 75])
+        self.write_run(torch_run_config(**recovery))
+        out = self.root / "recovery.npz"
+        self.main(out)
+        parsed = self.load(out)[1]["training_domain"]["source_run"]["parsed_arguments"]
+        self.assertEqual({k: parsed[k] for k in recovery}, recovery)
+        out, critic = self.root / "recovery-with-critic.npz", self.root / "critic.npz"
+        with self.assertRaisesRegex(ValueError, "hidden get-up row"):
+            self.main(out, extra=["--critic-out", str(critic), "--source-revision", "fork-commit"])
+        self.assertFalse(out.exists() or critic.exists())
+
     def test_averaged_weights_missing(self):
         checkpoint = dict(self.saved)
         del checkpoint["actor_ema"]
