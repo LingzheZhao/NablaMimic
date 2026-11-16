@@ -14,6 +14,11 @@ python -m nablamimic.torch_train --config configs/recovery.args --out runs/recov
 python -m nablamimic.torch_train --config configs/absolute.args --out runs/absolute_s0 --iters 3000
 ```
 
+Training time: on one RTX 4090 with 48 GB of memory, with the default
+`--execution compile-graph` and `--matmul-precision nets_tf32`, either command
+trains its 3,000 updates of 4,096 environments in about 27 minutes after 2 to
+2.5 minutes of setup; allocated GPU memory peaks at about 32 GiB.
+
 "The recipe" is the tracking recipe of `configs/base/ours.args` (the
 NablaMimic 0.2.0 defaults). `configs/absolute.args` is the recipe on
 NablaEngine with absolute actions (joint setpoints are the default pose plus
@@ -33,9 +38,9 @@ and [Order inside a control](#order-inside-a-control).
 | Option | Value | Meaning | Source |
 | --- | --- | --- | --- |
 | `--recovery-share` | 0.5 | probability that a reset is a recovery start | StableMimic, Sections III-B and III-D |
-| `--recovery-hidden-clips` | `fallAndGetUp1_subject1`, `fallAndGetUp1_subject5`, `fallAndGetUp2_subject2`, `fallAndGetUp2_subject3`, `fallAndGetUp3_subject1` | clips that give the start rows and the hidden reference | this repository's choice; the paper names no clips |
+| `--recovery-hidden-clips` | `fallAndGetUp1_subject1`, `fallAndGetUp1_subject5`, `fallAndGetUp2_subject2`, `fallAndGetUp2_subject3`, `fallAndGetUp3_subject1` | clips that give the start rows and the hidden reference | this repository's choice; StableMimic builds its get-up library from the retargeted LAFAN1 get-up subset (Section IV-A) and names no clips; here `fallAndGetUp1_subject4`, a get-up recording of the library, is not a hidden clip |
 | `--recovery-command-excluded-clips` | the five hidden clips and `fallAndGetUp1_subject4` | clips that never give a command row | this repository's choice; in StableMimic commands come only from the LAFAN1 dance subset, disjoint from the get-up library (Section IV-A) |
-| `--recovery-low-pelvis HEIGHT UPZ` | 0.50 m, 0.5 | bounds of a low row | this repository's choice; StableMimic uses 0.50 m and 60 degrees as the onset of a fall in its evaluation (Section IV-A) and gives no height or tilt rule for start frames |
+| `--recovery-low-pelvis HEIGHT UPZ` | 0.50 m, 0.5 | bounds of a low row | this repository's choice; StableMimic starts recovery from perturbed prone, supine and intermediate reference frames (Section III-B) with no height or tilt rule, and uses 0.50 m and 60 degrees as the onset of a fall in its evaluation (Section IV-A) |
 | `--recovery-rows UPRIGHT_RUN LONGEST_SPAN COMMAND_UPRIGHT` | 50 (1 s), 375 (7.5 s), 500 | upright run that ends a get-up; longest span from a start row to its get-up end; upright rows ahead of a command row | this repository's choice; StableMimic starts the transition back to the command on similarity to the end of the get-up reference and gives no threshold (Section III-B) |
 | `--recovery-reward-scale` | 2.5 | factor on the six tracking terms during recovery | StableMimic, Section III-C |
 | `--recovery-controls STOP BLEND` | 100 (2.0 s), 75 (1.5 s) | consecutive controls of target error that stop a recovery episode; controls of the blend | StableMimic, Section III-B, for the durations; counting consecutive controls is this repository's choice, as the paper does not say how persistence is counted |
@@ -66,9 +71,13 @@ row differs from its command row, which needs the two tables apart.
 
 ## Starts
 
-`ResetSampler.sample` makes every reset draw (the collector's initial states
-and resets, and the window's resets). It draws, in this order and for every
-environment: the reset rows from the reset bins; the reset noise; one uniform,
+The recipe trains the actor on 64-control windows that start from states of
+a replay, which a data collector fills by running the policy.
+`ResetSampler.sample` makes every reset draw: the collector's initial states
+at the start of training, the collector's resets and the resets inside a
+window. It draws, in this order and for every environment: the reset rows
+from the reset bins (1 s bins of 50 library rows, drawn half uniformly and
+half by weights that favour bins of low return); the reset noise; one uniform,
 below the share for a recovery start; a start row, uniform over the start
 rows; a command row, uniform over the command rows. Without the options only
 the first two draws are made. Recovery starts among the collector's initial
@@ -99,9 +108,9 @@ With the options the state holds five more keys, which `compact`, `restore`,
 | Reads the hidden row | Reads the command row |
 | --- | --- |
 | the six tracking terms of the reward | the actor's goal rows and anchor orientation |
-| the termination penalty (`hazard_features`) | the proprioception history |
+| the termination penalty (`--term-penalty 2 0.08 0.10`, computed by `hazard_features`: it grows quadratically once the pelvis height difference exceeds 0.08 m or the gravity-z difference exceeds 0.10) | the proprioception history |
 | the recovery stop | the action base and the setpoint |
-| the critic during recovery: its goal rows, reference torso pose and reference root height | the encoder latents of the window |
+| the critic during recovery: its goal rows, reference torso pose and reference root height | the motion encoder's outputs over a window, computed from the upcoming command rows |
 | | the clip end and the episode limit |
 | | the reset bins |
 | | the recipe's height and tilt termination, outside recovery |
@@ -158,7 +167,8 @@ the recipe's terms. Outside recovery the anchor-position reference and the
 critic's reference torso are the command torso moved by `command_offset`. The
 action-rate term (from the command row's action base), the joint-limit term
 and the termination penalty keep the recipe's weights. Recovery rows can
-exceed the recipe's largest step reward, so `reward_mean` of the log is not
+exceed the recipe's largest step reward (`max_reward`: 0.02 s times the sum of
+the six tracking-term weights), so `reward_mean` of the log is not
 comparable between the two conditions.
 
 **Termination.** While the reached state is recovering, the recipe's height
@@ -214,12 +224,11 @@ whose running total reaches that update's
 | the critic reads the command and the active get-up reference (Section III-A) | during recovery, the critic reads the hidden row in place of the command row |
 | 20 s training episodes (implementation details table) | at most 500 controls (10 s) |
 
-The choice of start, command and get-up end rows differs as well; the
-settings table gives the paper's side.
+For the start, command and get-up end rows, the settings table gives what
+the paper states.
 
 ## Not implemented
 
-- the paper's parts in the table above that this repository leaves out;
 - pushes during training (the paper's pushes belong to its evaluation);
 - falls during tracking turned into recovery during training;
 - the residual action base with recovery (refused);
@@ -248,7 +257,8 @@ replay keys, a stop inside a window, the reset-bin mask, the log columns and
 the option refusals.
 
 `TorchTrainer` needs CUDA, so these tests leave out the trainer's own wiring
-(the recovery starts among the collector's initial states, the replay ring
+(the recovery starts among the collector's initial states and their random
+episode ages, the replay ring
 with the recovery keys, the reset-bin update fed with the window's regimes,
 the merge of the recovery columns into the log row, and that whole training
 updates without the options compute what the recipe computes), compiled

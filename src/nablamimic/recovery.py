@@ -7,16 +7,8 @@ the command the actor reads starts at a separate upright row. The episode's rewa
 reward, the termination penalty, the recovery stop and the critic only; the actor's inputs, the action base, the
 encoder latents, the clip end and the reset bins read the command row.
 
-Rows of the motion library:
-
-* a row is low where its reference pelvis is below ``low_pelvis_height`` or the world z component of the pelvis up
-  axis is below ``low_pelvis_up_z``; every other row is upright;
-* the get-up of row ``r`` ends at ``get_up_last[r]``: the last row of the first run of ``upright_run_rows``
-  consecutive upright rows that ends at or after ``r`` inside its clip (-1 where the clip holds none). The rows from a
-  low row to that end share one end, so the hidden row ``min(h + 1, get_up_last[h])`` advances to it and holds there;
-* a start row is a low row of a hidden clip whose get-up ends inside the clip at most ``longest_span_rows`` after it;
-* a command row lies outside the command-excluded clips, and it and the next ``command_upright_rows`` rows are
-  upright, all before its clip's last row.
+``recovery_rows`` classifies the rows of the motion library into low and upright rows, the get-up end of each row,
+start rows and command rows, as RECOVERY.md (Rows of the motion library) defines them.
 
 A control's regime is that of the state it starts from: RECOVERY while the hidden row is followed, BLEND while
 controls of the blend back to the command remain, TRACKING otherwise.
