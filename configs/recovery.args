@@ -1,4 +1,5 @@
-# Recovery training from placed lying starts against a hidden get-up reference (RECOVERY.md) on absolute.args.
+# Recovery training from placed lying starts against a hidden get-up reference on absolute.args; RECOVERY.md defines
+# each option and its rows.
 # "StableMimic" marks a value taken from StableMimic (arXiv 2608.02385v1); every other value is this repository's choice.
 @absolute.args
 # StableMimic, Sections III-B and III-D: tracking and recovery starts are drawn equally often.
@@ -6,19 +7,19 @@
 # The get-up recordings of the 40-clip library whose rows are recovery starts and the hidden reference.
 --recovery-hidden-clips fallAndGetUp1_subject1 fallAndGetUp1_subject5 fallAndGetUp2_subject2 fallAndGetUp2_subject3
     fallAndGetUp3_subject1
-# No command row of a recovery start comes from a get-up recording (fallAndGetUp1_subject4 is excluded although it is
-# not a hidden clip).
+# StableMimic, Section IV-A: no command comes from a get-up recording (its commands come only from the LAFAN1 dance
+# subset, disjoint from its get-up library). Excluding every get-up recording of the library, fallAndGetUp1_subject4
+# included, and drawing commands from all other clips is this repository's choice.
 --recovery-command-excluded-clips fallAndGetUp1_subject1 fallAndGetUp1_subject4 fallAndGetUp1_subject5
     fallAndGetUp2_subject2 fallAndGetUp2_subject3 fallAndGetUp3_subject1
-# A reference row is low below a pelvis height of 0.50 m or with the pelvis up axis tilted beyond 60 degrees (world z
-# below 0.5).
+# A low row: pelvis below 0.50 m, or pelvis up axis tilted beyond 60 degrees (world z below 0.5).
 --recovery-low-pelvis 0.50 0.5
-# A get-up ends at the last row of its first 1 s (50 rows) of upright rows; at most 7.5 s (375 rows) from a start row
-# to that end, so the blend and 1 s of command tracking fit the 10 s episode; a command row has 500 upright rows ahead
-# inside its clip (the episode limit), so no clip end or low command row meets a recovery episode.
+# Upright run that ends a get-up: 50 rows (1 s); longest span from a start row to its get-up end: 375 rows (7.5 s);
+# upright rows ahead of a command row: 500 (the 10 s episode limit).
 --recovery-rows 50 375 500
 # StableMimic, Section III-C: the tracking terms of the get-up reference weigh 2.5 times the command's.
 --recovery-reward-scale 2.5
-# StableMimic, Section III-B: 2.0 s (100 controls) of target error stops a recovery episode, counted here as
-# consecutive controls; a 1.5 s (75-control) transition back to the command, with a linear weight.
+# StableMimic, Section III-B: 2.0 s (100 controls) of target error stops a recovery episode, and the transition back to
+# the command lasts 1.5 s (75 controls). Counting the error over consecutive controls and the linear weight of the
+# transition are this repository's choice; the paper gives neither.
 --recovery-controls 100 75
