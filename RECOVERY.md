@@ -16,9 +16,10 @@ python -m nablamimic.torch_train --config configs/absolute.args --out runs/absol
 
 Training time: on one RTX 4090 with 48 GB of memory, with the default
 `--execution compile-graph` and `--matmul-precision nets_tf32`, either command
-trains its 3,000 updates of 4,096 environments in about 27 minutes after 2 to
-2.5 minutes of setup; once setup has captured the training graphs, PyTorch
-holds about 41 GB of GPU memory.
+takes about 30 minutes in total for its 3,000 updates of 4,096 environments:
+2 to 2.5 minutes of setup, then about 27 minutes of training (0.54 s per
+update). Once setup has captured the training graphs, PyTorch holds about
+41 GB of GPU memory.
 
 "The recipe" is the tracking recipe of `configs/base/ours.args` (the
 NablaMimic 0.2.0 defaults). `configs/absolute.args` is the recipe on
