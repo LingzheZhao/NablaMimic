@@ -100,6 +100,8 @@ Options after `--config` override the file (for example `--seed 1` or `--hours 1
 
 The optional [PyTorch trainer](TORCH.md) uses the current `ours.args` recipe with NablaEngine, `torch.compile` and
 explicit CUDA Graphs. Its validation and current limitations are described separately.
+It can also train [recovery from placed lying starts](RECOVERY.md) against a hidden get-up reference
+(`configs/recovery.args`).
 
 ## 📊 Evaluate
 
