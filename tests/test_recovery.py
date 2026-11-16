@@ -145,7 +145,8 @@ def pose(env, rows, height=None, shift=None):
 
 
 def step(env, state, action=None):
-    return env.step(state, torch.zeros((state["frame"].shape[0], env.nu)) if action is None else action)
+    count = state["frame"].shape[0]
+    return env.step(state, torch.zeros((count, env.nu)) if action is None else action, torch.zeros((count, 93)))
 
 
 def following(start_row, last_height=None, **changes):
