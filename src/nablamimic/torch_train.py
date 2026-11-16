@@ -628,9 +628,23 @@ def validate_args(args):
                          'refused with them')
 
 
-def main(argv=None):
+def build_environment(args, recovery_settings=None, step_fn=None, **conditions):
+    """The environment of a run with the parsed arguments ``args``: the motion library of ``--clips`` (the complete
+    40-clip library for 'all'), the run's EnvConfig with the EnvConfig fields given as keyword arguments
+    (``conditions``) changed, the recovery setting and the engine step ``step_fn`` (NablaEngine's ``torch_ffi.step``
+    when None)."""
     from .env import BM_BODIES, EnvConfig
-    from .motion import all_clip_names,load_library
+    from .motion import all_clip_names, load_library
+    names = all_clip_names() if args.clips == ['all'] else args.clips
+    if args.clips == ['all'] and len(names) != 40:
+        raise ValueError('Expected the complete 40-clip library')
+    library = load_library(names, bodies=BM_BODIES)
+    config = EnvConfig(solver_iterations=args.solver_iterations, residual_action=args.residual_action,
+                       action_rate_space=args.action_rate_space, **conditions)
+    return TorchTrackingEnv(library, config, step_fn=step_fn, recovery=recovery_settings)
+
+
+def main(argv=None):
     from .params import resolve_params,git_state
     from .train import FIXED
     from nablaengine import torch_ffi
@@ -654,12 +668,8 @@ def main(argv=None):
     config['inputs']={key:os.environ.get(key) for key in ('LAFAN1_G1_DIR','MOTION_CACHE_DIR','MENAGERIE_DIR')}
     config['declared_environment']=os.environ.get('NABLA_VERIFIED_IMAGE_REFERENCE')
     write_json(output/'config.json',config)
-    names=all_clip_names() if args.clips==['all'] else args.clips
-    if args.clips==['all'] and len(names)!=40:raise ValueError('Expected the complete 40-clip library')
-    library=load_library(names,bodies=BM_BODIES)
     recovery_settings=recovery.settings_from_args(args)
-    env=TorchTrackingEnv(library,EnvConfig(solver_iterations=args.solver_iterations,
-        residual_action=args.residual_action,action_rate_space=args.action_rate_space),recovery=recovery_settings)
+    env=build_environment(args,recovery_settings)
     if recovery_settings is not None:
         write_json(output/'recovery.json',dict(settings=dataclasses.asdict(recovery_settings),
             rows=env.recovery_counts,

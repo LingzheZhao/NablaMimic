@@ -102,6 +102,8 @@ The optional [PyTorch trainer](TORCH.md) uses the current `ours.args` recipe wit
 explicit CUDA Graphs. Its validation and current limitations are described separately.
 It can also train [recovery from placed lying starts](RECOVERY.md) against a hidden get-up reference
 (`configs/recovery.args`).
+`python -m nablamimic.engine_rollouts` runs a trained policy closed-loop from placed starts and after pushes and
+records each rollout ([ROLLOUTS.md](ROLLOUTS.md)).
 
 ## 📊 Evaluate
 
