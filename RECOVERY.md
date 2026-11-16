@@ -246,6 +246,90 @@ The policy of a recovery run exports like any other run
 critic reads the hidden row in place of the command's goal while recovering,
 which the critic file's input declaration does not describe.
 
+## Reading a trained policy
+
+`nablamimic.engine_rollouts` runs the policy of a numbered checkpoint on
+NablaEngine, the simulator it was trained on, closed-loop and without a tape,
+for the trials of a scene file, into an output directory that must not exist:
+
+```bash
+python -m nablamimic.engine_rollouts --run runs/recovery_s0 --iter 3000 \
+    --scene scene.json --termination recipe --controls 1000 --out readings/recovery_s0_3000
+```
+
+`--actor-key` chooses `actor_ema` (the running average, the default) or
+`actor` (the weights as trained). The environment is the run's
+(`torch_train.build_environment` with the run's `config.json`) without the
+recovery options, so no hidden row, recovery stop or termination masking
+enters a rollout; domain randomisation is off (foot friction 1, zero
+joint-encoder bias, zero torso centre-of-mass offset), observation noise is
+off and the actions are the actor's output without noise. The network matmul
+precision is the run's.
+
+**Scene.** `{"trials": [TRIAL, ...]}`, one environment of one batch per
+trial; unknown keys are refused at every level. A trial holds:
+
+| Key | Meaning |
+| --- | --- |
+| `command_row` | library row the command starts from |
+| `body_row` | library row whose reference posture the body is placed at; absent: the command row |
+| `reset_uniforms` | unit uniforms in [-1, 1] of the reset noise, absent: zeros; `position` [3] times 0.05, 0.05, 0.01 m; `rotation` [3] times 0.1, 0.1, 0.2 rad, a rotation vector premultiplied on the root orientation; `velocity` [6] times 0.5, 0.5, 0.2 m/s and 0.52, 0.52, 0.78 rad/s on the free joint's velocity coordinates; `joints` [29] times 0.1 rad, then limited to the soft joint range |
+| `push` | `{"control", "velocity_xy"}`: a world planar velocity change (m/s); or `{"control", "force", "duration", "direction"}`: force (N) times duration (s) over the whole-body mass (`body_subtreemass[0]` of the model) along `forward`, `backward`, `left` or `right` of the pelvis yaw at that control |
+
+Every trial starts through the training reset,
+`env.reset(command_rows, noise, body_frame=body_rows)`, as a recovery start
+does: a placed lying start gives `body_row` and its uniforms, a twin of it
+gives only the same `command_row`, and a clip's first row gives that row as
+`command_row`. A push is added to the root's planar world velocity
+(`qvel[:, 0:2]`) of the state its control starts from, before that control's
+action; the action reads the history of earlier controls, so the policy sees
+the push from the next control on.
+
+**Termination.** `--termination recipe`: the recipe's termination ends a trial
+(pelvis height more than 0.25 m or gravity z more than 0.8 from the command
+row's, or a non-finite state). `--termination nonfinite`: only a non-finite
+state does. Neither the clip end nor an episode limit ends a trial; the
+command row holds at its clip's last row. An ended trial keeps the state it
+started its last control from: the batched step still computes it, its
+results are not used, and no other trial depends on it. Its later controls
+are unavailable.
+
+**Record.** `description.json` holds the inputs: run directory, checkpoint,
+weights, the run's source revision (`git_commit` of its `config.json`) and
+this program's, the scene file and its content, the termination, the
+controls, the engine record of `torch_ffi.init` and the engine counters read
+after the rollouts, the card, the settings above, the whole-body mass and the
+library inputs of the run and of the rollout. `rollouts.npz` holds, per control
+and trial (time-major, [controls, trials, ...]; after a trial's end NaN, -1 or
+false):
+
+| Field | Meaning |
+| --- | --- |
+| `body_pos_w`, `body_quat_w` | the 14 tracked bodies' world positions and WXYZ orientations after the control |
+| `qpos`, `qvel` | root and joint positions (engine-normalised) and velocities after the control |
+| `frame_before`, `frame_after`, `clip_last_row` | command row before and after the control; last row of its clip |
+| `available` | the state after the control is recorded and finite |
+| `done` | the control ended the trial |
+| `termination_height`, `termination_tilt`, `termination_nonfinite` | the recipe's three termination terms, recorded in either mode |
+| `push_applied` | the control's push was applied |
+| `engine_newton_iterations`, `engine_contacts`, `engine_constraint_rows`, `engine_info_bits` | the engine's report of the control's step per environment (counts of the last substep, bits over the substeps) |
+| `engine_contact_capacity_exceeded`, `engine_row_capacity_exceeded` | contacts or constraint rows beyond the engine's capacity were dropped in the step |
+
+and per trial `command_row`, `body_row`, `push_control` (-1 without a push),
+`push_velocity_xy` (the world velocity change applied) and the placed state
+before the first control: `start_qpos`, `start_qvel`, `start_body_pos_w`,
+`start_body_quat_w`.
+
+**Against BM's tracker.** BM's placement uniforms `root_position`,
+`root_rotation`, `root_velocity` and `joint_position` are `position`,
+`rotation`, `velocity` and `joints` here, with the same half-widths and
+formulas; the half-widths are the environment's, not given by the scene. The
+reset limits the joints to the soft range for every trial, a twin included,
+where BM placed a twin at its row's reference state unchanged; and the state
+holds the engine-normalised positions (unit quaternion) from the reset on,
+where BM's placed state kept the unnormalised values until its first step.
+The history starts filled with the first frame, as at a training reset.
+
 ## Checks
 
 `tests/test_recovery.py` runs on CPU with a synthetic get-up library and a
@@ -255,6 +339,16 @@ the readers of the hidden row on both action bases, the clocks, the stop, the
 switch, the blend and the switch yaw, the reward's form and gradient, the
 termination penalty at the hidden row, the replay keys, a stop inside a
 window, the reset-bin mask, the log columns and the option refusals.
+
+`tests/test_engine_rollouts.py` runs the rollouts on CPU with a stand-in
+engine step: a placed start equals a recovery training start at the same rows
+and noise, a twin equals an ordinary reset at the command row, the uniforms
+reach the reset by value, a push changes only its trial's planar root velocity
+from its control, the two terminations agree up to the first recipe
+termination, an ended trial leaves the other trials' records bit-equal to a
+batch without it, and invalid scenes are refused. What only the engine
+establishes (its per-environment report, the normalised positions, the
+dynamics of a push) needs a GPU run.
 
 `TorchTrainer` needs CUDA, so these tests do not cover the trainer's own
 wiring: the recovery starts among the collector's initial states with their
