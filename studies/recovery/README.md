@@ -7,9 +7,10 @@ the tracking recipe of `configs/base/ours.args` ([RECOVERY.md](../../RECOVERY.md
 NablaEngine with absolute actions.
 
 The study trains a control and a recovery policy at two seeds with `nablamimic.torch_train`, rolls out each save with
-`nablamimic.engine_rollouts` and reads the rollouts. The declaration is [pair.json](pair.json), fixed before the
-trainings. Every program reads it through `declaration.py`, which refuses a declaration with other top-level keys. It
-is JSON because the trainer's environment has no YAML reader.
+`nablamimic.engine_rollouts` and reads the rollouts. The declaration is [pair.json](pair.json). Its margins, classes
+and the conditions of outcome rows 2 to 12 were fixed before the trainings; its wall-time and unreadable rules changed
+before any save was read (see Results). Every program reads it through `declaration.py`, which refuses a declaration
+with other top-level keys. It is JSON because the trainer's environment has no YAML reader.
 
 Values marked *StableMimic* are those of StableMimic (arXiv 2608.02385v1, Section IV-A). Every rollout also follows
 that section's evaluation in deterministic actions at 50 Hz with randomisation and observation noise off, and the placed
@@ -92,8 +93,8 @@ the body-position error E.
     from the fall's onset.
   - The twin is usable up to the first of these controls: its first control in the fall rule under an upright command,
     the end of its support, and the first control whose command row differs from the trial's.
-  - The rejoin is unavailable when the twin stops being usable before a rejoin could be read, or when the excess is
-    undefined where a hold could lie.
+  - The rejoin is unavailable when the trial has not rejoined and its twin stops being usable before the trial falls
+    again or its support ends, or when the excess is undefined where a hold could lie.
 
 | Quantity of a save | Definition |
 | --- | --- |
@@ -261,12 +262,21 @@ on the CPU on generated libraries, records and logs.
 
 ## Results
 
-**Conditions.** The trainings ran at revision 9245b4e0a477, which differs from the head of the branch
-`train-from-placed-lying-starts` only in comments, docstrings, one error message and test names; the scene, rollouts,
-readings, exposure and outcome ran at revision 7604830cb368. Every training and rollout ran on one NVIDIA GeForce RTX
-4090 with 48 GB under a 350 W power limit, on NablaEngine with 96 contacts and 416 constraint rows per environment. The
-largest counts in a rollout of the eight saves are 35 contacts and 140 constraint rows, and no trial exceeded the
-capacity. Every training completed its 3,000 updates; no training, rollout or reading failed or was skipped.
+**Conditions.** The trainings ran at revision 9245b4e0a477; the scene, rollouts, readings, exposure and outcome ran at
+7604830cb368. In the training path the two differ in comments, docstrings and documents, and in `torch_train.py`, where
+7604830cb368 builds the same environment through `build_environment`. The trainings ran step 1's command with
+`--save-wall-minutes 6001 --no-full-state-at-end` added; 6,001 minutes is longer than any training, so no save fell on a
+wall-clock deadline. Every training and rollout ran on one NVIDIA GeForce RTX 4090 with 48 GB under a 350 W power limit,
+on NablaEngine with 96 contacts and 416 constraint rows per environment; the largest counts in a rollout of the eight
+saves are 35 contacts and 140 constraint rows. Every training completed its 3,000 updates; no training, rollout or
+reading failed or was skipped.
+
+Before the trainings, `pair.json` also set a 4 h wall-time limit, counted a training ended by it as stopped, and
+required the two trainings of a seed to have equal engine records. The trainings ran without a wall-time limit, and the
+engine library's location (`engine.path`, `engine.artifact`) differs by job, so under those rules the pair would have
+been unreadable. After the trainings began and before any save was rolled out or read, the limit was removed, the
+location exempted, and the first unreadable rule narrowed to an unavailable E (it also named R, F, C and C_getup; none
+was unavailable). The margins, the classes and the conditions of outcome rows 2 to 12 did not change.
 
 | Save | Get up of 100 (R) | Rejoin of 100 (J) | Rejoined over got up (readable) | Twins that fall (F) | Clips completed of 40 (C) | Body-position error E (m) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -279,43 +289,53 @@ capacity. Every training completed its 3,000 updates; no training, rollout or re
 | recovery, seed 1, 1,500 | 99 | 98 | 98 / 98 | 2 | 38 | 0.0522 |
 | recovery, seed 1, 3,000 | 99 | 99 | 99 / 99 | 0 | 40 | 0.0382 |
 
-Placed start 99 is outside the fall rule at placement at every save and counts as not got up. At each recovery save of
-1,500 updates one rejoin is unavailable because its twin fell. Differences below are taken before rounding.
+Placed start 99 (the last; trials are numbered from 0) is outside the fall rule at placement at every save and counts
+as not got up. At each recovery save of 1,500 updates one rejoin is unavailable because its twin fell. Every save at
+3,000 updates completes all five hidden get-up clips; at 1,500 the control of seed 0 misses fallAndGetUp1_subject1, and
+the recovery saves miss fallAndGetUp1_subject1 (seed 0) and fallAndGetUp3_subject1 (seed 1). No result of the reading
+by hand of the first log rows is given here. Differences below are taken before rounding.
 
 **Outcome: `tracking_cost_at_exposure`** (row 10; rows 1 to 9 do not hold). Both seeds are gets_up (R 99 against 50
-and 52), and J over R is 98 / 99 and 99 / 99. Against both control saves of its seed, the recovery save at 3,000 is
-within on C and F, so E decides:
+and 52), and J over R is 98 / 99 (seed 0) and 99 / 99 (seed 1). Against both control saves of its seed, the recovery
+save at 3,000 is within on C and F, so E decides:
 
 - seed 0: E is 0.0101 m above the control at 3,000, outside the 0.005 m margin by 0.0051 m, and 0.0043 m above the
   control at 1,500, within by 0.0007 m;
 - seed 1: 0.0091 m above the control at 3,000, outside by 0.0041 m, and 0.0020 m above the control at 1,500, within by
   0.0030 m.
 
+E reads each clip up to its first termination, so where the completed clips differ the clips are read over different
+spans: 39 against 40 (control at 3,000) and 39 (control at 1,500) at seed 0, and 40 against 40 and 37 at seed 1.
+
 The control at 1,500 updates, the save the recovery policy is within against, has fewer tracking window rows than the
 recovery save: 393,216,000, against 525,203,062 (seed 0) and 522,291,905 (seed 1) at the recovery save of 3,000, which
-the control reaches at updates 2,004 and 1,993. The control at 3,000 has 786,432,000. The row therefore does not show
-a comparison at equal tracking exposure.
+the control reaches at updates 2,004 (seed 0) and 1,993 (seed 1). The control at 3,000 has 786,432,000. The row
+therefore does not show a comparison at equal tracking exposure. `pair.json` reads it as consistent with a cost of
+tracking exposure; the comparison also differs by twice the updates and by the place on the learning-rate and
+target-change schedules, so it does not isolate exposure.
 
-**Saves at every 250 updates (exploratory).** These saves were rolled out and read after the eight declared saves,
-by the same programs at revision 7604830cb368 and by a rule written down before they were read. The control at 2,000
-updates completes 40 clips at 0.0319 m (seed 0) and 39 at 0.0321 m (seed 1); the recovery save at 3,000 is 0.0068 m
-and 0.0061 m above it. Two criteria were fixed before these saves were read, with thresholds from the declared saves'
-readings: a control tracks at the first save with C ≥ 38 and E ≤ 0.0341 m (the larger control E at 3,000 plus
-0.005 m); a recovery policy gets up at the first save with R ≥ 50, R ≥ 52 (the larger control R at 3,000 plus 20) and
-J over R ≥ 0.5. The clock runs from the trainer's launch to the save's checkpoint file.
+**Saves at every 250 updates (exploratory).** These saves were rolled out on the same scene files and read by the same
+programs at revision 7604830cb368, after the eight declared saves; none of their 120 rollouts and 40 readings failed.
+The control at 2,000 updates (524,288,000 tracking window rows) completes 40 clips at E 0.0319 m (seed 0) and 39 at
+0.0321 m (seed 1); the recovery save at 3,000 is 0.0068 m (seed 0) and 0.0061 m (seed 1) above it. This comparison is
+at about equal tracking exposure, but not at equal updates or schedule place, and its completed clips differ (39
+against 40 at seed 0, 40 against 39 at seed 1).
 
-| Training | Criterion first met | R / C / E (m) at 250 | at 500 | at 1,000 | at 2,000 | at 3,000 |
+Two criteria were fixed before these saves were read: a control tracks at the first save with C ≥ 38 (a fixed count)
+and E ≤ 0.0341 m (the larger control E at 3,000 plus 0.005 m); a recovery policy gets up at the first save with
+R ≥ 50, R ≥ 52 (the larger control R at 3,000 plus 20) and J over R ≥ 0.5. Each training is read against its own
+condition's criterion; the two criteria are not compared across conditions. The clock runs from the launch of the
+training command to the file time of the save's checkpoint; the trainer's own total (below) starts about 20 s later,
+after the program has loaded the library and built its environment and networks.
+
+| Training | Own criterion first met | R / C / E (m) at 250 | at 500 | at 1,000 | at 2,000 | at 3,000 |
 | --- | --- | --- | --- | --- | --- | --- |
-| control, seed 0 | 1,750 updates, 1,107 s | 9 / 21 / 0.0808 | 17 / 32 / 0.0547 | 25 / 37 / 0.0414 | 21 / 40 / 0.0319 | 31 / 40 / 0.0286 |
-| control, seed 1 | 1,750 updates, 1,105 s | 10 / 20 / 0.0720 | 11 / 31 / 0.0561 | 17 / 38 / 0.0401 | 24 / 39 / 0.0321 | 32 / 40 / 0.0291 |
-| recovery, seed 0 | 500 updates, 442 s | 7 / 10 / 0.1321 | 97 / 25 / 0.1093 | 99 / 35 / 0.0729 | 99 / 39 / 0.0464 | 99 / 39 / 0.0387 |
-| recovery, seed 1 | 500 updates, 443 s | 4 / 1 / 0.1359 | 97 / 25 / 0.1060 | 99 / 29 / 0.0726 | 99 / 40 / 0.0445 | 99 / 40 / 0.0382 |
+| control, seed 0 | tracks at 1,750 updates, 1,107 s (C 39, E 0.0331 m) | 9 / 21 / 0.0808 | 17 / 32 / 0.0547 | 25 / 37 / 0.0414 | 21 / 40 / 0.0319 | 31 / 40 / 0.0286 |
+| control, seed 1 | tracks at 1,750 updates, 1,105 s (C 38, E 0.0332 m) | 10 / 20 / 0.0720 | 11 / 31 / 0.0561 | 17 / 38 / 0.0401 | 24 / 39 / 0.0321 | 32 / 40 / 0.0291 |
+| recovery, seed 0 | gets up at 500 updates, 442 s (R 97, J over R 92 / 93) | 7 / 10 / 0.1321 | 97 / 25 / 0.1093 | 99 / 35 / 0.0729 | 99 / 39 / 0.0464 | 99 / 39 / 0.0387 |
+| recovery, seed 1 | gets up at 500 updates, 443 s (R 97, J over R 94 / 96) | 4 / 1 / 0.1359 | 97 / 25 / 0.1060 | 99 / 29 / 0.0726 | 99 / 40 / 0.0445 | 99 / 40 / 0.0382 |
 
-At 1,750 updates the controls read C 39 and 38 at E 0.0331 m and 0.0332 m; at 500 updates the recovery policies read
-J over R 92 / 93 and 94 / 96. The checkpoints at 3,000 updates lie at 1,784, 1,781, 1,804 and 1,806 s on this clock.
-
-**Training time** (`terminal.json`: `total_s`, `setup.seconds` and `training_s`; the total is about 0.6 s more than
-set-up and training together):
+**Training time** (`terminal.json`: `total_s`, `setup.seconds` and `training_s`):
 
 | Training | Total (s) | Set-up (s) | Training (s) |
 | --- | --- | --- | --- |
@@ -326,11 +346,11 @@ set-up and training together):
 
 The four trainings together take 7,092.6 s.
 
-**What the results do not show.**
+**What the results do not show.** Beyond "What the study does not show" above (two seeds per condition, placed starts
+drawn from the rows recovery training starts from, no pushes):
 
-- Each number is one save of one seed; with two seeds no interval is given and nothing is pooled.
-- The placed starts are drawn from the rows recovery training starts from, so R and J are not read on unseen starts.
-- Every training and rollout ran on one card model; the times hold for that card.
-- No row compares E across conditions at equal tracking exposure. The control at 2,000 updates is the numbered save
-  nearest the matched updates, and it was read after the declared saves.
-- No rollout applies pushes.
+- No row compares E at equal tracking exposure, and only seed 1's comparison with its control at 3,000 is between
+  saves that complete the same clips. The control at 2,000 updates is at about equal exposure but not at equal updates
+  or schedule place.
+- The saves at every 250 updates and the two criteria are exploratory for the outcome.
+- The times hold for one card, the RTX 4090 with 48 GB at 350 W.
