@@ -1,0 +1,26 @@
+# Recovery training from placed lying starts against a hidden get-up reference (RECOVERY.md) on absolute.args, with
+# the values of BM's recovery recipe. "BM's reading of StableMimic" marks a value BM's recipe attributes to StableMimic
+# (arXiv 2608.02385v1); "BM's choice" marks a value BM chose.
+@absolute.args
+# BM's reading of StableMimic: tracking and recovery starts are drawn equally often.
+--recovery-share 0.5
+# BM's choice: the get-up recordings of the 40-clip library that BM kept as hidden clips (fallAndGetUp1_subject4 is
+# not among them, and is excluded from the commands below).
+--recovery-hidden-clips fallAndGetUp1_subject1 fallAndGetUp1_subject5 fallAndGetUp2_subject2 fallAndGetUp2_subject3
+    fallAndGetUp3_subject1
+# BM's choice: no command row of a recovery start comes from a get-up recording.
+--recovery-command-excluded-clips fallAndGetUp1_subject1 fallAndGetUp1_subject4 fallAndGetUp1_subject5
+    fallAndGetUp2_subject2 fallAndGetUp2_subject3 fallAndGetUp3_subject1
+# BM's choice: StableMimic's fall rule as BM applied it to the reference pelvis, a row is low below 0.50 m or with the
+# pelvis up axis tilted beyond 60 degrees (world z below 0.5).
+--recovery-low-pelvis 0.50 0.5
+# BM's choice: a get-up ends at the last row of its first 1 s (50 rows) of upright rows; at most 7.5 s (375 rows) from
+# a start row to that end, so the blend and 1 s of command tracking fit the 10 s episode; a command row has 500 upright
+# rows ahead inside its clip (the episode limit), so no clip end or low command meets a recovery episode.
+--recovery-rows 50 375 500
+# BM's reading of StableMimic: the get-up tracking terms weigh 2.5 times the command's.
+--recovery-reward-scale 2.5
+# BM's reading of StableMimic: 2.0 s (100 controls) of persisting target error stops a recovery episode, with
+# "persisting" read by BM as consecutive controls; a 1.5 s (75-control) transition back to the command, with a linear
+# weight as BM's choice.
+--recovery-controls 100 75

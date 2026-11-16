@@ -1,0 +1,5 @@
+# NablaMimic's 0.2.0 recipe (base/ours.args) on NablaEngine with absolute actions: the joint setpoints are the default
+# pose plus the scaled action, so no reference row enters the action. It is the control condition of recovery
+# training (recovery.args). Training length comes from --iters or --hours on the command line.
+@base/ours.args
+--physics engine
