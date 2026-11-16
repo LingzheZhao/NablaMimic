@@ -38,12 +38,13 @@ checkpoint has no completed-update or averaging counter. With actor_ema > 0 it h
 was never resumed has exactly N averaging updates.
 
 A torch_train.py run must be on one device, not resumed and completed as that trainer records it: DONE holds
-"completed", terminal.json has status "completed" and a completed_updates of at least N, and there is no FAILED.json.
-Its config.json holds exactly the parser's arguments, train.FIXED and TORCH_RECORDED_FIELDS. Its it_N.pkl holds
-exactly TORCH_CHECKPOINT_FIELDS (and actor_ema when actor_ema > 0), with its own counts completed_updates and
-ema_updates: iter and completed_updates must equal N, env_steps N * num_envs * horizon, and ema_updates N with
-averaging and 0 without. A run started with --initial-checkpoint counts its updates from 0 like any other; the
-declaration names the file its initial weights came from.
+"completed", terminal.json has status "completed" and a completed_updates equal to the run's iters (a run that its
+--hours budget stopped earlier is refused) and of at least N, and there is no FAILED.json. Its config.json holds
+exactly the parser's arguments, train.FIXED and TORCH_RECORDED_FIELDS, and the maxcon of its engine record must equal
+the declared contact capacity. Its it_N.pkl holds exactly TORCH_CHECKPOINT_FIELDS (and actor_ema when actor_ema > 0),
+with its own counts completed_updates and ema_updates: iter and completed_updates must equal N, env_steps
+N * num_envs * horizon, and ema_updates N with averaging and 0 without. A run started with --initial-checkpoint counts
+its updates from 0 like any other; the declaration names the file its initial weights came from.
 
   python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_011667.pkl --run-config RUN --policy live \\
       --artifact-id POLICY_ID --source-artifact-id CHECKPOINT_ID --reference-manifest MANIFEST.json \\
@@ -74,8 +75,8 @@ NON_ARGUMENT_FIELDS = frozenset({
     "robot", "obs_mode", "contacts", "reward_frame", "hist_len", "state_select", "matmul_precision", "actor_hidden",
     "actor_latent", "critic_hidden", "devices", "processes", "git_commit", "git_dirty", "gpu", "engine", "segments",
     "argv", "config_args", "config_file"})
-# Core fields written by the current upstream 0.2 JAX producer. A known optional
-# CLI extension may add records without changing which core fields are required.
+# Core fields that train.py (0.2) writes. A known optional command-line
+# extension may add records without changing which core fields are required.
 CORE_CONFIG_FIELDS = frozenset({
     "act_cot_clip", "act_noise", "action_rate_space", "action_target", "action_target_delta_floor",
     "action_target_lr", "actor_ema", "actor_ema_warmup", "actor_hidden", "actor_latent", "actor_obs_norm",
@@ -193,7 +194,7 @@ def run_markers(run_dir, framework):
     if (run_dir / "DONE").exists():
         done = (run_dir / "DONE").read_text().strip()
         if not done.isdecimal():
-            raise ValueError("DONE must hold the current trainer's nonnegative final iteration")
+            raise ValueError("DONE must hold train.py's nonnegative final iteration")
         markers["DONE"] = dict(last_update=int(done))
     return markers
 
@@ -268,20 +269,20 @@ def validate_jax_run_config(cfg):
     if missing or extra:
         raise ValueError(f"config.json fields: missing {sorted(missing)}, unsupported {sorted(extra)}")
     if cfg["resume"] is not None or cfg["devices"] != 1 or cfg["processes"] != 1 or cfg["shac_strict"]:
-        raise ValueError("Export requires a fresh single-device run without resume or the SHAC guard")
+        raise ValueError("Export requires a single-device run that was never resumed, without the SHAC guard")
     if "segments" in cfg:
         segments = cfg["segments"]
         if not isinstance(segments, list) or len(segments) != 1 or segments[0]["resume"] is not None:
-            raise ValueError("Export requires exactly one fresh training segment")
+            raise ValueError("Export requires exactly one training segment, not resumed")
     recorded = {"argv", "config_args", "config_file"} & cfg.keys()
     if recorded and recorded != {"argv", "config_args", "config_file"}:
-        raise ValueError("The current trainer records argv, config_args and config_file together")
+        raise ValueError("train.py records argv, config_args and config_file together")
     configured = cfg["config"] is not None
     if configured != bool(recorded) or configured != ("segments" in cfg):
-        raise ValueError("Configuration-file and segment records must agree with the current producer")
+        raise ValueError("Configuration-file and segment records must agree as train.py writes them")
     if configured:
         if cfg["config_file"] != cfg["config"] or "engine" in cfg:
-            raise ValueError("Configured runs record one config file and the engine in their fresh segment")
+            raise ValueError("Configured runs record one config file and the engine in their single segment")
     elif "engine" not in cfg:
         raise ValueError("A run without a configuration file must record its engine at the top level")
 
@@ -333,7 +334,7 @@ def update_counts(checkpoint, cfg, label):
 
 
 def select_actor(checkpoint, policy):
-    """Explicit native actor or actor_ema selection; an absent EMA is an error."""
+    """Explicit selection of actor (the weights as trained) or actor_ema; an absent EMA is an error."""
     if policy not in ("live", "ema"):
         raise ValueError(f"Unsupported policy selection: {policy}")
     key = "actor_ema" if policy == "ema" else "actor"
@@ -554,6 +555,9 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
         if end_markers.keys() != {"DONE", "terminal.json"}:
             raise ValueError("A torch_train.py run is exported only when DONE and terminal.json record its completion")
         final = end_markers["terminal.json"]["completed_updates"]
+        if final != _require(cfg, "iters"):
+            raise ValueError(f"terminal.json records {final} completed updates of the {cfg['iters']} the run "
+                             "requested (iters): a run that its --hours budget stopped is not exported")
     else:
         if end_markers.keys() - {"DONE"}:
             raise ValueError("Only an unhalted, nondiverged run can be exported")
@@ -567,6 +571,9 @@ def build_policy_file(checkpoint, cfg, act, manifest, *, policy, label, artifact
         raise ValueError(f"residual_action {residual!r} is not a boolean")
     nu = check_action_parameters(act)
     completed, count_source, averaging = update_counts(checkpoint, cfg, label)
+    if torch_run and cfg["engine"].get("maxcon") != contact_capacity:
+        raise ValueError(f"the engine contact capacity {contact_capacity} differs from maxcon "
+                         f"{cfg['engine'].get('maxcon')!r} of config.json's engine record")
     arrays, architecture = actor_arrays(select_actor(checkpoint, policy), cfg, nu)
     baseline = dict(kind="next_reference_joint_position", row="min(current_row + 1, clip_last_row)") if residual \
         else dict(kind="nominal_joint_position")
@@ -686,11 +693,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
     out = Path(args.out)
     if out.suffix != ".npz" or out.exists():
-        ap.error(f"--out must name a new .npz file: {out}")
+        ap.error(f"--out must name a .npz file that does not exist: {out}")
     critic_out = None if args.critic_out is None else Path(args.critic_out)
     if critic_out is not None and (critic_out.suffix != ".npz" or critic_out.exists()
                                    or critic_out.resolve() == out.resolve()):
-        ap.error(f"--critic-out must name a new .npz file other than --out: {critic_out}")
+        ap.error(f"--critic-out must name a .npz file that does not exist, other than --out: {critic_out}")
     if (critic_out is None) != (args.source_revision is None):
         ap.error("--critic-out and --source-revision go together")
     label = checkpoint_label(args.checkpoint)

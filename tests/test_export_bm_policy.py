@@ -23,7 +23,7 @@ from nablamimic.nets import actor_apply, actor_init, critic_apply, mlp_init, nor
 
 HIDDEN, LATENT, NU = (8, 4), 3, 29
 HIDDEN4 = (8, 7, 6, 5)  # four hidden layers, as the trained actor has: Linear indices 0, 2, 4, 6, 8
-ENV = types.SimpleNamespace(goal_dim=10 * 68 + 6, hist_dim=10 * 93, nu=NU)  # the real input widths
+ENV = types.SimpleNamespace(goal_dim=10 * 68 + 6, hist_dim=10 * 93, nu=NU)  # the trained input widths
 LABEL, PER_UPDATE = 12, 16 * 1 * 4
 CRITIC_HIDDEN, CRITIC_IN = (7, 5), 93 + 680 + 6 + 4 + 9 + 33  # env.TrackingEnv.critic_dim
 
@@ -33,7 +33,7 @@ def numpy_tree(tree):
 
 
 def current_checkpoint(seed=0, hidden=HIDDEN):
-    """Fresh current-schema numbered checkpoint after LABEL completed updates."""
+    """A train.py numbered checkpoint of a run never resumed, after LABEL completed updates."""
     actor = numpy_tree(actor_init(jax.random.PRNGKey(seed), ENV, hidden=hidden, latent=LATENT, anchor_to_decoder=6))
     critic = numpy_tree(mlp_init(jax.random.PRNGKey(seed + 100), [CRITIC_IN, *CRITIC_HIDDEN, 1]))
     rng = np.random.default_rng(seed)
@@ -300,7 +300,7 @@ class RefusalTests(unittest.TestCase):
             export(**kw)
 
     def test_weights_selection(self):
-        self.assertRefused(policy="ema")  # EMA is disabled in this current configuration.
+        self.assertRefused(policy="ema")  # EMA is disabled in this configuration.
         ck = averaged_checkpoint()
         self.assertRefused(checkpoint=ck, policy="ema")  # Presence must agree with actor_ema.
         del ck["actor_ema"]
@@ -633,13 +633,13 @@ def torch_run_config(**override):
     cfg.update(physics="engine", num_envs=16, horizon=4, anchor_to_decoder=True, actor_obs_norm=False,
                enc_hoist="on", critic_pre_state=True, actor_hidden=list(HIDDEN), actor_latent=LATENT,
                critic_hidden=list(CRITIC_HIDDEN), residual_action=False, action_rate_space="setpoint",
-               actor_ema=.999, actor_ema_warmup=True, clips=["all"], config="synthetic.args",
+               actor_ema=.999, actor_ema_warmup=True, clips=["all"], config="synthetic.args", iters=LABEL,
                initial_checkpoint="inputs/initial-it000000.pkl",
                training_framework="torch", git_commit="fork-commit", devices=1, processes=1,
                observed_precision=dict(float32_matmul_precision="high"), gpu="test card", torch_version="2.9.1",
                torch_cuda="12.8", random_stream="Torch default generators", clock="training_s excludes setup",
                inputs=dict(LAFAN1_G1_DIR="lafan1"), declared_environment="test image",
-               engine=dict(version="0.1.0", key="library-key", arch="sm_89"))
+               engine=dict(version="0.1.0", key="library-key", arch="sm_89", maxcon=96))
     cfg.update(override)
     return cfg
 
@@ -758,7 +758,8 @@ class TorchRunTests(unittest.TestCase):
                 self.assertEqual(d["inputs"]["previous_action"], "executed_with_exploration_noise")
                 dom = d["training_domain"]
                 self.assertEqual(dom["training_matmul_precision"], "nets_tf32")
-                self.assertEqual(dom["engine"]["reported"], [dict(version="0.1.0", key="library-key", arch="sm_89")])
+                self.assertEqual(dom["engine"]["reported"],
+                                 [dict(version="0.1.0", key="library-key", arch="sm_89", maxcon=96)])
                 self.assertEqual((dom["engine"]["contact_capacity"], dom["engine"]["declared_revision"]),
                                  (96, "engine-from-main"))
                 run = dom["source_run"]
@@ -771,17 +772,27 @@ class TorchRunTests(unittest.TestCase):
                 for field in ("robot", "engine", "training_framework", "gpu", "actor_hidden"):
                     self.assertNotIn(field, run["parsed_arguments"])
 
+    def build(self, cfg, contact_capacity=96):
+        return ebp.build_policy_file(
+            self.saved, cfg, action_parameters(), manifest(), policy="ema", label=LABEL,
+            artifact_id="policy-test", source_artifact_id="checkpoint-test", engine_revision="engine-test",
+            contact_capacity=contact_capacity, constraint_row_capacity=288,
+            end_markers=ebp.run_markers(self.run, "torch"))
+
     def test_action_baseline_follows_residual_action(self):
         for residual, baseline in ((False, dict(kind="nominal_joint_position")),
                                    (True, dict(kind="next_reference_joint_position",
                                                row="min(current_row + 1, clip_last_row)"))):
             with self.subTest(residual_action=residual):
-                cfg = torch_run_config(residual_action=residual)
-                _, d = ebp.build_policy_file(
-                    self.saved, cfg, action_parameters(), manifest(), policy="ema", label=LABEL,
-                    artifact_id="policy-test", source_artifact_id="checkpoint-test", engine_revision="engine-test",
-                    contact_capacity=96, constraint_row_capacity=288, end_markers=ebp.run_markers(self.run, "torch"))
+                _, d = self.build(torch_run_config(residual_action=residual))
                 self.assertEqual(d["action"]["baseline"], baseline)
+
+    def test_contact_capacity_is_the_engine_record_maxcon(self):
+        self.assertEqual(self.build(torch_run_config())[1]["training_domain"]["engine"]["contact_capacity"], 96)
+        with self.assertRaisesRegex(ValueError, "maxcon 96"):
+            self.build(torch_run_config(), contact_capacity=64)
+        with self.assertRaisesRegex(ValueError, "maxcon None"):
+            self.build(torch_run_config(engine=dict(version="0.1.0", key="library-key", arch="sm_89")))
 
     def test_seed_initialised_run_declares_its_seed(self):
         self.write_run(torch_run_config(initial_checkpoint=None, seed=3))
@@ -844,6 +855,9 @@ class TorchRunTests(unittest.TestCase):
         (self.run / "terminal.json").unlink()
         self.refused()
         (self.run / "terminal.json").write_text(json.dumps(dict(status="completed", completed_updates=LABEL)))
+        (self.run / "config.json").write_text(json.dumps(torch_run_config(iters=LABEL + 1)))
+        self.refused()  # stopped by its --hours budget after LABEL of LABEL + 1 requested updates
+        (self.run / "config.json").write_text(json.dumps(torch_run_config()))
         (self.run / "FAILED.json").write_text("{}")
         self.refused()
 
@@ -859,22 +873,30 @@ class TorchRunTests(unittest.TestCase):
                 self.refused()
 
 
+def still_library():
+    """A three-frame reference clip of the standing root, in BM_BODIES order."""
+    from nablamimic.motion import MotionLibrary
+    frames, nb = 3, len(BM_BODIES)
+    qpos = np.zeros((frames, 36), np.float32)
+    qpos[:, 3] = 1.0
+    quat = np.zeros((frames, nb, 4), np.float32)
+    quat[..., 0] = 1.0
+    return MotionLibrary(qpos=qpos, qvel=np.zeros((frames, 35), np.float32),
+                         body_pos=np.zeros((frames, nb, 3), np.float32), last=np.full(frames, frames - 1),
+                         names=["still"], starts=np.array([0]), fps=50.0, bodies=BM_BODIES, body_quat=quat,
+                         body_lin_vel=np.zeros((frames, nb, 3), np.float32),
+                         body_ang_vel=np.zeros((frames, nb, 3), np.float32))
+
+
+def engine_not_called(*args):
+    raise AssertionError("the engine is not stepped in this test")
+
+
 @unittest.skipIf(not SCENE.exists(), f"no Menagerie checkout at {SCENE} (scripts/setup_menagerie.sh)")
 class CompiledModelTests(unittest.TestCase):
     def test_action_parameters_are_the_environment_values(self):
         from nablamimic.env import EnvConfig, TrackingEnv
-        from nablamimic.motion import MotionLibrary
-        frames, nb = 3, len(BM_BODIES)
-        qpos = np.zeros((frames, 36), np.float32)
-        qpos[:, 3] = 1.0
-        quat = np.zeros((frames, nb, 4), np.float32)
-        quat[..., 0] = 1.0
-        lib = MotionLibrary(qpos=qpos, qvel=np.zeros((frames, 35), np.float32),
-                            body_pos=np.zeros((frames, nb, 3), np.float32), last=np.full(frames, frames - 1),
-                            names=["still"], starts=np.array([0]), fps=50.0, bodies=BM_BODIES, body_quat=quat,
-                            body_lin_vel=np.zeros((frames, nb, 3), np.float32),
-                            body_ang_vel=np.zeros((frames, nb, 3), np.float32))
-        env = TrackingEnv(lib, EnvConfig(residual_action=True))
+        env = TrackingEnv(still_library(), EnvConfig(residual_action=True))
         act = ebp.compiled_action_parameters(run_config())
         self.assertEqual(len(act.joint_names), env.nu)
         np.testing.assert_array_equal(np.asarray(act.nominal, np.float32), np.asarray(env.q0))
@@ -885,6 +907,25 @@ class CompiledModelTests(unittest.TestCase):
         self.assertEqual(act.joint_names[0], "left_hip_pitch_joint")
         _, d = export(act=act)
         self.assertEqual(d["action"]["joint_names"], list(act.joint_names))
+
+    @unittest.skipIf(importlib.util.find_spec("torch") is None, "the optional PyTorch backend is not installed")
+    def test_action_parameters_are_the_torch_environment_values(self):
+        """The declared action values of a torch_train.py run equal those TorchTrackingEnv executes, which it computes
+        inline from the model env.build_model returns for torch_train.main's EnvConfig (the engine is never called)."""
+        from nablamimic.env import EnvConfig
+        from nablamimic.torch_env import TorchTrackingEnv
+        for residual in (False, True):
+            with self.subTest(residual_action=residual):
+                cfg = torch_run_config(residual_action=residual)
+                env = TorchTrackingEnv(still_library(), EnvConfig(
+                    solver_iterations=cfg["solver_iterations"], residual_action=cfg["residual_action"],
+                    action_rate_space=cfg["action_rate_space"]), device="cpu", step_fn=engine_not_called,
+                    kinematics_fn=engine_not_called)
+                act = ebp.compiled_action_parameters(cfg)
+                for declared, executed in (("nominal", "q0"), ("scale", "action_scale"),
+                                           ("setpoint_lower", "ctrl_lo"), ("setpoint_upper", "ctrl_hi")):
+                    np.testing.assert_array_equal(np.asarray(getattr(act, declared), np.float32),
+                                                  getattr(env, executed).numpy(), err_msg=declared)
 
 
 if __name__ == "__main__":
