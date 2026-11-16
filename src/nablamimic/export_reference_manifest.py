@@ -1,15 +1,15 @@
-"""Write a manifest of a reference cache (nablamimic.motion's per-clip npz files) for readers outside this package.
+"""Write a manifest of a reference cache (nablamimic.motion's per-clip npz files) for programs outside this package.
 
-A reader of the cache needs the clip order (it sets the global frame ids and the reset bins) and the file of each clip.
-The file names carry a tag computed from the body list (motion.cache_file_name); the manifest states them, so a reader
-takes the names from the manifest and never recomputes the tag or lists the directory.
+A program that reads the cache needs the clip order (it sets the global frame ids and the reset bins) and the file of
+each clip. The file names carry a tag computed from the body list (motion.cache_file_name); the manifest states them, so
+such a program takes the names from the manifest and never recomputes the tag or lists the directory.
 
 The manifest is JSON, written once (an existing --out is refused). Its fields:
 
   format              "nablamimic-reference-manifest-v1"
   artifact_id         the identity the caller publishes this cache under (--artifact-id)
   cache_directory     the cache directory: relative to the manifest's directory when the cache lies inside it,
-                      otherwise absolute; a reader opens <manifest directory>/<cache_directory>/<cache_file>
+                      otherwise absolute; a program opens <manifest directory>/<cache_directory>/<cache_file>
   frame_rate_hz       the rate of the processed clips (motion.REFERENCE_FPS)
   bodies              the tracked bodies, in the order of the body axis (env.BM_BODIES)
   arrays              per array: dtype on disk, shape after the frame axis, frame and convention
@@ -36,7 +36,7 @@ from .motion import CACHE_KEYS, LAFAN1_DATASET, LAFAN1_REVISION, REFERENCE_FPS, 
 from .params import REPO
 
 FORMAT = "nablamimic-reference-manifest-v1"
-CLIP_CHECKSUMS = REPO / "scripts" / "lafan1_g1.sha256"  # the fork's record of the 40 dataset files
+CLIP_CHECKSUMS = REPO / "scripts" / "lafan1_g1.sha256"  # checksums of the 40 dataset files
 DOWNLOAD_SCRIPT = REPO / "scripts" / "download_lafan1.sh"
 
 # Per array: trailing shape after the frame axis (None: the model's nq / nv, equal across clips; "bodies": the number of

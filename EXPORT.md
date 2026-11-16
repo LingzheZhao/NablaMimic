@@ -1,57 +1,66 @@
 # Export a policy, critic and reference cache
 
-The exporters write files that an external executor can read using NumPy and
-JSON. Output files are written once; existing destinations are refused. A
-`train.py` checkpoint pickles optax optimizer states, so loading it needs this
-package's pinned dependency environment. A `torch_train.py` checkpoint holds
-NumPy arrays and Python values only; exporting its run still needs `torch`,
-because the configuration check imports the parser of `torch_train.py`.
+Two commands write a trained run in files that a program outside this package
+reads with NumPy and JSON alone:
 
-The command reads runs of both trainers in this package: the JAX `train.py`
+- `nablamimic.export_reference_manifest` writes a JSON manifest of the
+  processed reference cache the run trained on.
+- `nablamimic.export_bm_policy` writes the actor as a tracking policy file
+  (format `bm-nabla-tracking-policy-v1`) and, optionally, the critic and its
+  input normalizer as a second file (format `bm-nabla-critic-v1`).
+
+Each output is written once: an existing destination is refused.
+
+## Runs the exporter reads
+
+The exporter reads runs of both trainers in this package, the JAX `train.py`
 and the PyTorch `torch_train.py`. The run's `config.json` names the trainer: a
 `torch_train.py` run records `training_framework` as `"torch"`, a `train.py`
-run records no `training_framework`, and any other value is refused. Either
-run must be on one device, without resume or the SHAC guard. Only numbered
-`RUN/ckpt/it_N.pkl` checkpoints are read. `params.pkl` is saved at a
-different point in the update loop and is not an export input. A run marked
-`DIVERGED` or `HALTED` is refused; a `torch_train.py` run must in addition
-have completed all its requested updates (see
-[PyTorch-trainer runs](#pytorch-trainer-runs)). The sections below describe a
-`train.py` run first; [PyTorch-trainer runs](#pytorch-trainer-runs) gives what
-differs for a `torch_train.py` run.
+run records no `training_framework`, and any other value is refused.
 
-## train.py checkpoint counts and EMA
+A `train.py` checkpoint pickles optax optimizer states, so loading it needs
+this package's pinned dependency environment. A `torch_train.py` checkpoint
+holds NumPy arrays and Python values only, but exporting its run still needs
+the optional `torch` dependency, because the configuration check imports the
+argument parser of `torch_train.py`. Compiling the model needs the JAX and
+MuJoCo packages for either trainer.
 
-The trainer saves numbered checkpoint N before starting update N, after N
-completed outer updates. The checkpoint's own `env_steps` must equal
-`N * num_envs * devices * horizon`. The exporter requires exact agreement with
-the filename and the checkpoint's `iter`; it does not add fields to the
-checkpoint.
+Either run must be on one device and one process, must not be resumed, and must
+not use the SHAC guard (`--shac-strict`, the update rule and gradient guard of
+SHAC, which halts training at an exploding actor gradient). Only numbered checkpoints `RUN/ckpt/it_N.pkl` are read;
+`params.pkl` is saved at a different point of the update loop and is not an
+input. A run directory holding `DIVERGED` or `HALTED` is refused.
 
-A `train.py` checkpoint stores no completed-update or averaging counter. When
-`actor_ema > 0`, `actor_ema` must be present, and a run that was never resumed
-has performed N averaging updates at checkpoint N. When averaging is disabled,
-that entry must be absent. The declaration records these derived counts and the
-configured decay and warmup. The 0.2 `ours.args` recipe uses decay 0.999 with
-warmup; both the weights as trained and the averaged weights can be exported
-explicitly.
+### train.py runs
 
-That the run was never resumed is checked through the full `train.py`
-configuration schema: `resume` is null, there is one process and one device,
-and a configured run has exactly one segment with no resume. Required and
-allowed checkpoint fields are those `train.py` writes, including the optional
-action-target optimizer and averaged actor entries. Missing or unsupported
-fields are rejected, without a format converter or alternate reader.
+- An outer update is one update of the training loop: `num_envs` windows of
+  `horizon` simulation steps, then the actor and critic steps. The trainer saves
+  checkpoint N before starting update N, after N completed outer updates. The
+  checkpoint's `iter` must equal N and its `env_steps` must equal
+  `N * num_envs * devices * horizon`.
+- The checkpoint stores no completed-update or averaging counter. With
+  `actor_ema > 0` (an exponential moving average, EMA, of the actor weights),
+  the checkpoint must hold `actor_ema`, which in a run that is not resumed has
+  N averaging updates at checkpoint N; with `actor_ema = 0` it must not hold
+  one. The declaration records these derived counts and the configured decay
+  and warmup. `configs/ours.args` uses decay 0.999 with warmup (from
+  `configs/base/ours.args`).
+- The checkpoint fields must be exactly those `train.py` writes for the
+  configuration: `actor`, `critic`, `cnorm`, `st_a`, `st_c`, `bin_q`, `iter`,
+  `wall_s` and `env_steps`, with `st_r` for the action-target optimizer and
+  `actor_ema` for the averaged actor. A missing or unsupported field is
+  refused; no field is added or converted.
+- `config.json` must hold the `train.py` core fields, and no field outside the
+  parser's arguments and the fields `train.py` adds. Optional command-line
+  records the parser knows may be present without becoming required, and absent
+  ones are not filled with defaults. `resume` must be null. A run started
+  with `--config` records `argv`, `config_args`, `config_file` and a list of
+  `segments` (one per start of the trainer, each with its own engine record);
+  it must hold exactly one segment, not resumed.
+- `DONE`, when present, must hold the final update, and a checkpoint label
+  above it is refused.
 
-The required configuration fields are the 0.2 `train.py` core schema. Known
-optional command-line records may be present without becoming required core
-fields, and absent optional records are not filled with defaults. This keeps
-the core schema usable when an optional feature is added to the parser.
-Policy export requires `obs_mode=anchor_ori`.
-
-## PyTorch-trainer runs
-
-A `torch_train.py` run is read by the records that trainer writes:
+### torch_train.py runs
 
 - `config.json` holds exactly the trainer's parsed arguments (its parser adds
   `--matmul-precision`, `--execution`, `--regression-batch`,
@@ -61,16 +70,14 @@ A `torch_train.py` run is read by the records that trainer writes:
   `observed_precision`, `gpu`, `torch_version`, `torch_cuda`, `random_stream`,
   `clock`, `inputs`, `declared_environment` and `engine`. A missing field or a
   field outside that set is refused. The trainer records no `argv`,
-  `config_args`, `config_file`, `segments` or `git_dirty`. The declaration's
-  `source_run` holds the parsed arguments, the source revision, the GPU, the
-  torch build and the declared environment, and no `git_dirty`.
+  `config_args`, `config_file`, `segments` or `git_dirty`.
 - The run must have completed its requested updates: `DONE` holds
   `completed`, `terminal.json` has status `completed` and a
   `completed_updates` equal to `iters`, and there is no `FAILED.json`. The
-  trainer also writes `DONE` and status `completed` for a run that its
+  trainer writes `DONE` and status `completed` also for a run that its
   `--hours` budget stopped before `iters`; such a run is refused, with both
-  numbers named. The declaration records both files in `run_end_markers`, and
-  a checkpoint label above the terminal `completed_updates` is refused.
+  numbers named. A checkpoint label above the terminal `completed_updates` is
+  refused.
 - Checkpoint fields are exactly `actor`, `critic`, `cnorm`, `bin_q`, `iter`,
   `completed_updates`, `ema_updates`, `wall_s`, `env_steps`,
   `training_framework` and `execution`, with `actor_ema` added when
@@ -81,34 +88,19 @@ A `torch_train.py` run is read by the records that trainer writes:
   configured execution. The declaration takes its counts from
   `completed_updates` and `ema_updates`.
 - A run started with `--initial-checkpoint` counts its updates from zero like
-  any other run. The declaration's `policy_source.initial_weights` gives the
-  path of that file as `config.json` records it; a run started without one
-  records the seed its networks were initialised with.
-- The networks are saved as the same trees of `[in, out]` kernels as in a
-  `train.py` checkpoint, so the policy and critic files have the same entries,
-  shapes and orientation.
+  any other run.
 - The engine record in `config.json` states the build's contact capacity as
   `maxcon`, and `--engine-contact-capacity` must equal it. The record states
   no constraint-row capacity, so `--engine-constraint-row-capacity` is taken
   as given.
-- The action scale, setpoint limits, gains and efforts are compiled with
-  `env.build_model` from the run's configuration. `torch_env.py` builds its
-  model with the same function and configuration.
-- The configuration check imports the parser of `torch_train.py`, so exporting
-  such a run needs the optional `torch` dependency in addition to the JAX and
-  MuJoCo packages that compiling the model needs.
+- The networks are saved as the same trees of `[in, out]` kernels as in a
+  `train.py` checkpoint, so the policy and critic files have the same entries,
+  shapes and orientation for both trainers.
 
-The policy inputs and the action map of `torch_env.py` are those of `env.py`,
-so a declaration states them in the same terms for both trainers: the five
-proprioception terms in the same order and scaling, a history of ten frames
-oldest first with the newest appended last and the first frame tiled at a
-reset with a zero previous action, the previous action as executed with its
-exploration noise, ten goal rows held at the clip end, the first two columns of
-the anchor's relative rotation, and setpoints
-`clip(baseline + 0.25 * effort / kp * action, setpoint_lower, setpoint_upper)`
-around the knees-bent default pose (`nominal_joint_position`) or, with
-`residual_action`, the next reference row's joint positions.
-The critic inputs, the normalizer and its update are also the same.
+The policy inputs, the action map, the critic inputs and the critic normalizer
+of `torch_env.py` are those of `env.py`, and `torch_env.py` compiles its model
+with the same `env.build_model`, so one declaration format describes runs of
+both trainers.
 
 ## Reference manifest
 
@@ -117,17 +109,22 @@ python -m nablamimic.export_reference_manifest --cache-dir CACHE --clips all \
     --artifact-id REFERENCE_ID --out MANIFEST.json
 ```
 
-Use the processed cache the run read. `--clips all` uses the recorded LAFAN1
-dataset's sorted clip order; explicitly listed names retain their given order.
-The command checks the six cache arrays, their shapes, body ordering and finite
-values. The manifest states the dataset identity, frame rate, body names, array
-conventions, clip order, exact cache filenames and row intervals in the
-concatenated library. Readers use these filenames directly.
+Give the processed cache the run read. `--clips all` takes every clip listed in
+`scripts/lafan1_g1.sha256`, in sorted name order, as training with
+`--clips all` does; listed names keep their given order. The command checks
+that `scripts/download_lafan1.sh` fetches the declared LAFAN1 dataset revision,
+and checks each clip's six cache arrays (`qpos`, `qvel`, `body_pos`,
+`body_quat`, `body_lin_vel`, `body_ang_vel`) for their names, shapes, body
+count and finite values. The cache is not modified.
 
-The manifest's cache directory is relative when it lies within the manifest's
-directory and absolute otherwise. A reader opens
-`<manifest directory>/<cache_directory>/<cache_file>`. The source cache remains
-unchanged.
+The manifest (format `nablamimic-reference-manifest-v1`) states the dataset
+identity, frame rate, tracked body names in body-axis order, the meaning and
+layout of each array, the clip selection and order, each clip's cache file name
+and frame count, and each clip's first and last row in the concatenated
+library. A program that reads the manifest takes the cache file names from it.
+The cache directory is stated relative to the manifest's directory when the
+cache lies inside it and as an absolute path otherwise; each clip is at
+`<manifest directory>/<cache_directory>/<cache_file>`.
 
 ## Policy file
 
@@ -139,14 +136,18 @@ python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_N.pkl --run-confi
     --out POLICY.npz
 ```
 
-`--run-config` also accepts the run's `config.json`. The checkpoint must be in
-that run's `ckpt/` directory. The Engine revision and capacities are explicit
-declarations about the build used for training, not values inferred from weights.
-`--policy live` selects `actor`, the weights as trained; `--policy ema` selects
-`actor_ema` and fails if averaged weights are unavailable.
+`--run-config` takes the run directory or its `config.json`; the checkpoint
+must be in that run's `ckpt/` directory. `--policy live` selects `actor`, the
+weights as trained; `--policy ema` selects `actor_ema` and is refused when the
+checkpoint holds no averaged weights. `--artifact-id` is the identity the
+policy file is published under, `--source-artifact-id` the published identity
+of the checkpoint, and `--reference-manifest` the manifest of the reference
+cache the run trained on. The NablaEngine revision and the contact and
+constraint-row capacities per simulated world are declared by the caller for
+the build the run trained with; they are not inferred from the weights.
 
-The output format is `bm-nabla-tracking-policy-v1`, readable with
-`np.load(path, allow_pickle=False)`. For the standard four-hidden-layer actor:
+The file is read with `np.load(path, allow_pickle=False)`. For the
+four-hidden-layer actor:
 
 | Entry | Representation |
 | --- | --- |
@@ -156,51 +157,77 @@ The output format is `bm-nabla-tracking-policy-v1`, readable with
 | Matching decoder biases | [out] vectors |
 | `declaration` | Scalar Unicode array containing one JSON document |
 
-Linear indices are 0, 2, 4, 6 and 8, with ELU between Linear layers. Each exported
-weight is the transpose of the checkpoint's [in, out] kernel. The encoder output
-uses tanh. Decoder input order is latent, 930-value proprioceptive history, then
-six anchor-orientation values. The shape marker and optimizer state are not
-exported.
+Linear indices are 0, 2, 4, 6 and 8, with ELU between Linear layers. Each
+exported weight is the transpose of the checkpoint's [in, out] kernel. The
+encoder takes the goal rows and its output passes through tanh. The decoder
+input is that latent, the 930-value proprioception history, then the six
+anchor-orientation values. The checkpoint's shape marker `anchor_dec` and the
+optimizer states are not exported.
 
-The declaration records checkpoint identity and counts, explicit weight
-selection, architecture, observation layout, noise-related input meaning, action
-joint order, default pose, scale, setpoint limits, timing, training configuration
-and reference identity. Action parameters come from the same model-building
-routine the environment uses. With `residual_action`, the setpoint baseline is
-the next reference row's joint positions, not the default pose; exporting a
-policy does not remove that dependency on the reference.
+The declaration holds `format` and `artifact_id`, then:
 
-Only the anchor-orientation actor with anchor-to-decoder structure and no actor
-observation normalization is supported. Finite float32 weights, configured layer
-widths, the fixed mjlab/all-contact model, reference clip order and 50 Hz
-reference rate are checked. MuJoCo Warp training, sharded motion libraries and
-decoder position-feedback variants are outside what this command exports.
+- `policy_source`: the source artifact id, the checkpoint label, the paths of
+  the checkpoint and `config.json`, the completed outer updates and averaging updates with the source of each count,
+  the selected weights, the configured averaging decay and warmup, and
+  `run_end_markers`, the records of `DONE` and `terminal.json`. For a
+  `torch_train.py` run, `initial_weights` gives the `--initial-checkpoint` path
+  as `config.json` records it or, without one, the seed the networks were
+  initialised with;
+- `architecture`: layer widths, activation, tanh on the encoder output and
+  float32 weights;
+- `inputs`: five proprioception terms in order with their scale factors, a
+  history of ten frames oldest first with the newest appended last and the
+  first frame tiled at a reset with a zero previous action, the previous action
+  as executed with its exploration noise, ten goal reference rows held at the
+  clip end, and the first two columns of the relative rotation between the
+  robot's and the reference's torso (the anchor body);
+- `action`: joint order, default pose (`nominal_joint_position`, the
+  knees-bent pose), scale `0.25 * effort / kp` (`kp` the joint position gain,
+  `effort` the joint torque limit), setpoint limits, gains and torque limits,
+  and the setpoint `clip(baseline + scale * action, setpoint_lower,
+  setpoint_upper)`; the baseline is the default pose or, with
+  `residual_action`, the next reference row's joint positions, so a policy
+  trained with `residual_action` still needs the reference to execute;
+- `timing`: control step, physics step, substeps and solver iterations;
+- `training_domain`: the declared engine revision and capacities with the
+  engine records of `config.json`, the model, the reference manifest's
+  identity, clips and frame counts, the matrix-multiplication precision of
+  training (`matmul_precision`), and `source_run`. `source_run` holds the run's
+  arguments as `config.json` records them, with `git_commit` and `gpu`; a
+  `train.py` run adds `git_dirty`, and a `torch_train.py` run adds its torch
+  build and declared environment. No git revision is added that the run did
+  not record.
 
-The exported declaration's `checkpoint_evaluation_policy` is null because
-neither trainer's checkpoint stores such a field. The selected weights and
-configured averaging rule are stated separately. Run arguments and source
-metadata are retained as the trainer records them; the exporter does not invent
-a git revision.
+The action values come from `env.build_model` compiled for the run's
+configuration, the routine the training environment uses.
+`checkpoint_evaluation_policy` is null because neither trainer's checkpoint
+stores such a field.
 
-## Optional critic file
+Only an actor trained with `--anchor-to-decoder`, observation mode
+`anchor_ori` (`hist_len` 10) and no `--actor-obs-norm` is exported. The command
+checks finite float32 weights, the configured layer widths, the fixed scene
+(`robot` `mjlab`, `contacts` `all`), the reference clips and their order, and
+the 50 Hz reference rate. Runs trained on MuJoCo Warp, runs on a sharded motion
+library (`--motion-lib`) and PPO policies are refused.
+
+## Critic file
 
 ```bash
 python -m nablamimic.export_bm_policy ... --out POLICY.npz \
     --critic-out CRITIC.npz --source-revision SOURCE_REVISION
 ```
 
-The second file uses `bm-nabla-critic-v1`. It holds
-`critic.{0,2,4}.weight/bias` in the same transposed Linear layout,
-`normalizer.mean`, `normalizer.variance`, a scalar `format` entry and a JSON
-declaration. The source revision is required and must agree with a recorded
-non-null `git_commit`.
+The critic file holds `critic.{0,2,4}.weight/bias` in the same transposed
+Linear layout, `normalizer.mean`, `normalizer.variance`, a scalar `format`
+entry and a JSON declaration. The source revision is required and must equal
+`git_commit` where `config.json` records one.
 
 The critic's 825 inputs are proprioception (93), reference goal (680), anchor
-orientation (6), root error (4), anchor-relative pose (9), and domain draws (33).
-The normalizer applies
-`clip((x - mean) / sqrt(variance + 1e-5), -10, 10)`. Its stored mean and variance
-have no stored update count; the declaration states that absence. Shapes, finite
-float32 values and strictly positive variance are required.
+orientation (6), root error (4), anchor-relative pose (9) and domain
+randomisation draws (33). The normalizer applies
+`clip((x - mean) / sqrt(variance + 1e-5), -10, 10)`. The checkpoint stores no
+normalizer update count, and the declaration states that it is absent. Shapes,
+finite float32 values and strictly positive variance are required.
 
 ## CPU tests
 
@@ -208,23 +235,10 @@ float32 values and strictly positive variance are required.
 JAX_PLATFORMS=cpu python -m unittest discover -s tests -p 'test_export*.py'
 ```
 
-Synthetic inputs built by the tests cover the count rules, the selection of the
-weights as trained or averaged, configuration and marker refusals, the action
-and critic layout, NumPy execution against the JAX and PyTorch networks,
-output-path protection and reference manifest order. The compiled-model
-comparisons run when the Menagerie checkout is available. The `torch_train.py`
-run tests need the optional `torch` dependency and are skipped without it.
-These tests do not establish a downstream executor's physical behavior.
-
-The measurements recorded for this command cover `train.py` runs only. The
-78 export tests for `train.py` runs and reference manifests passed in a
-pinned CPU environment with no skips, and an integration run on the seed-zero checkpoint of a `train.py` run after 1,500
-updates and its processed reference cache passed all 142 checks: forty clips,
-441,120 frames, fourteen bodies, twenty-nine actions, the checkpoint counts,
-policy exports of both the weights as trained and the averaged weights, and the
-critic of the same checkpoint. Exported kernels, normalizer arrays and
-model-derived action parameters matched exactly. NumPy actor and critic
-inference on deterministic inputs satisfied rtol 1e-5 and atol 1e-6 against
-JAX for both policies. These measurements cover export layout and inference
-only, and no downstream physical execution was part of them. No measurement of
-a `torch_train.py` export is recorded here.
+The tests build synthetic runs and cover the count rules, the selection of the
+weights as trained or averaged, configuration and end-record refusals, the
+action and critic layout, NumPy execution against the JAX and PyTorch networks,
+output-path protection and the manifest's clip order. The comparisons with a
+compiled model need the MuJoCo Menagerie checkout (the robot model files); the
+`torch_train.py` tests need `torch` and are skipped without it. The tests cover
+file layout and inference, not physical behaviour.
