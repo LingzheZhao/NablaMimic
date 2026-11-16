@@ -1,4 +1,4 @@
-"""Export the actor of a train.py or torch_train.py checkpoint as a BM tracking policy file (format
+"""Export the actor of a train.py or torch_train.py checkpoint as a tracking policy file (format
 "bm-nabla-tracking-policy-v1").
 
 A train.py checkpoint (ckpt/it_N.pkl) pickles optax states and needs this package's environment to load; a
@@ -23,7 +23,7 @@ the declared source revision and the input layout of env.TrackingEnv.critic_obs.
 
 The declaration states the architecture, the input layout, the action map, the timing and the training domain. Every
 value comes from the checkpoint, the run's config.json, the model build_model compiles for that configuration (joint
-names, nominal pose, gains, torque limits, setpoint range: the values the policy trained with), the reference manifest
+names, default pose, gains, torque limits, setpoint range: the values the policy trained with), the reference manifest
 (export_reference_manifest) or a required argument; a missing or inconsistent value is refused, never defaulted.
 
 Two trainers write the runs this command reads, and config.json tells them apart: train.py (JAX) records no
@@ -34,8 +34,8 @@ or converted.
 
 A train.py run must be on one device, not resumed, not diverged and not halted by the SHAC guard. A numbered it_N.pkl
 is saved before update N: it holds N completed outer updates, and env_steps must equal N * num_envs * horizon. Its
-checkpoint has no completed-update or averaging counter. With actor_ema > 0 it holds actor_ema, which in a run that
-was never resumed has exactly N averaging updates.
+checkpoint has no completed-update or averaging counter. With actor_ema > 0 it holds actor_ema, which in a run without
+resume has exactly N averaging updates.
 
 A torch_train.py run must be on one device, not resumed and completed as that trainer records it: DONE holds
 "completed", terminal.json has status "completed" and a completed_updates equal to the run's iters (a run that its
@@ -174,7 +174,7 @@ def torch_argument_fields():
 def run_markers(run_dir, framework):
     """The end records of a run. train.py: its DONE marker if present (the last update); divergence or a guard halt
     is refused. torch_train.py: DONE holding "completed" and terminal.json with status "completed" are required (it
-    writes both at the end of a run that was not interrupted), and FAILED.json is refused."""
+    writes both at the end of an uninterrupted run), and FAILED.json is refused."""
     run_dir = Path(run_dir)
     refused = ("DIVERGED", "HALTED", "FAILED.json") if framework == "torch" else ("DIVERGED", "HALTED")
     for name in refused:
@@ -271,7 +271,7 @@ def validate_jax_run_config(cfg):
     if missing or extra:
         raise ValueError(f"config.json fields: missing {sorted(missing)}, unsupported {sorted(extra)}")
     if cfg["resume"] is not None or cfg["devices"] != 1 or cfg["processes"] != 1 or cfg["shac_strict"]:
-        raise ValueError("Export requires a single-device run that was never resumed, without the SHAC guard")
+        raise ValueError("Export requires a single-device run without resume or the SHAC guard")
     if "segments" in cfg:
         segments = cfg["segments"]
         if not isinstance(segments, list) or len(segments) != 1 or segments[0]["resume"] is not None:
@@ -292,7 +292,7 @@ def validate_jax_run_config(cfg):
 def update_counts(checkpoint, cfg, label):
     """(completed outer updates, the source of that count, averaging updates) of numbered checkpoint it_N.pkl. A
     train.py checkpoint records no counter: N is the label, checked against iter and env_steps, and the averaging
-    count is N with actor_ema > 0 in a run that was never resumed. A torch_train.py checkpoint records
+    count is N with actor_ema > 0 in a run without resume. A torch_train.py checkpoint records
     completed_updates and ema_updates, which must agree with the label, iter, env_steps and the configured averaging."""
     validate_run_config(cfg)
     torch_run = training_framework(cfg) == "torch"
@@ -674,7 +674,7 @@ def write_policy_file(arrays, declaration, out, *, file_format=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m nablamimic.export_bm_policy",
-                                 description="Export the actor of a train.py or torch_train.py checkpoint as a BM "
+                                 description="Export the actor of a train.py or torch_train.py checkpoint as a "
                                              f"tracking policy file ({FORMAT}): torch-layout weights and a JSON "
                                              "declaration in one npz.")
     ap.add_argument("--checkpoint", required=True, help="RUN/ckpt/it_N.pkl")

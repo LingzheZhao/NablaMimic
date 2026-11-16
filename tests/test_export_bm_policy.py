@@ -1,4 +1,4 @@
-"""The BM policy file exporter on a tiny synthetic checkpoint (CPU; the compiled-model part needs Menagerie)."""
+"""The tracking policy file exporter on a tiny synthetic checkpoint (CPU; the compiled-model part needs Menagerie)."""
 
 import contextlib
 import copy
@@ -360,7 +360,7 @@ class RefusalTests(unittest.TestCase):
             ebp.checkpoint_label("RUN/params.pkl")
         self.assertEqual(ebp.checkpoint_label("RUN/ckpt/it_011667.pkl"), 11667)
 
-    def test_native_zero_checkpoint_and_action_target_optimizer(self):
+    def test_checkpoint_zero_and_action_target_optimizer(self):
         for enabled in (False, True):
             ck = averaged_checkpoint() if enabled else current_checkpoint()
             ck.update(iter=0, env_steps=0)
@@ -377,7 +377,7 @@ class RefusalTests(unittest.TestCase):
         _, declaration = export(ck, cfg=cfg)
         self.assertEqual(declaration["policy_source"]["counts"]["completed_outer_updates"], LABEL)
 
-    def test_fresh_run_contract(self):
+    def test_resumed_multi_device_and_invalid_runs_refused(self):
         for cfg in (run_config(resume="CHECKPOINT"), run_config(devices=2), run_config(processes=2),
                     run_config(shac_strict=True), run_config(num_envs=0), run_config(horizon=True),
                     run_config(actor_ema=-.1), run_config(actor_ema=float("nan")),
