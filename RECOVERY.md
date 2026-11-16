@@ -298,7 +298,8 @@ are unavailable.
 weights, the run's source revision (`git_commit` of its `config.json`) and
 this program's, the scene file and its content, the termination, the
 controls, the engine record of `torch_ffi.init` and the engine counters read
-after the rollouts, the card, the settings above, the whole-body mass and the
+after the rollouts (they include the steps of ended trials, which the batch
+still computes; per-trial counts come from the fields below), the card, the settings above, the whole-body mass and the
 library inputs of the run and of the rollout. `rollouts.npz` holds, per control
 and trial (time-major, [controls, trials, ...]; after a trial's end NaN, -1 or
 false):

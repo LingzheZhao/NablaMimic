@@ -232,6 +232,28 @@ class PushTest(unittest.TestCase):
                 self.assertTrue(same(pushed[key], plain[key]), key)
 
 
+class RecordTest(unittest.TestCase):
+    def test_the_record_holds_each_field_in_its_shape_and_type(self):
+        records, _ = run([walk(0), walk(40, body_row=SWAY+5, push={"control": 1, "velocity_xy": [0.5, 0.0]})], 4)
+        float32, int32, bool_ = np.dtype(np.float32), np.dtype(np.int32), np.dtype(bool)
+        expected = dict(
+            body_pos_w=((4, 2, 14, 3), float32), body_quat_w=((4, 2, 14, 4), float32), qpos=((4, 2, 36), float32),
+            qvel=((4, 2, 35), float32), frame_before=((4, 2), int32), frame_after=((4, 2), int32),
+            clip_last_row=((4, 2), int32), available=((4, 2), bool_), done=((4, 2), bool_),
+            termination_height=((4, 2), bool_), termination_tilt=((4, 2), bool_),
+            termination_nonfinite=((4, 2), bool_), push_applied=((4, 2), bool_),
+            engine_newton_iterations=((4, 2), int32), engine_contacts=((4, 2), int32),
+            engine_constraint_rows=((4, 2), int32), engine_info_bits=((4, 2), int32),
+            engine_contact_capacity_exceeded=((4, 2), bool_), engine_row_capacity_exceeded=((4, 2), bool_),
+            command_row=((2,), int32), body_row=((2,), int32), push_control=((2,), int32),
+            push_velocity_xy=((2, 2), float32), start_qpos=((2, 36), float32), start_qvel=((2, 35), float32),
+            start_body_pos_w=((2, 14, 3), float32), start_body_quat_w=((2, 14, 4), float32))
+        self.assertEqual({key: (value.shape, value.dtype) for key, value in records.items()}, expected)
+        self.assertEqual(records["frame_before"][:, 0].tolist(), list(range(WALK, WALK+4)))
+        self.assertEqual(records["frame_after"][:, 0].tolist(), list(range(WALK+1, WALK+5)))
+        self.assertTrue((records["clip_last_row"] == WALK+299).all())
+
+
 class TerminationTest(unittest.TestCase):
     def test_the_two_terminations_give_identical_records_up_to_the_first_recipe_termination(self):
         trials = [walk(0), walk(40, body_row=SWAY+5)]

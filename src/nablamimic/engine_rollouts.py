@@ -48,7 +48,8 @@ available unless its state is non-finite); its later controls are unavailable, w
 
 Output directory (must not exist): ``description.json`` (the inputs: run, checkpoint, weights, the run's source
 revision, the scene file and its content, the engine record and the counters read after the rollouts, the card,
-the settings) and ``rollouts.npz``, per control and trial (time-major, [controls, trials, ...]):
+the settings; the counters include the steps of ended trials, which the batch still computes, so per-trial counts
+come from the fields below) and ``rollouts.npz``, per control and trial (time-major, [controls, trials, ...]):
 
 * ``body_pos_w`` [C, T, 14, 3], ``body_quat_w`` [C, T, 14, 4] (WXYZ): the tracked bodies' world positions and
   orientations after the control; ``qpos`` [C, T, 36], ``qvel`` [C, T, 35]: the root and joint state after it;
@@ -273,6 +274,9 @@ def main(argv=None):
     from .torch_train import build_environment, configure_matmul_precision, write_json
     from nablaengine import torch_ffi
     args = build_parser().parse_args(argv)
+    if (torch_ffi.OVERFLOW_CONTACTS, torch_ffi.OVERFLOW_ROWS) != (OVERFLOW_CONTACTS, OVERFLOW_ROWS):
+        raise ValueError(f"the engine's capacity bits {torch_ffi.OVERFLOW_CONTACTS}, {torch_ffi.OVERFLOW_ROWS} differ "
+                         f"from the bits this program reads, {OVERFLOW_CONTACTS}, {OVERFLOW_ROWS}")
     config = json.loads((args.run/"config.json").read_text())
     if config.get("training_framework") != "torch":
         raise ValueError(f"{args.run} is not a run of the PyTorch trainer (torch_train)")
