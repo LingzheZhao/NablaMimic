@@ -117,10 +117,14 @@ def training_environment(recovery):
 
 
 def actor():
-    generator = torch.Generator().manual_seed(0)
-    return dict(enc=[(0.01*torch.randn(680, 2, generator=generator), torch.zeros(2))],
-                dec=[(0.01*torch.randn(2+930+6, 29, generator=generator), torch.zeros(29))],
-                anchor_dec=torch.zeros(6))
+    """A one-layer actor whose every output is a sum of exact products (inputs times powers of two), so that its
+    values do not depend on how a matrix product of a given batch size orders its sums: the latents read two goal
+    entries, and each joint's action reads latent 0 and the joint's position in the newest history frame."""
+    encoder, decoder = torch.zeros(680, 2), torch.zeros(2+930+6, 29)
+    encoder[3, 0], encoder[100, 1] = 0.5, 0.25
+    decoder[0] = 0.5
+    decoder[2+9*93+torch.arange(29), torch.arange(29)] = -0.5
+    return dict(enc=[(encoder, torch.zeros(2))], dec=[(decoder, torch.zeros(29))], anchor_dec=torch.zeros(6))
 
 
 def run(trials, controls, termination="recipe"):
