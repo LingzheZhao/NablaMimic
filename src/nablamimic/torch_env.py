@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+from . import recovery as recovery_rows
+
 
 HIST, FUTURE, PROPRIO_DIM, GOAL_FRAME_DIM = 10, 10, 93, 68
 DT, SUBSTEPS = 0.02, 4
@@ -22,6 +24,10 @@ W = dict(body_pos=1.0, body_ori=1.0, body_lin_vel=1.0, body_ang_vel=1.0, root_po
          action_rate=-0.1, joint_limit=-2.0)
 COMPACT_KEYS = ("qpos", "qvel", "warm", "frame", "ep", "hist", "prev_a", "friction", "enc_bias", "com")
 STATE_KEYS = COMPACT_KEYS + ("xpos", "xquat", "cvel", "subtree_com")
+# With the recovery setting (recovery.py), the compact and full states also hold: the hidden reference row, whether
+# the hidden row is followed, the consecutive controls of target error, the blend controls still to run and the
+# horizontal offset of the command reference after the switch.
+RECOVERY_KEYS = ("hidden_frame", "recovering", "error_controls", "blend_left", "command_offset")
 
 
 def quat_mul(a, b):
@@ -101,6 +107,11 @@ def clip(x, low, high):
     return torch.minimum(torch.maximum(x, low), high)
 
 
+def planar(offset):
+    """Horizontal offsets [B, 2] as world vectors [B, 3] with zero height."""
+    return torch.cat((offset, torch.zeros_like(offset[:, :1])), -1)
+
+
 def select_reset(done, reset, stepped):
     """Select detached episode starts, retaining continuation gradients elsewhere."""
     return {key: torch.where(done.reshape(done.shape + (1,) * (value.ndim-done.ndim)),
@@ -113,7 +124,7 @@ class TorchTrackingEnv:
     max_reward = DT * sum(W[key] for key in ("body_pos", "body_ori", "body_lin_vel", "body_ang_vel",
                                             "root_pos", "root_ori"))
 
-    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None):
+    def __init__(self, lib, cfg, device="cuda", step_fn=None, kinematics_fn=None, recovery=None):
         # These routines construct CPU model constants / NumPy reference features.
         # They do not construct TrackingEnv or an MJX runtime state.
         import mujoco
@@ -139,20 +150,20 @@ class TorchTrackingEnv:
             torso_id=model.body(ANCHOR).id, root_com_id=int(model.body_rootid[model.body("pelvis").id]),
             foot_pairs=np.array([i for i in range(model.npair)
                                  if "_foot" in model.pair(i).name and model.pair(i).name.endswith("_floor")]),
-            starts=lib.starts, lengths=np.asarray([lib.last[s]-s+1 for s in lib.starts]),
+            starts=lib.starts, lengths=np.asarray([lib.last[s]-s+1 for s in lib.starts]), names=list(lib.names),
             ref_qpos=lib.qpos, ref_qvel=lib.qvel, ref_body_pos=lib.body_pos, ref_body_quat=lib.body_quat,
             ref_body_lin=lib.body_lin_vel, ref_body_ang=lib.body_ang_vel, ref_last=lib.last,
             goal_feat=TrackingEnv._goal_features(lib, q0))
-        self._init(prepared, device, step_fn, kinematics_fn)
+        self._init(prepared, device, step_fn, kinematics_fn, recovery)
 
     @classmethod
-    def from_reference(cls, reference, device="cuda", step_fn=None, kinematics_fn=None):
+    def from_reference(cls, reference, device="cuda", step_fn=None, kinematics_fn=None, recovery=None):
         """Bind current prepared reference constants (also useful for fresh synthetic tests)."""
         obj = cls.__new__(cls)
-        obj._init(reference, device, step_fn, kinematics_fn)
+        obj._init(reference, device, step_fn, kinematics_fn, recovery)
         return obj
 
-    def _init(self, reference, device, step_fn, kinematics_fn):
+    def _init(self, reference, device, step_fn, kinematics_fn, recovery=None):
         self.cfg = reference.cfg
         if self.cfg.action_rate_space not in ("setpoint", "raw"):
             raise ValueError("action_rate_space must be setpoint or raw")
@@ -200,6 +211,13 @@ class TorchTrackingEnv:
             step_fn = step_fn or torch_ffi.step
             kinematics_fn = kinematics_fn or torch_ffi.kinematics
         self.engine_step, self.engine_kinematics = step_fn, kinematics_fn
+        self.recovery = recovery
+        self.compact_keys, self.state_keys = COMPACT_KEYS, STATE_KEYS
+        if recovery is not None:
+            rows = recovery_rows.recovery_rows(self.ref_qpos, self.starts, self.ref_last, reference.names, recovery)
+            self.get_up_last, self.start_frames = rows["get_up_last"], rows["start_frames"]
+            self.command_frames, self.recovery_counts = rows["command_frames"], rows["counts"]
+            self.compact_keys, self.state_keys = COMPACT_KEYS + RECOVERY_KEYS, STATE_KEYS + RECOVERY_KEYS
 
     def tables(self):
         return {name: getattr(self, name) for name in self.TABLES}
@@ -224,10 +242,12 @@ class TorchTrackingEnv:
                           state["qvel"][..., 6:]*(1/5.0), state["qvel"][..., 3:6]*(1/2.0),
                           gravity_b(state["qpos"][..., 3:7]), action), -1)
 
-    def anchor_rel(self, state):
+    def anchor_rel(self, state, offset=None):
         frame = state["frame"]
         ra_p, ra_q = state["xpos"][:, self.torso_id], state["xquat"][:, self.torso_id]
         ma_p, ma_q = self.ref_body_pos[frame, self.anchor_k], self.ref_body_quat[frame, self.anchor_k]
+        if offset is not None:
+            ma_p = ma_p + offset
         position = quat_rotate(ma_p-ra_p, quat_inv(ra_q))
         rotation = quat_to_matrix(quat_mul(quat_inv(ra_q), ma_q))
         return torch.cat((position, rotation[..., :, 0], rotation[..., :, 1]), -1)
@@ -248,21 +268,30 @@ class TorchTrackingEnv:
         return state["hist"].flatten(1), self.goal(state, goal_noise)
 
     def critic_obs(self, state):
+        offset = None
+        if self.recovery is not None:
+            # While the hidden row is followed the critic reads it; the command reference is moved by the offset.
+            state = {**state, "frame": torch.where(state["recovering"], state["hidden_frame"], state["frame"])}
+            offset = planar(state["command_offset"])
         q, frame = state["qpos"], state["frame"]
         root_error = torch.cat((q[:, 2:3]-self.ref_qpos[frame, 2:3],
                                 quat_rotate(state["qvel"][:, :3], quat_inv(yaw_quat(q[:, 3:7])))), -1)
         xi = torch.cat(((state["friction"][:, None]-0.75)/0.45, state["enc_bias"]/0.01,
                         state["com"]/0.05), -1)
-        anchor = self.anchor_rel(state)
+        anchor = self.anchor_rel(state, offset)
         goal = torch.cat((self.goal_ref(frame), anchor[:, 3:9]), -1)
         return torch.cat((self.proprio(state), goal, root_error, anchor, xi), -1)
 
-    def reset(self, frame, noise=None):
+    def reset(self, frame, noise=None, body_frame=None):
+        """Episode starts at the reference rows ``frame``; the body is placed at the rows ``body_frame`` (``frame`` when
+        not given) with the reset noise. With the recovery setting, a start whose body row differs from its command
+        row follows the hidden row from the body row."""
         if (self.cfg.dr or self.cfg.reset_noise or self.cfg.obs_noise) and noise is None:
             raise ValueError("Randomized resets require explicit unit-uniform samples")
         frame = frame.to(dtype=torch.int32)
+        body = frame if body_frame is None else body_frame.to(dtype=torch.int32)
         batch = frame.shape[0]
-        qpos, qvel = self.ref_qpos[frame], self.ref_qvel[frame]
+        qpos, qvel = self.ref_qpos[body], self.ref_qvel[body]
         if self.cfg.reset_noise:
             rpy = noise["rotation"]*self.reset_rotation_limits
             angle = torch.linalg.vector_norm(rpy, dim=-1, keepdim=True)
@@ -284,7 +313,11 @@ class TorchTrackingEnv:
         if self.cfg.obs_noise:
             p0 = p0 + noise["proprio"]*self.noise_limits
         state["hist"] = p0[:, None].expand(-1, HIST, -1).clone()
-        return {key: state[key] for key in STATE_KEYS}
+        if self.recovery is not None:
+            count = torch.zeros_like(frame)
+            state.update(hidden_frame=body.clone(), recovering=body != frame, error_controls=count,
+                         blend_left=count.clone(), command_offset=torch.zeros_like(qpos[:, :2]))
+        return {key: state[key] for key in self.state_keys}
 
     def action_base(self, frame):
         if self.cfg.residual_action:
@@ -318,7 +351,62 @@ class TorchTrackingEnv:
                 raise ValueError("Explicit unit-uniform proprioception noise is required")
             p = p + proprio_noise*self.noise_limits
         result["hist"] = torch.cat((state["hist"][:, 1:], p[:, None]), 1)
+        if self.recovery is not None:
+            result.update(self.recovery_transition(state, result))
         return result
+
+    def termination_differences(self, qpos, frame):
+        """Absolute pelvis height and gravity-z differences against the reference rows ``frame``."""
+        reference = self.ref_qpos[frame]
+        dz = abs_real(qpos[:, 2]-reference[:, 2])
+        dg = abs_real(gravity_b(qpos[:, 3:7])[:, 2]-gravity_b(reference[:, 3:7])[:, 2])
+        return dz, dg
+
+    def within_termination(self, qpos, frame):
+        dz, dg = self.termination_differences(qpos, frame)
+        return (dz <= self.cfg.term_height) & (dg <= self.cfg.term_tilt)
+
+    def recovery_transition(self, state, result):
+        """The recovery keys after one control from ``state`` to ``result`` (whose command row has advanced), in this
+        order: the hidden row advances and holds at its get-up's last row; the control counts as target error when the
+        body is outside the termination thresholds of the hidden row, or, at the get-up's last row, of the command row;
+        at the get-up's last row within both the hidden row stops being followed, the blend back to the command starts
+        and the command reference is moved horizontally onto the body's torso (without gradient, yaw kept)."""
+        recovering, hidden = state["recovering"], state["hidden_frame"]
+        frame = result["frame"]
+        target = torch.where(recovering, torch.minimum(hidden+1, self.get_up_last[hidden]), frame)
+        hidden_within = self.within_termination(result["qpos"], target)
+        command_within = self.within_termination(result["qpos"], frame)
+        at_last = target == self.get_up_last[target]
+        error = ~hidden_within | (at_last & ~command_within)
+        zero = torch.zeros_like(state["error_controls"])
+        counted = torch.where(recovering & error, state["error_controls"]+1, zero)
+        switched = recovering & at_last & hidden_within & command_within
+        still = recovering & ~switched
+        torso = result["xpos"][:, self.torso_id, :2].detach()
+        offset = torch.where(switched[:, None], torso-self.ref_body_pos[frame, self.anchor_k, :2],
+                             state["command_offset"])
+        return dict(hidden_frame=target, recovering=still, error_controls=torch.where(still, counted, zero),
+                    blend_left=torch.where(switched, self.recovery.blend_controls,
+                                           torch.clamp_min(state["blend_left"]-1, 0)),
+                    command_offset=offset)
+
+    def recovery_outputs(self, start, stepped):
+        """Per control from ``start`` to ``stepped``: its regime, whether it switched back to the command, whether it
+        ended in the recovery stop, and the absolute yaw between the body's torso and the command's at the switch
+        (zero elsewhere)."""
+        switched = start["recovering"] & ~stepped["recovering"]
+        stop = stepped["recovering"] & (stepped["error_controls"] >= self.recovery.stop_controls)
+        body = recovery_rows.heading(stepped["xquat"][:, self.torso_id].detach())
+        command = recovery_rows.heading(self.ref_body_quat[stepped["frame"], self.anchor_k])
+        yaw = torch.where(switched, recovery_rows.wrap(body-command).abs(), torch.zeros_like(body))
+        return dict(regime=recovery_rows.regime(start["recovering"], start["blend_left"]), switched=switched,
+                    stop=stop, switch_yaw=yaw)
+
+    def target_frame(self, state):
+        """The reference row the reward and the termination penalty of a reached state read: the command row, or with
+        the recovery setting the row its control targeted (the hidden row for a control that started recovering)."""
+        return state["frame"] if self.recovery is None else state["hidden_frame"]
 
     def step(self, state, action, proprio_noise=None):
         outputs = self.engine_step(state["qpos"].contiguous(), state["qvel"].contiguous(),
@@ -335,7 +423,7 @@ class TorchTrackingEnv:
         return linear, angular
 
     def track(self, state):
-        frame = state["frame"]
+        frame = self.target_frame(state)
         position, orientation = state["xpos"][:, self.body_ids], state["xquat"][:, self.body_ids]
         linear, angular = self.body_velocity(state)
         rp, rq = self.ref_body_pos[frame], self.ref_body_quat[frame]
@@ -348,14 +436,28 @@ class TorchTrackingEnv:
                 self.ref_body_lin[frame], self.ref_body_ang[frame], ra_p, ra_q, ma_p)
 
     def reward(self, state, action, prev_action, prev=None):
+        """With the recovery setting the regime of the control comes from ``prev`` (required): a recovery control
+        scales the six tracking terms by the reward scale and reads the anchor's height alone, a blend control scales
+        them by (L - left + 1) / L of the L blend controls with ``left`` still to run, and outside recovery the anchor
+        reference is moved by the command offset."""
         pos, quat, linear, angular, rel_pos, rel_quat, ref_linear, ref_angular, ra_p, ra_q, ma_p = self.track(state)
         error = dict(root_pos=((ma_p-ra_p)**2).sum(-1),
-                     root_ori=quat_angle_sq(self.ref_body_quat[state["frame"], self.anchor_k], ra_q),
+                     root_ori=quat_angle_sq(self.ref_body_quat[self.target_frame(state), self.anchor_k], ra_q),
                      body_pos=((rel_pos-pos)**2).sum(-1).mean(-1),
                      body_ori=quat_angle_sq(rel_quat, quat).mean(-1),
                      body_lin_vel=((ref_linear-linear)**2).sum(-1).mean(-1),
                      body_ang_vel=((ref_angular-angular)**2).sum(-1).mean(-1))
+        if self.recovery is not None:
+            phase = recovery_rows.regime(prev["recovering"], prev["blend_left"])
+            anchor = (ma_p+planar(state["command_offset"])-ra_p)**2
+            error["root_pos"] = torch.where(phase == recovery_rows.RECOVERY, anchor[:, 2], anchor.sum(-1))
         terms = {name: DT*W[name]*torch.exp(-value/(STD[name]**2)) for name, value in error.items()}
+        if self.recovery is not None:
+            blend = self.recovery.blend_controls
+            left = prev["blend_left"].to(torch.float32)
+            factor = torch.where(phase == recovery_rows.RECOVERY, self.recovery.reward_scale,
+                                 torch.where(phase == recovery_rows.BLEND, (blend-left+1)/blend, 1.0))
+            terms = {name: value*factor for name, value in terms.items()}
         terms["action_rate"] = DT*W["action_rate"]*(self.action_change(action, prev_action, prev)**2).sum(-1)
         joints = state["qpos"][:, 7:]
         zero = torch.zeros_like(joints)
@@ -364,14 +466,21 @@ class TorchTrackingEnv:
         return sum(terms.values()), terms
 
     def terminated(self, state):
-        q, reference = state["qpos"], self.ref_qpos[state["frame"]]
-        dz = abs_real(q[:, 2]-reference[:, 2])
-        dg = abs_real(gravity_b(q[:, 3:7])[:, 2]-gravity_b(reference[:, 3:7])[:, 2])
+        """The recipe's termination of a reached state. With the recovery setting the height and tilt terms against
+        the command row are masked while the hidden row is followed, and the recovery stop (stop_controls consecutive
+        controls of target error) terminates."""
+        q = state["qpos"]
+        dz, dg = self.termination_differences(q, state["frame"])
         bad = ~torch.isfinite(q).all(-1) | ~torch.isfinite(state["qvel"]).all(-1)
-        return (dz > self.cfg.term_height) | (dg > self.cfg.term_tilt) | bad
+        outside = (dz > self.cfg.term_height) | (dg > self.cfg.term_tilt)
+        if self.recovery is not None:
+            recovering = state["recovering"]
+            outside = outside & ~recovering
+            bad = bad | (recovering & (state["error_controls"] >= self.recovery.stop_controls))
+        return outside | bad
 
     def hazard_features(self, state):
-        q, v, frame = state["qpos"], state["qvel"], state["frame"]
+        q, v, frame = state["qpos"], state["qvel"], self.target_frame(state)
         rq, rv = self.ref_qpos[frame], self.ref_qvel[frame]
         ez = q[:, 2]-rq[:, 2]
         rate_z = torch.sign(ez)*(v[:, 2]-rv[:, 2])
@@ -382,16 +491,15 @@ class TorchTrackingEnv:
         return torch.stack((self.cfg.term_height-abs_real(ez), rate_z,
                             self.cfg.term_tilt-abs_real(et), torch.sign(et)*(gdot-grdot)), -1)
 
-    @staticmethod
-    def compact(state):
-        return {key: state[key] for key in COMPACT_KEYS}
+    def compact(self, state):
+        return {key: state[key] for key in self.compact_keys}
 
     def restore(self, compact):
         qn, xpos, xquat, cvel, subtree_com = self.engine_kinematics(compact["qpos"].contiguous(),
             compact["qvel"].contiguous(), compact["com"].contiguous())
         state = {**compact, "qpos": qn, "xpos": xpos, "xquat": xquat,
                  "cvel": cvel, "subtree_com": subtree_com}
-        return {key: state[key] for key in STATE_KEYS}
+        return {key: state[key] for key in self.state_keys}
 
     def clip_ended(self, state):
         return state["frame"] >= self.ref_last[state["frame"]]
