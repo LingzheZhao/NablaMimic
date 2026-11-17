@@ -44,7 +44,9 @@ exactly the parser's arguments, train.FIXED and TORCH_RECORDED_FIELDS, and the m
 the declared contact capacity. Its it_N.pkl holds exactly TORCH_CHECKPOINT_FIELDS (and actor_ema when actor_ema > 0),
 with its own counts completed_updates and ema_updates: iter and completed_updates must equal N, env_steps
 N * num_envs * horizon, and ema_updates N with averaging and 0 without. A run started with --initial-checkpoint counts
-its updates from 0 like any other; the declaration names the file its initial weights came from.
+its updates from 0 like any other; the declaration names the file its initial weights came from. A run trained with
+the recovery options (RECOVERY.md) exports its policy, but not its critic: that critic reads a hidden get-up row in
+place of the command's goal while recovery lasts, which the critic file's input declaration does not describe.
 
   python -m nablamimic.export_bm_policy --checkpoint RUN/ckpt/it_011667.pkl --run-config RUN --policy live \\
       --artifact-id POLICY_ID --source-artifact-id CHECKPOINT_ID --reference-manifest MANIFEST.json \\
@@ -438,6 +440,10 @@ def critic_arrays(checkpoint, cfg, nu):
 
 def build_critic_file(checkpoint, cfg, *, label, checkpoint_name, run_dir, source_revision, nu):
     """(arrays, declaration) of the critic and its input normaliser (format "bm-nabla-critic-v1")."""
+    if training_framework(cfg) == "torch" and cfg["recovery_share"] is not None:
+        raise ValueError("the critic of a run with the recovery options reads a hidden get-up row in place of the "
+                         "command's goal while recovery lasts; the critic file declares the command's goal, so it is "
+                         "not exported")
     if not source_revision:
         raise ValueError("a source revision is required")
     recorded = cfg.get("git_commit")

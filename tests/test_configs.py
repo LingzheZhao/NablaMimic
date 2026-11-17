@@ -1,7 +1,10 @@
 """The configuration files resolve (includes, last value wins) and parse with the trainers' argument parsers (CPU, no
 data needed)."""
 
+from argparse import Namespace
+import importlib.util
 from pathlib import Path
+import unittest
 
 import pytest
 
@@ -108,6 +111,35 @@ def test_ppo():
         assert (x.steps, x.epochs, x.minibatches, x.lr, x.desired_kl, x.clip) == (24, 5, 4, 1e-3, 0.01, 0.2)
         assert (x.value_coef, x.entropy, x.gamma, x.lam, x.max_grad_norm, x.init_std) == (1, 0.005, 0.99, 0.95, 1, 1)
         assert (x.hours, x.ckpt_minutes, x.ckpt_dense, x.solver_iterations) == (6, 15, [1, 2], 10)
+
+
+@unittest.skipIf(importlib.util.find_spec("torch") is None, "Optional PyTorch backend is not installed")
+class RecoveryConfigTest(unittest.TestCase):
+    """configs/absolute.args is the 0.2.0 recipe on NablaEngine with absolute actions, and configs/recovery.args adds
+    the recovery options with the values RECOVERY.md gives and nothing else; both pass the PyTorch trainer's
+    validation."""
+
+    def test_recovery_adds_only_the_recovery_options(self):
+        from nablamimic import torch_train
+        from nablamimic.recovery import OPTIONS, settings_from_args
+        base, absolute, recovery = (vars(parse(torch_train, name))
+                                    for name in ("base/ours.args", "absolute.args", "recovery.args"))
+        self.assertEqual(absolute, base)
+        self.assertEqual((absolute["physics"], absolute["residual_action"]), ("engine", False))
+        self.assertEqual({k for k in absolute if absolute[k] != recovery[k]}, set(OPTIONS))
+        self.assertTrue(all(absolute[k] is None for k in OPTIONS))
+        for parsed in (absolute, recovery):
+            torch_train.validate_args(Namespace(**parsed))
+        settings = settings_from_args(Namespace(**recovery))
+        getups = ("fallAndGetUp1_subject1", "fallAndGetUp1_subject5", "fallAndGetUp2_subject2",
+                  "fallAndGetUp2_subject3", "fallAndGetUp3_subject1")
+        self.assertEqual(settings.hidden_clips, getups)
+        self.assertEqual(set(settings.command_excluded_clips), set(getups) | {"fallAndGetUp1_subject4"})
+        self.assertEqual((settings.share, settings.low_pelvis_height, settings.low_pelvis_up_z,
+                          settings.upright_run_rows, settings.longest_span_rows, settings.command_upright_rows,
+                          settings.reward_scale, settings.stop_controls, settings.blend_controls),
+                         (0.5, 0.5, 0.5, 50, 375, 500, 2.5, 100, 75))
+        self.assertEqual(settings.command_upright_rows, absolute["max_episode_steps"])
 
 
 @pytest.mark.parametrize("name", sorted(str(p.relative_to(CONFIGS)) for p in CONFIGS.rglob("*.args")))

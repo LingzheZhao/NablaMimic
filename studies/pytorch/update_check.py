@@ -171,7 +171,7 @@ def main():
             w=jnp.zeros((1, HORIZON, BATCH)), count=jnp.int32(0), it=jnp.int32(0), opt=opt_r.init(actor))
         tenv = SimpleNamespace(**{**vars(env), 'device': torch.device('cpu'),
             'action_scale': tn.tree_from_jax(env.action_scale),
-            'valid': torch.tensor([i < 200 and i % 50 != 49 for i in range(201)])})
+            'valid': torch.tensor([i < 200 and i % 50 != 49 for i in range(201)]), 'recovery': None})
         sampler = ResetSampler(tenv, cfg.max_episode_steps, cfg.gamma, cfg.uniform_over)
         aux = dict(bins=jnp.asarray(host(sampler.bin_index), dtype=jnp.int32),
                    valid=jnp.asarray(host(sampler.valid)), bin_count=jnp.asarray(host(sampler.bin_count)))

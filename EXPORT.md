@@ -67,13 +67,16 @@ holding `DIVERGED` or `HALTED` is refused.
 
 - `config.json` holds exactly the trainer's parsed arguments (its parser adds
   `--matmul-precision`, `--execution`, `--regression-batch`,
-  `--initial-checkpoint`, `--save-wall-minutes` and `--full-state-at-end` to
-  that of `train.py`), the fields of `train.FIXED` and the fields the trainer
+  `--initial-checkpoint`, `--save-wall-minutes`, `--full-state-at-end` and the
+  seven `--recovery-*` options to that of `train.py`), the fields of
+  `train.FIXED` and the fields the trainer
   adds: `training_framework`, `git_commit`, `devices`, `processes`,
   `observed_precision`, `gpu`, `torch_version`, `torch_cuda`, `random_stream`,
   `clock`, `inputs`, `declared_environment` and `engine`. A missing field or a
-  field outside that set is refused. The trainer records no `argv`,
-  `config_args`, `config_file`, `segments` or `git_dirty`.
+  field outside that set is refused; a run of a trainer with a different set
+  of options is exported with the exporter of that trainer's source revision.
+  The trainer records no `argv`, `config_args`, `config_file`, `segments` or
+  `git_dirty`.
 - The run must have completed its requested updates: `DONE` holds
   `completed`, `terminal.json` has status `completed` and a
   `completed_updates` equal to `iters`, and there is no `FAILED.json`. The
@@ -92,6 +95,11 @@ holding `DIVERGED` or `HALTED` is refused.
   `completed_updates` and `ema_updates`.
 - A run started with `--initial-checkpoint` counts its updates from zero like
   any other run.
+- A run trained with the [recovery options](RECOVERY.md) exports its policy
+  like any other run; its options are in `source_run.parsed_arguments`.
+  `--critic-out` is refused for it: during recovery its critic reads a hidden
+  get-up row in place of the command's goal rows, which the critic file's
+  input declaration does not describe.
 - The engine record in `config.json` states the build's contact capacity as
   `maxcon`, and `--engine-contact-capacity` must equal it. The record states
   no constraint-row capacity, so `--engine-constraint-row-capacity` is taken

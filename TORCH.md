@@ -198,6 +198,12 @@ follows the official floating-leaf rule and the requested decay/warmup settings.
 Other training variants remain constrained by the Torch trainer's explicit
 validation; BONES, SHAC and resumed execution are not implemented here.
 
+`configs/absolute.args` is the recipe of `configs/base/ours.args` (the 0.2.0
+defaults) with absolute actions on NablaEngine. `configs/recovery.args` adds the `--recovery-*` options, which
+train recovery from placed lying starts against a hidden get-up reference;
+[RECOVERY.md](RECOVERY.md) describes the setting, its log columns and its
+records.
+
 Network matmuls permit TF32 by default (`--matmul-precision nets_tf32`). Select
 `--matmul-precision highest` to disable TF32 before compilation and capture.
 The effective backend settings are recorded before setup, after setup and at
