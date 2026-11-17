@@ -266,10 +266,9 @@ on the CPU on generated libraries, records and logs.
 7604830cb368. In the training path the two differ in comments, docstrings and documents, and in `torch_train.py`, where
 7604830cb368 builds the same environment through `build_environment`. The trainings ran step 1's command with
 `--save-wall-minutes 6001 --no-full-state-at-end` added; 6,001 minutes is longer than any training, so no save fell on a
-wall-clock deadline. Every training and rollout ran on one NVIDIA GeForce RTX 4090 with 48 GB under a 350 W power limit,
-on NablaEngine with 96 contacts and 416 constraint rows per environment; the largest counts in a rollout of the eight
-saves are 35 contacts and 140 constraint rows. Every training completed its 3,000 updates; no training, rollout or
-reading failed or was skipped.
+wall-clock deadline. Every training and rollout ran on one NVIDIA GeForce RTX 4090 with 48 GB, on NablaEngine with 96
+contacts and 416 constraint rows per environment; the largest counts in a rollout of the eight saves are 35 contacts and
+140 constraint rows. Every training completed its 3,000 updates; no training, rollout or reading failed or was skipped.
 
 Before the trainings, `pair.json` also set a 4 h wall-time limit, counted a training ended by it as stopped, and
 required the two trainings of a seed to have equal engine records. The trainings ran without a wall-time limit, and the
@@ -324,27 +323,33 @@ against 40 at seed 0, 40 against 39 at seed 1).
 Two criteria were fixed before these saves were read: a control tracks at the first save with C ≥ 38 (a fixed count)
 and E ≤ 0.0341 m (the larger control E at 3,000 plus 0.005 m); a recovery policy gets up at the first save with
 R ≥ 50, R ≥ 52 (the larger control R at 3,000 plus 20) and J over R ≥ 0.5. Each training is read against its own
-condition's criterion; the two criteria are not compared across conditions. The clock runs from the launch of the
-training command to the file time of the save's checkpoint; the trainer's own total (below) starts about 20 s later,
-after the program has loaded the library and built its environment and networks.
+condition's criterion; the two criteria are not compared across conditions.
+
+The times below are those of timing trainings: the pair's training commands and seeds run again for the times, from
+empty compile caches, each on one NVIDIA GeForce RTX 4090 with 48 GB at a 450 W power limit, four at once on a host with
+two 64-core CPUs beside other jobs; their saves are not rolled out or read. The pair's own trainings ran on a card of
+the same model under a lower power limit, and their times are not used. The criterion is met at the given updates in
+the pair's own training; the seconds are those at which the timing training of the same condition and seed wrote that
+checkpoint, counted from the launch of the training command to the checkpoint's file time. The trainer's own total
+(below) starts about 20 s later, after the program has loaded the library and built its environment and networks.
 
 | Training | Own criterion first met | R / C / E (m) at 250 | at 500 | at 1,000 | at 2,000 | at 3,000 |
 | --- | --- | --- | --- | --- | --- | --- |
-| control, seed 0 | tracks at 1,750 updates, 1,107 s (C 39, E 0.0331 m) | 9 / 21 / 0.0808 | 17 / 32 / 0.0547 | 25 / 37 / 0.0414 | 21 / 40 / 0.0319 | 31 / 40 / 0.0286 |
-| control, seed 1 | tracks at 1,750 updates, 1,105 s (C 38, E 0.0332 m) | 10 / 20 / 0.0720 | 11 / 31 / 0.0561 | 17 / 38 / 0.0401 | 24 / 39 / 0.0321 | 32 / 40 / 0.0291 |
-| recovery, seed 0 | gets up at 500 updates, 442 s (R 97, J over R 92 / 93) | 7 / 10 / 0.1321 | 97 / 25 / 0.1093 | 99 / 35 / 0.0729 | 99 / 39 / 0.0464 | 99 / 39 / 0.0387 |
-| recovery, seed 1 | gets up at 500 updates, 443 s (R 97, J over R 94 / 96) | 4 / 1 / 0.1359 | 97 / 25 / 0.1060 | 99 / 29 / 0.0726 | 99 / 40 / 0.0445 | 99 / 40 / 0.0382 |
+| control, seed 0 | tracks at 1,750 updates, 908 s (C 39, E 0.0331 m) | 9 / 21 / 0.0808 | 17 / 32 / 0.0547 | 25 / 37 / 0.0414 | 21 / 40 / 0.0319 | 31 / 40 / 0.0286 |
+| control, seed 1 | tracks at 1,750 updates, 904 s (C 38, E 0.0332 m) | 10 / 20 / 0.0720 | 11 / 31 / 0.0561 | 17 / 38 / 0.0401 | 24 / 39 / 0.0321 | 32 / 40 / 0.0291 |
+| recovery, seed 0 | gets up at 500 updates, 367 s (R 97, J over R 92 / 93) | 7 / 10 / 0.1321 | 97 / 25 / 0.1093 | 99 / 35 / 0.0729 | 99 / 39 / 0.0464 | 99 / 39 / 0.0387 |
+| recovery, seed 1 | gets up at 500 updates, 366 s (R 97, J over R 94 / 96) | 4 / 1 / 0.1359 | 97 / 25 / 0.1060 | 99 / 29 / 0.0726 | 99 / 40 / 0.0445 | 99 / 40 / 0.0382 |
 
-**Training time** (`terminal.json`: `total_s`, `setup.seconds` and `training_s`):
+**Training time** of the timing trainings (`terminal.json`: `total_s`, `setup.seconds` and `training_s`):
 
 | Training | Total (s) | Set-up (s) | Training (s) |
 | --- | --- | --- | --- |
-| control, seed 0 | 1,763.3 | 135.5 | 1,627.2 |
-| control, seed 1 | 1,760.5 | 135.4 | 1,624.5 |
-| recovery, seed 0 | 1,783.5 | 149.5 | 1,633.5 |
-| recovery, seed 1 | 1,785.3 | 150.2 | 1,634.6 |
+| control, seed 0 | 1,436.6 | 114.5 | 1,321.3 |
+| control, seed 1 | 1,432.5 | 119.1 | 1,312.9 |
+| recovery, seed 0 | 1,440.4 | 124.7 | 1,315.2 |
+| recovery, seed 1 | 1,482.1 | 121.8 | 1,359.8 |
 
-The four trainings together take 7,092.6 s.
+The totals of the four timing trainings sum to 5,791.6 s.
 
 **What the results do not show.** Beyond "What the study does not show" above (two seeds per condition, placed starts
 drawn from the rows recovery training starts from, no pushes):
@@ -353,4 +358,5 @@ drawn from the rows recovery training starts from, no pushes):
   saves that complete the same clips. The control at 2,000 updates is at about equal exposure but not at equal updates
   or schedule place.
 - The saves at every 250 updates and the two criteria are exploratory for the outcome.
-- The times hold for one card, the RTX 4090 with 48 GB at 350 W.
+- The times hold for one card, the RTX 4090 with 48 GB at 450 W, from empty compile caches, with four timing trainings
+  at once on one host, one card each, beside other jobs.
