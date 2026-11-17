@@ -156,6 +156,41 @@ root velocity before the push are those of control `c - 1`'s `qpos` and
 `qvel` (`start_qpos` and `start_qvel` for `c = 0`); the push adds
 `push_velocity_xy` to that velocity.
 
+## Videos of a record
+
+`python -m nablamimic.render_rollouts` makes videos of a record by replaying
+its recorded states: no physics and no policy run, so a video is a replay,
+not a second rollout.
+
+```bash
+MUJOCO_GL=egl python -m nablamimic.render_rollouts --record rollouts/recovery_s0_3000 \
+    --trials 0 4 --stride 2 --out videos/recovery_s0_3000
+```
+
+A frame shows the robot after a control and, translucent, the reference pose
+of the command row after it (`frame_after`, see [Record](#record)): the
+command, not a prediction. A trial that ended stays at its last recorded
+state, labelled with the control that ended it. A second `--record` of the
+same trials and starts is shown beside the first; `--help` lists the options.
+For each trial the output folder (which must not exist) holds
+`trial_NNNN.mp4` (H.264), `trial_NNNN.png` (8 frames) and `trial_NNNN.json`.
+
+`--ghost robot` draws the command's pose with its root moved horizontally to
+the robot's root at every frame (height, orientation and joints unchanged),
+which keeps it beside a body placed at another clip's pose; the default
+`world` draws it where the command places it. A video ends `--tail` seconds
+(default 2) after the earlier of the control that ends the trial and the
+clip end, the first control whose `frame_after` equals `clip_last_row`; side
+by side, after the later of the two panels' points. It never runs past the
+record, and `all` or a negative tail shows every control. The JSON gives the
+options, the stopping control and its reason.
+
+The model is built by `robot.build` from `MENAGERIE_DIR`, and the reference
+poses are read from `MOTION_CACHE_DIR`. `LAFAN1_G1_DIR`, `MOTION_CACHE_DIR`
+and `MENAGERIE_DIR` must equal `settings.inputs` in the record's
+`description.json`. The tool needs an offscreen OpenGL backend selected by
+`MUJOCO_GL` (`egl` or `osmesa`) and `ffmpeg` with libx264 on `PATH`.
+
 ## Tests
 
 `tests/test_engine_rollouts.py` runs the rollouts on CPU with a synthetic
@@ -175,3 +210,7 @@ They leave out what only the engine establishes (its per-environment report,
 the normalised positions, the dynamics of a push) and `main`: the run,
 library-path, checkpoint and capacity-bit checks and the files written. These
 need a GPU run.
+
+`tests/test_render_rollouts.py` checks the replay and its refusals with a
+synthetic record and clip cache, and renders a short video where
+`MUJOCO_GL=egl` opens (otherwise it checks the refusal).
