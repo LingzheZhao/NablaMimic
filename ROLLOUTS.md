@@ -156,6 +156,161 @@ root velocity before the push are those of control `c - 1`'s `qpos` and
 `qvel` (`start_qpos` and `start_qvel` for `c = 0`); the push adds
 `push_velocity_xy` to that velocity.
 
+## Rollouts on MuJoCo C
+
+`python -m nablamimic.mujoco_rollouts` runs the same rollouts with the
+physics stepped by MuJoCo's C engine (the `mujoco` package) instead of
+NablaEngine:
+
+```bash
+python -m nablamimic.mujoco_rollouts --run runs/recovery_s0 --iter 3000 \
+    --scene scene.json --termination nonfinite --controls 1000 --threads 16 \
+    --out rollouts/recovery_s0_3000_mujoco_c
+```
+
+The options are those of `engine_rollouts` with two more: `--threads`, the
+threads that step the trials (MuJoCo releases the interpreter lock while it
+steps), and `--checks RECORD` (below). The requirements are the same, except
+that NablaEngine is needed only by `--checks`.
+
+Only the step and kinematics functions of `TorchTrackingEnv` differ. The
+scene, the run's environment, the observations and history, the action base,
+scale and setpoint range, the placement, the policy on the CUDA device at the
+run's matrix-product precision, the terminations, the loop (`rollout`), the
+record fields and the description's fields are those of `engine_rollouts`. The
+environment is built as `torch_train.build_environment` builds it; the program
+makes the same construction itself because that function takes no kinematics
+function.
+
+**Model.** MuJoCo C steps `env.m`, the model object that `engine_rollouts`
+builds NablaEngine from (`env.build_model`: the Menagerie scene's options with
+the run's solver iterations and a 5 ms timestep, the mjlab contact pairs and
+PD gains, the widened setpoint range, sensors disabled), unchanged. The
+program refuses a model with actuator activations, with an actuator that does
+not drive the hinge joint at `qpos[7 + i]` (the order of actions, reference
+and record), with more than one kinematic tree, with a solver other than
+Newton, an integrator other than implicitfast or a friction cone other than
+pyramidal (the only ones NablaEngine steps), or with a geom pair that the
+contype / conaffinity filter lets collide besides the explicit pairs. The
+floor keeps its contype and conaffinity; every robot geom has zero, so the
+filter adds no pair.
+
+**State.** Each trial keeps one float64 `MjData` for the whole trial. A
+control sets `ctrl`, calls `mj_step` four times (4 x 5 ms), and then
+`mj_kinematics`, `mj_comPos` and `mj_comVel`, because after `mj_step` the body
+poses are those before its last integration. The environment receives float32
+copies (in `qpos` with the root quaternion normalised, as NablaEngine hands it
+out). A control continues the trial's `MjData` when the state handed in is the
+copy handed out. A push, where only `qvel[0:2]` differs, adds the float64
+difference of the two float32 velocities, which differs from
+`push_velocity_xy` by float32 rounding. Any other state seeds the `MjData`
+from the state handed in (`mj_resetData`, then `qpos`, `qvel` and the warm
+start): the placement, with a zero warm start as at NablaEngine's reset, and
+an ended trial, which the loop holds at its earlier state and whose result is
+not used. The warm start between controls is MuJoCo's own `qacc_warmstart`.
+
+**Set-up differences.** These are the differences other than the engine
+itself; `engine.differences` in `description.json` lists them too.
+
+| Item | NablaEngine | MuJoCo C |
+| --- | --- | --- |
+| state between controls | float32, re-entered at every control | float64 `MjData`, float32 copies handed out |
+| solver | Newton in float32 with the model's iterations, tolerance (scaled by the mean inertia) and impratio, an exact line search of at most 40 steps that uses neither line-search option (NablaEngine's model classification, `nablaengine.model.fields`; check (b) measures the step) | Newton in float64 with the model's iterations, tolerance, line-search iterations and tolerance, and impratio |
+| constraint islands | one problem per world | each island solved on its own, with its own tolerance exit, unless `mjDSBL_ISLAND` is set (`engine.constraint_islands` in the description); the model is one kinematic tree, so a substep has at most one island |
+| integrator, cone, timestep, substeps | implicitfast, pyramidal, 5 ms, 4 | the model's, refused unless implicitfast and pyramidal; 5 ms, 4 |
+| actuators and gains | the model's gain and bias and, where a joint is `actfrclimited`, the force limit `jnt_actfrcrange` (NablaEngine's model classification); `ctrl` is not clamped to `ctrlrange` (its documented semantics); check (b) on lifted trials measures the actuators | the model's gain and bias, the force limit `jnt_actfrcrange` where a joint is `actfrclimited`, and, where an actuator is `ctrllimited`, `ctrl` clamped to the float64 `ctrlrange` after the environment has clipped it to the float32 copy of that range; check (c) gives the flags |
+| contacts | the explicit pairs; a fixed number of contacts and constraint rows per world (the build's record in `engine` of an `engine_rollouts` description), beyond which they are dropped (bits 4 and 16) | the explicit pairs; contacts or rows dropped only when MuJoCo's arena is full, reported by its warnings as bits 4 and 16 |
+| foot friction, torso centre of mass | per trial (1 and zero without randomisation) | the model's (1) and zero; any other value is refused |
+| divergence | a non-finite state | MuJoCo resets a trial's data when `qpos`, `qvel` or `qacc` holds a value that is non-finite or above 1e10 in magnitude; that control's state is handed out as NaN |
+
+The divergence rule differs from the record's non-finite term in two ways: a
+finite value above 1e10 counts, and MuJoCo checks positions and velocities at
+the start of a step, so a state that becomes too large in a control's last
+substep is reported at the next control.
+
+**Record.** The fields and their meaning are those above.
+`engine_newton_iterations`, `engine_contacts` and `engine_constraint_rows` are
+MuJoCo's `solver_niter` (the largest over its constraint islands, of which the
+model has at most one), `ncon` and `nefc` of the last substep.
+`engine_info_bits` holds bits 4 and 16 from MuJoCo's contact-full and
+constraint-full warnings in any substep, and no other bit: NablaEngine's other
+bits mark model features it does not step (its documentation), and MuJoCo C
+steps every feature of the model. The capacity fields follow from those two
+bits. `description.json` has the keys of `engine_rollouts`; its `engine`
+describes MuJoCo C (version, threads, options and flags, the number of pairs
+and kinematic trees, whether constraint islands are on, the set-up
+differences), and `engine_diagnostics` holds the program's
+counters: calls, trial controls, substeps, trial controls that seed, push,
+continue or diverge, trial controls with either capacity bit, and MuJoCo's
+warnings by text. As with NablaEngine, the counters and the warnings include
+ended trials, which the loop still steps, so an ended trial that diverges
+counts at every later control. After the rollouts the program raises unless
+the seeded trial controls are the placements and the controls after each
+trial's end: an unended trial is seeded once.
+
+A reader of `engine_rollouts` records that requires `engine_diagnostics` and
+compares only `scene_content`, `termination`, `controls`, `actor_key` and
+`settings.inputs` with its study, and `run`, `checkpoint`, `completed_updates`,
+`actor_key` and `run_source_revision` across the rollouts of a save, reads a
+MuJoCo C record as it reads a NablaEngine one. The recovery pair study's reader
+(`studies/recovery/readings.py`, not part of this branch) compares these keys.
+It does not compare `engine`, so it does not refuse rollouts of a save that mix
+the two engines, and its readings name the engine only through the rollout
+directories they list. Whoever reads a save keeps its rollouts on one engine
+and names that engine in the rollout directories or beside the readings.
+
+### Check mode
+
+`--checks RECORD`, with RECORD an `engine_rollouts` output of the same scene,
+termination, library inputs and clips, writes `checks.json` in `--out` instead
+of rolling out. It decides nothing: differences are reported, not held to a
+tolerance. It raises when RECORD's `engine` is not NablaEngine's build record
+(a MuJoCo C rollout is refused), when the record's rows are not the scene's,
+when a placed tracked body lies nearest another recorded body (the body order
+differs), and on the model refusals above (the joint order among them).
+
+- (a) Placement: every trial of the scene is placed through the environment's
+  reset with MuJoCo C kinematics; for each start field (`start_qpos`,
+  `start_qvel`, `start_body_pos_w`, `start_body_quat_w`) the largest
+  difference from the record, its trial, and the entries finite in only one.
+- (b) One control: from the placed state and the policy's action at it, one
+  control of NablaEngine (twice) and of MuJoCo C (twice, each from a seeded
+  `MjData`), on the same float32 inputs. First with the pelvis raised 2 m, so
+  that no floor contact acts; self-contacts and joint-limit rows may remain,
+  so each trial's contacts, constraint rows and iterations in each engine (of
+  the last substep, as both engines report them) are given, for MuJoCo C also
+  the largest contact count over the four substeps, and the differences again
+  over the trials without contacts at the last substep in either
+  (`trials_without_contacts_at_last_substep`). This tests the adapter:
+  actuators, gains, the actuator force limit and `ctrl` clamping, integrator
+  and gravity. Then as
+  placed, with contact. MuJoCo C minus NablaEngine stands beside NablaEngine
+  minus NablaEngine (the floor) and MuJoCo C minus MuJoCo C.
+- (c) Model: every option of `m.opt`, the disable and enable flags by name,
+  each geom's body, type, contype, conaffinity and condim, the pairs, the
+  actuators (gain, bias, ranges and their limit flags, armature, damping,
+  frictionloss), and the geom
+  pairs outside the explicit pairs (none).
+- (d) Repeat: two MuJoCo C rollouts of the first 50 controls of the trials
+  (fewer with a smaller `--controls`; a later push does not act); whether
+  their records are identical byte for byte (so +0.0 and -0.0 differ), else
+  the differing fields and the size of each difference (the largest absolute
+  difference of a floating-point field, 0 when only signs of zero or NaN
+  payloads differ; the count of unequal entries otherwise).
+
+MuJoCo's warnings during the checks are in `mujoco_warnings`.
+
+### What a comparison of the two engines' records shows
+
+Both records are read by the same reader, so a save's readings (get-ups,
+rejoins, falls, completed clips, body-position error) can be set side by side
+for the two engines, and the trials that change outcome can be listed beside
+the trials that change outcome between repeated rollouts on one engine. The
+engines differ in implementation, solver details and precision together, so a
+difference is not attributed to one of them. A closed-loop trial grows small
+differences, and whether a NablaEngine rollout repeats trial by trial is not
+established here, so single trials are not compared one to one.
+
 ## Tests
 
 `tests/test_engine_rollouts.py` runs the rollouts on CPU with a synthetic
@@ -175,3 +330,26 @@ They leave out what only the engine establishes (its per-environment report,
 the normalised positions, the dynamics of a push) and `main`: the run,
 library-path, checkpoint and capacity-bit checks and the files written. These
 need a GPU run.
+
+`tests/test_mujoco_rollouts.py` runs MuJoCo C on CPU with the G1 model the
+trainer builds (skipped without the Menagerie checkout) and a synthetic
+library. It covers: the model passes the refusals and collides only through
+its pairs, and a swapped actuator order, another solver, integrator or cone, a
+colliding geom and foot pairs outside the model are refused; the island
+setting described is the model's flag; controls continue one float64
+`MjData` bit-equal to an uninterrupted one, which seeding from the float32
+copies does not give; a push adds its change in float64 and leaves the other
+trials alone; another state seeds its trial; the bodies are those of the
+stepped positions and the counts are MuJoCo's; thread counts give equal
+results; a diverging trial is handed out as NaN and seeded by its next state;
+warnings are collected from every thread and concurrent counts are not lost;
+the kinematics; the refused settings; the record has the fields, shapes and
+types of `engine_rollouts.rollout` with a stand-in forward of the engine's
+output layout; an ended trial is seeded at every later control, leaves the
+other trials' records bit-equal and is counted by the seed check, which
+refuses another count; two rollouts repeat byte for byte, and a sign of zero
+counts as a difference; the check mode with MuJoCo C standing in for
+NablaEngine; a MuJoCo C record is refused as the check mode's record; the
+placement check's refusals; the description has the keys of the description
+literal in `engine_rollouts.main`; the command line. `main`, the
+policy on a CUDA device and NablaEngine itself need a GPU run.
